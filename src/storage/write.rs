@@ -1,53 +1,10 @@
-use std::{
-    fmt::Display,
-    fs,
-    io::{self, Error, Write},
-    path::Path,
-};
-
 use serde::{
-    de,
     ser::{self, SerializeSeq},
-    Deserialize, Serialize,
+    Serialize,
 };
+use std::io;
 
-use crate::DbType;
-
-#[derive(Debug)]
-enum SerdeError {
-    Message(String),
-    WritingError(io::Error),
-}
-impl std::error::Error for SerdeError {}
-impl ser::Error for SerdeError {
-    fn custom<T>(msg: T) -> Self
-    where
-        T: std::fmt::Display,
-    {
-        Self::Message(msg.to_string())
-    }
-}
-impl de::Error for SerdeError {
-    fn custom<T>(msg: T) -> Self
-    where
-        T: std::fmt::Display,
-    {
-        Self::Message(msg.to_string())
-    }
-}
-impl Display for SerdeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Message(msg) => f.write_str(msg),
-            Self::WritingError(err) => err.fmt(f),
-        }
-    }
-}
-impl From<io::Error> for SerdeError {
-    fn from(value: io::Error) -> Self {
-        Self::WritingError(value)
-    }
-}
+use super::SerdeError;
 
 struct Serializer<'w, T: io::Write> {
     writer: &'w mut T,
@@ -77,7 +34,7 @@ impl<'a, 'w, T: io::Write> ser::Serializer for &'a mut Serializer<'w, T> {
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
         let mut seq = self.serialize_seq(Some(v.len()))?;
         for b in v {
-            seq.serialize_element(v)?;
+            seq.serialize_element(b)?;
         }
         seq.end()
     }
@@ -163,22 +120,22 @@ impl<'a, 'w, T: io::Write> ser::Serializer for &'a mut Serializer<'w, T> {
     }
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-        self.serialize_unit()
+        unimplemented!();
     }
 
-    fn serialize_some<U>(self, value: &U) -> Result<Self::Ok, Self::Error>
+    fn serialize_some<U>(self, _value: &U) -> Result<Self::Ok, Self::Error>
     where
         U: ?Sized + Serialize,
     {
-        value.serialize(self)
+        unimplemented!();
     }
 
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-        self.serialize_u8(0)
+        unimplemented!();
     }
 
     fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
-        self.serialize_unit()
+        unimplemented!();
     }
 
     fn serialize_unit_variant(
@@ -243,7 +200,7 @@ impl<'a, 'w, T: io::Write> ser::Serializer for &'a mut Serializer<'w, T> {
         _variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        self.serialize_u32(variant_index);
+        self.serialize_u32(variant_index)?;
         self.serialize_seq(Some(len))
     }
 
@@ -383,42 +340,11 @@ impl<'a, 'w, T: io::Write> ser::SerializeStructVariant for &'a mut Serializer<'w
     }
 }
 
-fn to_writer<'w, W, T>(writer: &'w mut W, value: &T) -> Result<(), SerdeError>
+pub fn to_writer<'w, W, T>(writer: &'w mut W, value: &T) -> Result<(), SerdeError>
 where
     W: io::Write,
     T: Serialize,
 {
     let mut serializer = Serializer::build(writer);
     value.serialize(&mut serializer)
-}
-
-// fn init_db(db_file: &Path) -> Result<(), Error> {
-//     let file = fs::OpenOptions::new()
-//         .read(true)
-//         .write(true)
-//         .truncate(true)
-//         .open(db_file)?;
-
-//     // look for _metadata table. Create if does not exist.
-
-//     Ok(())
-// }
-
-// fn create_table(name: &str, schema: Vec<DbType>) -> Result {
-
-// }
-
-#[derive(Serialize, Deserialize)]
-struct Row {
-    vals: Vec<DbType>,
-}
-
-fn write_to_table(db_file: &Path, rows: Vec<Row>) -> Result<(), SerdeError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(db_file)?;
-    to_writer(&mut file, &rows)?;
-    file.flush()?;
-    Ok(())
 }

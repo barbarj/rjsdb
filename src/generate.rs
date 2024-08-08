@@ -61,7 +61,8 @@ impl Generate for String {
     }
 }
 
-const CHAR_GEN_UNICODE_CLAMP: u32 = 0x00ff; // Limits us to only latin characters
+// const CHAR_GEN_UNICODE_CLAMP: u32 = 0x00ff; // Limits us to only latin characters
+const CHAR_GEN_UNICODE_CLAMP: u32 = 0x007f; // Limits us to only latin characters
 impl Generate for char {
     fn generate(rng: &mut RNG) -> Self {
         let mut x = rng.next_value() % CHAR_GEN_UNICODE_CLAMP;
