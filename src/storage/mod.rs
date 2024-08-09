@@ -1,6 +1,6 @@
 use std::{
     fmt::{Display, Write as FmtWrite},
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
     path::Path,
     str::Utf8Error,
@@ -9,7 +9,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{de, ser, Deserialize, Serialize};
 
-use crate::DbType;
+use crate::{generate::Generate, DbType, DbValue};
 
 pub mod read;
 pub mod write;
@@ -22,7 +22,7 @@ pub struct Database {
     #[serde(skip)]
     file: Option<File>,
     pub db_header: DbHeader,
-    metadata_table: Table,
+    tables: Vec<Table>,
 }
 impl Database {
     pub fn init(db_file: &Path) -> Result<Self, SerdeError> {
@@ -48,22 +48,10 @@ impl Database {
             .write(true)
             .create_new(true)
             .open(db_file)?;
-        let db_header = DbHeader {
-            header_version: DB_HEADER_VERSION,
-            last_modified: Utc::now(),
-        };
-        let metadata_table = Table {
-            header: TableHeader {
-                header_version: TABLE_HEADER_VERSION,
-                row_header_version: ROW_HEADER_VERSION,
-                table_name: String::from("__metadata"),
-            },
-            rows: Vec::new(),
-        };
         let mut db = Database {
             file: Some(file),
-            db_header,
-            metadata_table,
+            db_header: DbHeader::new(),
+            tables: Vec::new(),
         };
         db.flush()?;
         Ok(db)
@@ -78,6 +66,29 @@ impl Database {
         file.flush()?;
         Ok(())
     }
+
+    fn table_exists(&self, name: &str) -> bool {
+        self.tables
+            .iter()
+            .find(|t| t.header.table_name == name)
+            .is_some()
+    }
+
+    pub fn create_table(&mut self, name: String, schema: Schema) -> Result<(), SerdeError> {
+        if self.table_exists(&name) {
+            return Err(SerdeError::TableAlreadyExists);
+        }
+        // TODO: Verify no column name duplicates
+        let table = Table::new(name, schema);
+        self.tables.push(table);
+        self.flush()
+    }
+
+    pub fn show_table_info(&self) {
+        for t in self.tables.iter() {
+            println!("{}", t.info());
+        }
+    }
 }
 
 const DB_HEADER_VERSION: u16 = 0;
@@ -85,6 +96,14 @@ const DB_HEADER_VERSION: u16 = 0;
 pub struct DbHeader {
     header_version: u16,
     pub last_modified: DateTime<Utc>,
+}
+impl DbHeader {
+    pub fn new() -> Self {
+        DbHeader {
+            header_version: DB_HEADER_VERSION,
+            last_modified: Utc::now(),
+        }
+    }
 }
 
 const TABLE_HEADER_VERSION: u16 = 0;
@@ -94,6 +113,67 @@ pub struct TableHeader {
     header_version: u16,
     row_header_version: u16,
     table_name: String,
+    schema: Schema,
+}
+impl TableHeader {
+    pub fn new(table_name: String, schema: Schema) -> Self {
+        TableHeader {
+            header_version: TABLE_HEADER_VERSION,
+            row_header_version: ROW_HEADER_VERSION,
+            table_name,
+            schema,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Column {
+    name: String,
+    _type: DbType,
+}
+impl Display for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{} ({:?})", self.name, self._type))
+    }
+}
+impl Generate for Column {
+    fn generate(rng: &mut crate::generate::RNG) -> Self {
+        let mut name = String::generate(rng);
+        name.truncate(6);
+        Column {
+            name,
+            _type: DbType::generate(rng),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Schema {
+    schema: Vec<Column>,
+}
+impl Schema {
+    pub fn new(cols: Vec<Column>) -> Self {
+        Schema { schema: cols }
+    }
+}
+impl Display for Schema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_char('[')?;
+        for c in self.schema.iter() {
+            c.fmt(f)?;
+        }
+        f.write_char(']')
+    }
+}
+impl Generate for Schema {
+    fn generate(rng: &mut crate::generate::RNG) -> Self {
+        let col_count = rng.next_value() % 5;
+        let mut cols = Vec::new();
+        for _ in 0..col_count {
+            cols.push(Column::generate(rng));
+        }
+        Schema { schema: cols }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -101,11 +181,24 @@ pub struct Table {
     header: TableHeader,
     rows: Vec<Row>,
 }
+impl Table {
+    pub fn new(table_name: String, schema: Schema) -> Self {
+        Table {
+            header: TableHeader::new(table_name, schema),
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn info(&self) -> String {
+        format!("{}: {}", self.header.table_name, self.header.schema)
+    }
+}
+
 // TODO: Privatize row
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Row {
     pub id: usize,
-    pub data: Vec<DbType>,
+    pub data: Vec<DbValue>,
 }
 impl Display for Row {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -127,6 +220,7 @@ pub enum SerdeError {
     Eof,
     UnparseableValue,
     Utf8ParsingError(std::str::Utf8Error),
+    TableAlreadyExists,
 }
 impl std::error::Error for SerdeError {}
 impl ser::Error for SerdeError {
@@ -154,6 +248,7 @@ impl Display for SerdeError {
             Self::Eof => f.write_str("Reached end of input"),
             Self::UnparseableValue => f.write_str("Unparseable value"),
             Self::Utf8ParsingError(err) => err.fmt(f),
+            Self::TableAlreadyExists => f.write_str("Table already exists"),
         }
     }
 }
@@ -166,15 +261,4 @@ impl From<Utf8Error> for SerdeError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8ParsingError(value)
     }
-}
-
-pub fn write_to_table(db_file: &Path, rows: &Vec<Row>) -> Result<(), SerdeError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(db_file)?;
-    write::to_writer(&mut file, &rows)?;
-    file.flush()?;
-    Ok(())
 }

@@ -538,7 +538,7 @@ impl<'de, 'a> VariantAccess<'de> for Enum<'a, 'de> {
     type Error = SerdeError;
 
     fn unit_variant(self) -> std::result::Result<(), Self::Error> {
-        unimplemented!()
+        Ok(())
     }
 
     fn newtype_variant_seed<T>(self, seed: T) -> std::result::Result<T::Value, Self::Error>
