@@ -13,18 +13,6 @@ use rjsdb::{
     storage::{self, read::from_bytes, Row, Schema},
     DbValue,
 };
-
-fn gen_row(rng: &mut RNG) -> Row {
-    let a = DbValue::Float(f32::generate(rng));
-    let b = DbValue::Integer(i32::generate(rng));
-    let c = DbValue::String(String::generate(rng));
-
-    Row {
-        id: usize::generate(rng),
-        data: Vec::from([a, b, c]),
-    }
-}
-
 fn main() {
     let mut rng = RNG::new();
 
@@ -34,12 +22,20 @@ fn main() {
         println!("db file removed");
     }
     let mut db = storage::Database::init(path).unwrap();
-    for _ in 0..3 {
-        let mut name = String::generate(&mut rng);
-        name.truncate(5);
-        db.create_table(name, Schema::generate(&mut rng)).unwrap();
+    let mut name = String::generate(&mut rng);
+    name.truncate(5);
+    let schema = Schema::generate(&mut rng);
+    db.create_table(&name, &schema).unwrap();
+
+    let mut rows = Vec::new();
+    for _ in 0..20 {
+        rows.push(schema.gen_row(&mut rng))
     }
+
+    db.insert_rows(&name, rows).unwrap();
     db.show_table_info();
+    db.flush().unwrap();
+
     drop(db);
 
     let db = storage::Database::init(path).unwrap();

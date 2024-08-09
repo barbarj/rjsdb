@@ -7,11 +7,20 @@ pub mod generate;
 pub mod storage;
 
 const DB_TYPE_COUNT: u32 = 3;
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum DbType {
     String,
     Integer,
     Float,
+}
+impl DbType {
+    pub fn generate_val(&self, rng: &mut generate::RNG) -> DbValue {
+        match self {
+            Self::Float => DbValue::Float(f32::generate(rng)),
+            Self::Integer => DbValue::Integer(i32::generate(rng)),
+            Self::String => DbValue::String(String::generate(rng)),
+        }
+    }
 }
 impl Generate for DbType {
     fn generate(rng: &mut generate::RNG) -> Self {
@@ -33,7 +42,7 @@ pub enum DbValue {
     Float(f32),
 }
 impl DbValue {
-    pub fn db_type(self) -> DbType {
+    pub fn db_type(&self) -> DbType {
         match self {
             Self::Float(_) => DbType::Float,
             Self::Integer(_) => DbType::Integer,
@@ -46,7 +55,7 @@ impl Display for DbValue {
         match self {
             Self::Float(v) => v.fmt(f),
             Self::Integer(v) => v.fmt(f),
-            Self::String(v) => v.fmt(f),
+            Self::String(v) => f.write_fmt(format_args!("\"{v}\"")),
         }
     }
 }

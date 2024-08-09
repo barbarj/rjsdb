@@ -2,6 +2,7 @@ use std::{
     fmt::{Display, Write as FmtWrite},
     fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
+    iter::zip,
     path::Path,
     str::Utf8Error,
 };
@@ -9,7 +10,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{de, ser, Deserialize, Serialize};
 
-use crate::{generate::Generate, has_duplicates, DbType, DbValue};
+use crate::{
+    generate::{Generate, RNG},
+    has_duplicates, DbType, DbValue,
+};
 
 pub mod read;
 pub mod write;
@@ -74,7 +78,7 @@ impl Database {
             .is_some()
     }
 
-    pub fn create_table(&mut self, name: String, schema: Schema) -> Result<(), SerdeError> {
+    pub fn create_table(&mut self, name: &str, schema: &Schema) -> Result<(), SerdeError> {
         if self.table_exists(&name) {
             return Err(SerdeError::TableAlreadyExists);
         }
@@ -87,7 +91,7 @@ impl Database {
         if has_duplicates(schema.schema.iter().map(|c| &c.name)) {
             return Err(SerdeError::DuplicateColumnNames);
         }
-        let table = Table::new(name, schema);
+        let table = Table::new(name.to_string(), schema.clone());
         self.tables.push(table);
         self.flush()
     }
@@ -96,6 +100,18 @@ impl Database {
         for t in self.tables.iter() {
             println!("{}", t.info());
         }
+    }
+
+    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<(), SerdeError> {
+        let table = self
+            .tables
+            .iter_mut()
+            .find(|t| t.header.table_name == table_name);
+        let table = match table {
+            Some(table) => table,
+            None => return Err(SerdeError::TableDoesNotExist),
+        };
+        table.insert_rows(rows)
     }
 }
 
@@ -134,7 +150,7 @@ impl TableHeader {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Column {
     name: String,
     _type: DbType,
@@ -158,13 +174,30 @@ impl Generate for Column {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Schema {
     schema: Vec<Column>,
 }
 impl Schema {
     pub fn new(cols: Vec<Column>) -> Self {
         Schema { schema: cols }
+    }
+
+    pub fn matches(&self, row: &Row) -> bool {
+        let our_types = self.schema.iter().map(|c| &c._type);
+        let their_types = row.data.iter().map(|v| v.db_type());
+        zip(our_types, their_types).all(|(a, b)| *a == b)
+    }
+
+    pub fn gen_row(&self, rng: &mut RNG) -> Row {
+        let mut data = Vec::new();
+        for col in self.schema.iter() {
+            data.push(col._type.generate_val(rng));
+        }
+        Row {
+            id: usize::generate(rng),
+            data,
+        }
     }
 }
 impl Display for Schema {
@@ -210,7 +243,22 @@ impl Table {
     }
 
     pub fn info(&self) -> String {
-        format!("{}: {}", self.header.table_name, self.header.schema)
+        format!(
+            "{}: {} || {} rows",
+            self.header.table_name,
+            self.header.schema,
+            self.rows.len()
+        )
+    }
+
+    fn insert_rows(&mut self, rows: Vec<Row>) -> Result<(), SerdeError> {
+        for row in rows {
+            if !self.header.schema.matches(&row) {
+                return Err(SerdeError::SchemaDoesntMatch);
+            }
+            self.rows.push(row);
+        }
+        Ok(())
     }
 }
 
@@ -219,6 +267,11 @@ impl Table {
 pub struct Row {
     pub id: usize,
     pub data: Vec<DbValue>,
+}
+impl Row {
+    pub fn schema(&self) -> Vec<DbType> {
+        self.data.iter().map(|r| r.db_type()).collect()
+    }
 }
 impl Display for Row {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -243,9 +296,11 @@ pub enum SerdeError {
 
     // These probably should be a different error type
     TableAlreadyExists,
+    TableDoesNotExist,
     DuplicateColumnNames,
     EmptyTableName,
     EmptySchemaProvided,
+    SchemaDoesntMatch,
 }
 impl std::error::Error for SerdeError {}
 impl ser::Error for SerdeError {
@@ -274,9 +329,11 @@ impl Display for SerdeError {
             Self::UnparseableValue => f.write_str("Unparseable value"),
             Self::Utf8ParsingError(err) => err.fmt(f),
             Self::TableAlreadyExists => f.write_str("Table already exists"),
+            Self::TableDoesNotExist => f.write_str("The requested table does not exist"),
             Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
             Self::EmptyTableName => f.write_str("An empty table name was provided"),
             Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
+            Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
         }
     }
 }
