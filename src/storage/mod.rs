@@ -9,7 +9,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{de, ser, Deserialize, Serialize};
 
-use crate::{generate::Generate, DbType, DbValue};
+use crate::{generate::Generate, has_duplicates, DbType, DbValue};
 
 pub mod read;
 pub mod write;
@@ -78,7 +78,15 @@ impl Database {
         if self.table_exists(&name) {
             return Err(SerdeError::TableAlreadyExists);
         }
-        // TODO: Verify no column name duplicates
+        if name.len() == 0 {
+            return Err(SerdeError::EmptyTableName);
+        }
+        if schema.schema.len() == 0 {
+            return Err(SerdeError::EmptySchemaProvided);
+        }
+        if has_duplicates(schema.schema.iter().map(|c| &c.name)) {
+            return Err(SerdeError::DuplicateColumnNames);
+        }
         let table = Table::new(name, schema);
         self.tables.push(table);
         self.flush()
@@ -139,6 +147,9 @@ impl Display for Column {
 impl Generate for Column {
     fn generate(rng: &mut crate::generate::RNG) -> Self {
         let mut name = String::generate(rng);
+        while name.len() == 0 {
+            name = String::generate(rng);
+        }
         name.truncate(6);
         Column {
             name,
@@ -159,15 +170,24 @@ impl Schema {
 impl Display for Schema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_char('[')?;
+        let mut first = true;
         for c in self.schema.iter() {
+            if !first {
+                f.write_str(", ")?;
+            }
             c.fmt(f)?;
+            first = false;
         }
         f.write_char(']')
     }
 }
 impl Generate for Schema {
     fn generate(rng: &mut crate::generate::RNG) -> Self {
-        let col_count = rng.next_value() % 5;
+        let mut col_count = rng.next_value() % 5;
+        while col_count == 0 {
+            col_count = rng.next_value() % 5;
+        }
+        let col_count = col_count;
         let mut cols = Vec::new();
         for _ in 0..col_count {
             cols.push(Column::generate(rng));
@@ -220,7 +240,12 @@ pub enum SerdeError {
     Eof,
     UnparseableValue,
     Utf8ParsingError(std::str::Utf8Error),
+
+    // These probably should be a different error type
     TableAlreadyExists,
+    DuplicateColumnNames,
+    EmptyTableName,
+    EmptySchemaProvided,
 }
 impl std::error::Error for SerdeError {}
 impl ser::Error for SerdeError {
@@ -249,6 +274,9 @@ impl Display for SerdeError {
             Self::UnparseableValue => f.write_str("Unparseable value"),
             Self::Utf8ParsingError(err) => err.fmt(f),
             Self::TableAlreadyExists => f.write_str("Table already exists"),
+            Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
+            Self::EmptyTableName => f.write_str("An empty table name was provided"),
+            Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
         }
     }
 }

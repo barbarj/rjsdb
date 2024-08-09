@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 use generate::Generate;
 use serde::{self, Deserialize, Serialize};
@@ -49,4 +49,19 @@ impl Display for DbValue {
             Self::String(v) => v.fmt(f),
         }
     }
+}
+
+fn has_duplicates<I, T>(seq: T) -> bool
+where
+    I: Eq + Hash,
+    T: Iterator<Item = I>,
+{
+    let mut seen = HashSet::new();
+    for i in seq {
+        if seen.contains(&i) {
+            return true;
+        }
+        seen.insert(i);
+    }
+    false
 }
