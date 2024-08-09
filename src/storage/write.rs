@@ -6,6 +6,8 @@ use std::io;
 
 use super::SerdeError;
 
+// TODO: Write some basic tests for all of this
+
 struct Serializer<'w, T: io::Write> {
     writer: &'w mut T,
 }

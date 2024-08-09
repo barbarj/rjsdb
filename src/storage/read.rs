@@ -7,6 +7,8 @@ use serde::{
 
 use super::SerdeError;
 
+// TODO: Write some basic tests for all of this
+
 type Result<T> = std::result::Result<T, SerdeError>;
 
 pub struct Deserializer<'de> {
@@ -33,10 +35,10 @@ where
 
 impl<'de> Deserializer<'de> {
     fn next_bytes(&mut self, num: usize) -> Option<&[u8]> {
-        let bytes = &self.input[0..num];
-        if bytes.len() < num {
+        if self.input.len() < num {
             return None;
         }
+        let bytes = &self.input[0..num];
         self.input = &self.input[num..];
         Some(bytes)
     }

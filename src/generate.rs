@@ -40,6 +40,14 @@ impl Generate for f32 {
         num as f32
     }
 }
+impl Generate for usize {
+    fn generate(rng: &mut RNG) -> Self {
+        let mut bytes = [0u8; 8];
+        bytes[0..4].copy_from_slice(rng.next_value().to_le_bytes().as_slice());
+        bytes[4..8].copy_from_slice(rng.next_value().to_le_bytes().as_slice());
+        usize::from_le_bytes(bytes)
+    }
+}
 
 const STRING_GEN_LENGTH_MAX: u32 = 100;
 impl Generate for String {
