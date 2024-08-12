@@ -102,16 +102,32 @@ impl Database {
         }
     }
 
-    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<(), SerdeError> {
-        let table = self
-            .tables
+    fn table_mut(&mut self, table_name: &str) -> Option<&mut Table> {
+        self.tables
             .iter_mut()
-            .find(|t| t.header.table_name == table_name);
-        let table = match table {
+            .find(|t| t.header.table_name == table_name)
+    }
+
+    fn table(&self, table_name: &str) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|t| t.header.table_name == table_name)
+    }
+
+    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<(), SerdeError> {
+        let table = match self.table_mut(table_name) {
             Some(table) => table,
             None => return Err(SerdeError::TableDoesNotExist),
         };
         table.insert_rows(rows)
+    }
+
+    pub fn table_scan(&self, table_name: &str) -> Result<impl Iterator<Item = &Row>, SerdeError> {
+        let table = match self.table(table_name) {
+            Some(table) => table,
+            None => return Err(SerdeError::TableDoesNotExist),
+        };
+        Ok(table.rows())
     }
 }
 
@@ -259,6 +275,10 @@ impl Table {
             self.rows.push(row);
         }
         Ok(())
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter()
     }
 }
 

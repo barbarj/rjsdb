@@ -13,6 +13,11 @@ use rjsdb::{
     storage::{self, read::from_bytes, Row, Schema},
     DbValue,
 };
+
+// TODO:
+// - Delete rows (how do other systems do this??)
+// - table scan access
+
 fn main() {
     let mut rng = RNG::new();
 
