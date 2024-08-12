@@ -52,12 +52,11 @@ impl Database {
             .write(true)
             .create_new(true)
             .open(db_file)?;
-        let mut db = Database {
+        let db = Database {
             file: Some(file),
             db_header: DbHeader::new(),
             tables: Vec::new(),
         };
-        db.flush()?;
         Ok(db)
     }
 
@@ -93,7 +92,7 @@ impl Database {
         }
         let table = Table::new(name.to_string(), schema.clone());
         self.tables.push(table);
-        self.flush()
+        Ok(())
     }
 
     pub fn destroy_table(&mut self, name: &str) -> Result<(), SerdeError> {
@@ -112,7 +111,7 @@ impl Database {
         }();
 
         self.tables.swap_remove(idx);
-        self.flush()
+        Ok(())
     }
 
     pub fn show_table_info(&self) {
@@ -156,6 +155,14 @@ impl Database {
             None => return Err(SerdeError::TableDoesNotExist),
         };
         Ok(table.rows())
+    }
+
+    pub fn table_schema(&self, table_name: &str) -> Result<&Schema, SerdeError> {
+        let table = match self.table(table_name) {
+            Some(table) => table,
+            None => return Err(SerdeError::TableDoesNotExist),
+        };
+        Ok(&table.header.schema)
     }
 }
 
