@@ -96,10 +96,30 @@ impl Database {
         self.flush()
     }
 
+    pub fn destroy_table(&mut self, name: &str) -> Result<(), SerdeError> {
+        if !self.table_exists(name) {
+            return Err(SerdeError::TableDoesNotExist);
+        }
+
+        // find table index
+        let idx = || -> usize {
+            for index in 0..self.tables.len() {
+                if self.tables[index].header.table_name == name {
+                    return index;
+                }
+            }
+            panic!("Should never happen");
+        }();
+
+        self.tables.swap_remove(idx);
+        self.flush()
+    }
+
     pub fn show_table_info(&self) {
         for t in self.tables.iter() {
             println!("{}", t.info());
         }
+        println!("------------");
     }
 
     fn table_mut(&mut self, table_name: &str) -> Option<&mut Table> {

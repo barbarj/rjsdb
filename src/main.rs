@@ -16,7 +16,7 @@ use rjsdb::{
 
 // TODO:
 // - Delete rows (how do other systems do this??)
-// - table scan access
+// - Destroy table
 
 fn main() {
     let mut rng = RNG::new();
@@ -43,6 +43,8 @@ fn main() {
 
     drop(db);
 
-    let db = storage::Database::init(path).unwrap();
+    let mut db = storage::Database::init(path).unwrap();
+    db.show_table_info();
+    db.destroy_table(&name).unwrap();
     db.show_table_info();
 }
