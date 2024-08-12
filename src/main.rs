@@ -15,8 +15,7 @@ use rjsdb::{
 };
 
 // TODO:
-// - Delete rows (how do other systems do this??)
-// - Destroy table
+// - Universally flush or only manually flush
 
 fn main() {
     let mut rng = RNG::new();
@@ -45,6 +44,15 @@ fn main() {
 
     let mut db = storage::Database::init(path).unwrap();
     db.show_table_info();
-    db.destroy_table(&name).unwrap();
+
+    assert_eq!(db.table_scan(&name).unwrap().count(), 20);
+    let removed_ids: Vec<usize> = db
+        .table_scan(&name)
+        .unwrap()
+        .map(|row| row.id)
+        .filter(|id| id % 2 == 0)
+        .collect();
+    db.delete_rows(&name, &removed_ids).unwrap();
+    assert_eq!(db.table_scan(&name).unwrap().count(), 10);
     db.show_table_info();
 }

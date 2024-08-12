@@ -142,6 +142,14 @@ impl Database {
         table.insert_rows(rows)
     }
 
+    pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<(), SerdeError> {
+        let table = match self.table_mut(table_name) {
+            Some(table) => table,
+            None => return Err(SerdeError::TableDoesNotExist),
+        };
+        table.delete_rows(ids)
+    }
+
     pub fn table_scan(&self, table_name: &str) -> Result<impl Iterator<Item = &Row>, SerdeError> {
         let table = match self.table(table_name) {
             Some(table) => table,
@@ -269,12 +277,14 @@ impl Generate for Schema {
 pub struct Table {
     header: TableHeader,
     rows: Vec<Row>,
+    next_id: usize,
 }
 impl Table {
     pub fn new(table_name: String, schema: Schema) -> Self {
         Table {
             header: TableHeader::new(table_name, schema),
             rows: Vec::new(),
+            next_id: 0,
         }
     }
 
@@ -288,12 +298,19 @@ impl Table {
     }
 
     fn insert_rows(&mut self, rows: Vec<Row>) -> Result<(), SerdeError> {
-        for row in rows {
+        for mut row in rows {
             if !self.header.schema.matches(&row) {
                 return Err(SerdeError::SchemaDoesntMatch);
             }
+            row.id = self.next_id;
+            self.next_id += 1;
             self.rows.push(row);
         }
+        Ok(())
+    }
+
+    fn delete_rows(&mut self, ids: &[usize]) -> Result<(), SerdeError> {
+        self.rows.retain(|row| !ids.contains(&row.id));
         Ok(())
     }
 
