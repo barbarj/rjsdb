@@ -5,6 +5,15 @@ use rjsdb::{
     storage,
 };
 
+// TODO:
+// - Get a basic query layer written, via an "execute" function.
+//   - Interpret SQL
+//   - Construct query plan
+//   - Return results
+// - Figure out how to manage database connections and accept requests
+//   - This'll be a client/server model, and the server probably will
+//     need something like tokio to manage threads/requests
+
 fn main() {
     let mut rng = RNG::new();
 
@@ -13,7 +22,7 @@ fn main() {
     //     fs::remove_file(path).unwrap();
     //     println!("db file removed");
     // }
-    let mut db = storage::Database::init(path).unwrap();
+    let mut db = storage::StorageLayer::init(path).unwrap();
     let mut name = String::generate(&mut rng);
     name.truncate(5);
     let name = String::from("test_table");
@@ -32,7 +41,7 @@ fn main() {
 
     drop(db);
 
-    let mut db = storage::Database::init(path).unwrap();
+    let mut db = storage::StorageLayer::init(path).unwrap();
     db.show_table_info();
 
     // assert_eq!(db.table_scan(&name).unwrap().count(), 20);

@@ -21,38 +21,40 @@ pub mod write;
 // NOTE: This implementation is intenationally stupid right now. We re-write the entire db file on every commit!.
 // Good first change would be to figure out how to make that partial
 
+type Result<T> = std::result::Result<T, StorageError>;
+
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Database {
+pub struct StorageLayer {
     #[serde(skip)]
     file: Option<File>,
     pub db_header: DbHeader,
     tables: Vec<Table>,
 }
-impl Database {
-    pub fn init(db_file: &Path) -> Result<Self, SerdeError> {
+impl StorageLayer {
+    pub fn init(db_file: &Path) -> Result<Self> {
         if db_file.exists() {
-            Database::from_file(db_file)
+            StorageLayer::from_file(db_file)
         } else {
-            Database::new(db_file)
+            StorageLayer::new(db_file)
         }
     }
 
-    fn from_file(db_file: &Path) -> Result<Self, SerdeError> {
+    fn from_file(db_file: &Path) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(db_file)?;
         let mut buff = Vec::new();
         file.read_to_end(&mut buff)?;
-        let mut db: Database = read::from_bytes(&buff)?;
+        let mut db: StorageLayer = read::from_bytes(&buff)?;
         db.file = Some(file);
         Ok(db)
     }
 
-    fn new(db_file: &Path) -> Result<Self, SerdeError> {
+    fn new(db_file: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(db_file)?;
-        let db = Database {
+        let db = StorageLayer {
             file: Some(file),
             db_header: DbHeader::new(),
             tables: Vec::new(),
@@ -60,7 +62,7 @@ impl Database {
         Ok(db)
     }
 
-    pub fn flush(&mut self) -> Result<(), SerdeError> {
+    pub fn flush(&mut self) -> Result<()> {
         let mut file = self.file.as_ref().expect("File should be set by now");
         file.rewind()?;
         file.set_len(0)?;
@@ -74,27 +76,27 @@ impl Database {
         self.tables.iter().any(|t| t.header.table_name == name)
     }
 
-    pub fn create_table(&mut self, name: &str, schema: &Schema) -> Result<(), SerdeError> {
+    pub fn create_table(&mut self, name: &str, schema: &Schema) -> Result<()> {
         if self.table_exists(name) {
-            return Err(SerdeError::TableAlreadyExists);
+            return Err(StorageError::TableAlreadyExists);
         }
         if name.is_empty() {
-            return Err(SerdeError::EmptyTableName);
+            return Err(StorageError::EmptyTableName);
         }
         if schema.schema.is_empty() {
-            return Err(SerdeError::EmptySchemaProvided);
+            return Err(StorageError::EmptySchemaProvided);
         }
         if has_duplicates(schema.schema.iter().map(|c| &c.name)) {
-            return Err(SerdeError::DuplicateColumnNames);
+            return Err(StorageError::DuplicateColumnNames);
         }
         let table = Table::new(name.to_string(), schema.clone());
         self.tables.push(table);
         Ok(())
     }
 
-    pub fn destroy_table(&mut self, name: &str) -> Result<(), SerdeError> {
+    pub fn destroy_table(&mut self, name: &str) -> Result<()> {
         if !self.table_exists(name) {
-            return Err(SerdeError::TableDoesNotExist);
+            return Err(StorageError::TableDoesNotExist);
         }
 
         // find table index
@@ -130,34 +132,34 @@ impl Database {
             .find(|t| t.header.table_name == table_name)
     }
 
-    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<(), SerdeError> {
+    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<()> {
         let table = match self.table_mut(table_name) {
             Some(table) => table,
-            None => return Err(SerdeError::TableDoesNotExist),
+            None => return Err(StorageError::TableDoesNotExist),
         };
         table.insert_rows(rows)
     }
 
-    pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<(), SerdeError> {
+    pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<()> {
         let table = match self.table_mut(table_name) {
             Some(table) => table,
-            None => return Err(SerdeError::TableDoesNotExist),
+            None => return Err(StorageError::TableDoesNotExist),
         };
         table.delete_rows(ids)
     }
 
-    pub fn table_scan(&self, table_name: &str) -> Result<impl Iterator<Item = &Row>, SerdeError> {
+    pub fn table_scan(&self, table_name: &str) -> Result<impl Iterator<Item = &Row>> {
         let table = match self.table(table_name) {
             Some(table) => table,
-            None => return Err(SerdeError::TableDoesNotExist),
+            None => return Err(StorageError::TableDoesNotExist),
         };
         Ok(table.rows())
     }
 
-    pub fn table_schema(&self, table_name: &str) -> Result<&Schema, SerdeError> {
+    pub fn table_schema(&self, table_name: &str) -> Result<&Schema> {
         let table = match self.table(table_name) {
             Some(table) => table,
-            None => return Err(SerdeError::TableDoesNotExist),
+            None => return Err(StorageError::TableDoesNotExist),
         };
         Ok(&table.header.schema)
     }
@@ -306,10 +308,10 @@ impl Table {
         )
     }
 
-    fn insert_rows(&mut self, rows: Vec<Row>) -> Result<(), SerdeError> {
+    fn insert_rows(&mut self, rows: Vec<Row>) -> Result<()> {
         for mut row in rows {
             if !self.header.schema.matches(&row) {
-                return Err(SerdeError::SchemaDoesntMatch);
+                return Err(StorageError::SchemaDoesntMatch);
             }
             row.id = self.next_id;
             self.next_id += 1;
@@ -318,7 +320,7 @@ impl Table {
         Ok(())
     }
 
-    fn delete_rows(&mut self, ids: &[usize]) -> Result<(), SerdeError> {
+    fn delete_rows(&mut self, ids: &[usize]) -> Result<()> {
         self.rows.retain(|row| !ids.contains(&row.id));
         Ok(())
     }
@@ -359,14 +361,6 @@ pub enum SerdeError {
     Eof,
     UnparseableValue,
     Utf8ParsingError(std::str::Utf8Error),
-
-    // These probably should be a different error type
-    TableAlreadyExists,
-    TableDoesNotExist,
-    DuplicateColumnNames,
-    EmptyTableName,
-    EmptySchemaProvided,
-    SchemaDoesntMatch,
 }
 impl std::error::Error for SerdeError {}
 impl ser::Error for SerdeError {
@@ -394,12 +388,6 @@ impl Display for SerdeError {
             Self::Eof => f.write_str("Reached end of input"),
             Self::UnparseableValue => f.write_str("Unparseable value"),
             Self::Utf8ParsingError(err) => err.fmt(f),
-            Self::TableAlreadyExists => f.write_str("Table already exists"),
-            Self::TableDoesNotExist => f.write_str("The requested table does not exist"),
-            Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
-            Self::EmptyTableName => f.write_str("An empty table name was provided"),
-            Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
-            Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
         }
     }
 }
@@ -411,5 +399,39 @@ impl From<io::Error> for SerdeError {
 impl From<Utf8Error> for SerdeError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8ParsingError(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum StorageError {
+    SerdeError(SerdeError),
+    TableAlreadyExists,
+    TableDoesNotExist,
+    DuplicateColumnNames,
+    EmptyTableName,
+    EmptySchemaProvided,
+    SchemaDoesntMatch,
+}
+impl Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SerdeError(serde_err) => serde_err.fmt(f),
+            Self::TableAlreadyExists => f.write_str("Table already exists"),
+            Self::TableDoesNotExist => f.write_str("The requested table does not exist"),
+            Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
+            Self::EmptyTableName => f.write_str("An empty table name was provided"),
+            Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
+            Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
+        }
+    }
+}
+impl From<SerdeError> for StorageError {
+    fn from(value: SerdeError) -> Self {
+        Self::SerdeError(value)
+    }
+}
+impl From<io::Error> for StorageError {
+    fn from(value: io::Error) -> Self {
+        Self::SerdeError(SerdeError::from(value))
     }
 }
