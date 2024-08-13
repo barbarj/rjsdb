@@ -4,6 +4,7 @@ use generate::Generate;
 use serde::{self, Deserialize, Serialize};
 
 pub mod generate;
+pub mod query;
 pub mod storage;
 
 const DB_TYPE_COUNT: u32 = 3;
