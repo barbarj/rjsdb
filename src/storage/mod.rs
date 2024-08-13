@@ -71,20 +71,17 @@ impl Database {
     }
 
     fn table_exists(&self, name: &str) -> bool {
-        self.tables
-            .iter()
-            .find(|t| t.header.table_name == name)
-            .is_some()
+        self.tables.iter().any(|t| t.header.table_name == name)
     }
 
     pub fn create_table(&mut self, name: &str, schema: &Schema) -> Result<(), SerdeError> {
-        if self.table_exists(&name) {
+        if self.table_exists(name) {
             return Err(SerdeError::TableAlreadyExists);
         }
-        if name.len() == 0 {
+        if name.is_empty() {
             return Err(SerdeError::EmptyTableName);
         }
-        if schema.schema.len() == 0 {
+        if schema.schema.is_empty() {
             return Err(SerdeError::EmptySchemaProvided);
         }
         if has_duplicates(schema.schema.iter().map(|c| &c.name)) {
@@ -180,6 +177,11 @@ impl DbHeader {
         }
     }
 }
+impl Default for DbHeader {
+    fn default() -> Self {
+        DbHeader::new()
+    }
+}
 
 const TABLE_HEADER_VERSION: u16 = 0;
 const ROW_HEADER_VERSION: u16 = 0;
@@ -214,7 +216,7 @@ impl Display for Column {
 impl Generate for Column {
     fn generate(rng: &mut crate::generate::RNG) -> Self {
         let mut name = String::generate(rng);
-        while name.len() == 0 {
+        while name.is_empty() {
             name = String::generate(rng);
         }
         name.truncate(6);

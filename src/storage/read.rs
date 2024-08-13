@@ -44,7 +44,7 @@ impl<'de> Deserializer<'de> {
     }
 
     fn next_byte(&mut self) -> Option<&'de u8> {
-        let byte = self.input.get(0)?;
+        let byte = self.input.first()?;
         self.input = &self.input[1..];
         Some(byte)
     }

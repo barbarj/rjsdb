@@ -23,6 +23,11 @@ impl RNG {
         self.rng.next_u32()
     }
 }
+impl Default for RNG {
+    fn default() -> Self {
+        RNG::new()
+    }
+}
 
 pub trait Generate {
     fn generate(rng: &mut RNG) -> Self;
@@ -74,7 +79,7 @@ const CHAR_GEN_UNICODE_CLAMP: u32 = 0x007f; // Limits us to only latin character
 impl Generate for char {
     fn generate(rng: &mut RNG) -> Self {
         let mut x = rng.next_value() % CHAR_GEN_UNICODE_CLAMP;
-        while let None = to_useful_char(x) {
+        while to_useful_char(x).is_none() {
             x = rng.next_value() % CHAR_GEN_UNICODE_CLAMP;
         }
         char::from_u32(x)

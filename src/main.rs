@@ -1,17 +1,8 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::Read,
-    iter::zip,
-    os::unix::fs::MetadataExt,
-    path::Path,
-    thread::sleep,
-    time::Duration,
-};
+use std::path::Path;
 
 use rjsdb::{
     generate::{Generate, RNG},
-    storage::{self, read::from_bytes, Row, Schema},
-    DbValue,
+    storage,
 };
 
 fn main() {
@@ -25,7 +16,7 @@ fn main() {
     let mut db = storage::Database::init(path).unwrap();
     let mut name = String::generate(&mut rng);
     name.truncate(5);
-    let name = "test_table";
+    let name = String::from("test_table");
     // let schema = Schema::generate(&mut rng);
     let schema = db.table_schema(&name).unwrap();
     // db.create_table(&name, &schema).unwrap();
