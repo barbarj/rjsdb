@@ -1,7 +1,11 @@
-use std::str::CharIndices;
+use std::{
+    collections::VecDeque,
+    ops::{Range, RangeFrom, RangeTo},
+    str::CharIndices,
+};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum TokenKind {
+pub enum TokenKind {
     // composite kinds
     String,
     Whitespace,
@@ -200,7 +204,22 @@ impl<'a> Tokenizer<'a> {
             println!("token: '{}'", token.contents);
             tokens.push(token);
         }
-        tokens
+        // trim token list of whitespace
+        let len = tokens.len();
+        match (
+            tokens.first().map(|x| x.kind),
+            tokens.last().map(|x| x.kind),
+        ) {
+            (Some(TokenKind::Whitespace), Some(TokenKind::Whitespace)) => tokens
+                .drain(Range {
+                    start: 1,
+                    end: len - 1,
+                })
+                .collect(),
+            (Some(TokenKind::Whitespace), _) => tokens.drain(RangeFrom { start: 1 }).collect(),
+            (_, Some(TokenKind::Whitespace)) => tokens.drain(RangeTo { end: len - 1 }).collect(),
+            _ => tokens,
+        }
     }
 }
 
@@ -253,6 +272,31 @@ mod tokenizer_tests {
             Token::new(" \t\n ", TokenKind::Whitespace),
             Token::new("b", TokenKind::String),
         ];
+        assert_eq!(res, expected);
+    }
+
+    // merges_whitespace
+    #[test]
+    fn trims_whitespace() {
+        let input = "  a*b  ";
+        let res = Tokenizer::new(input).tokenize();
+        let expected = vec![
+            Token::new("a", TokenKind::String),
+            Token::new("*", TokenKind::Star),
+            Token::new("b", TokenKind::String),
+        ];
+        assert_eq!(res, expected);
+
+        let input = "  a*b";
+        let res = Tokenizer::new(input).tokenize();
+        assert_eq!(res, expected);
+
+        let input = "a*b  ";
+        let res = Tokenizer::new(input).tokenize();
+        assert_eq!(res, expected);
+
+        let input = "a*b";
+        let res = Tokenizer::new(input).tokenize();
         assert_eq!(res, expected);
     }
 
