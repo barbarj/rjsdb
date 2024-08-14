@@ -242,5 +242,67 @@ mod tokenizer_tests {
     }
 
     // merges_whitespace
-    // case_insensitive_on_reserved_words
+    #[test]
+    fn merges_whitespace() {
+        let input = "a  * \t\n b";
+        let res = Tokenizer::new(input).tokenize();
+        let expected = vec![
+            Token::new("a", TokenKind::String),
+            Token::new("  ", TokenKind::Whitespace),
+            Token::new("*", TokenKind::Star),
+            Token::new(" \t\n ", TokenKind::Whitespace),
+            Token::new("b", TokenKind::String),
+        ];
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn case_insensitive_on_reserved_words() {
+        let input = "sElEcT * FrOm test_table;";
+        let res = Tokenizer::new(input).tokenize();
+        let expected = vec![
+            Token::new("sElEcT", TokenKind::Select),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("*", TokenKind::Star),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("FrOm", TokenKind::From),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("test_table", TokenKind::String),
+            Token::new(";", TokenKind::Semicolon),
+        ];
+
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn complicated_query() {
+        let input = "select foo, bar, baz from test_table order by foo desc;";
+        let res = Tokenizer::new(input).tokenize();
+        let expected = vec![
+            Token::new("select", TokenKind::Select),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("foo", TokenKind::String),
+            Token::new(",", TokenKind::Comma),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("bar", TokenKind::String),
+            Token::new(",", TokenKind::Comma),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("baz", TokenKind::String),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("from", TokenKind::From),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("test_table", TokenKind::String),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("order", TokenKind::Order),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("by", TokenKind::By),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("foo", TokenKind::String),
+            Token::new(" ", TokenKind::Whitespace),
+            Token::new("desc", TokenKind::Desc),
+            Token::new(";", TokenKind::Semicolon),
+        ];
+
+        assert_eq!(res, expected);
+    }
 }

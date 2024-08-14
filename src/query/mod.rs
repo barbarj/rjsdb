@@ -1,6 +1,6 @@
 use crate::storage::{Row, StorageError};
 
-mod parse;
+mod tokenize;
 
 enum QueryError {
     StorageError(StorageError),
