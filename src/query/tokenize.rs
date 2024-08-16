@@ -52,6 +52,18 @@ impl Token {
             kind,
         }
     }
+
+    pub fn maybe_convert_to_keyword(self) -> Self {
+        match self.contents.to_ascii_lowercase().as_str() {
+            "select" => self.with_kind(TokenKind::Select),
+            "where" => self.with_kind(TokenKind::Where),
+            "from" => self.with_kind(TokenKind::From),
+            "order" => self.with_kind(TokenKind::Order),
+            "by" => self.with_kind(TokenKind::By),
+            "desc" => self.with_kind(TokenKind::Desc),
+            _ => self,
+        }
+    }
 }
 
 pub struct Tokenizer<'a> {
@@ -128,16 +140,8 @@ impl<'a> Tokenizer<'a> {
             return Some(self.string_token());
         }
         // else construct identifier (and possibly convert to known keyword)
-        let token = self.identifier_token();
-        match token.contents.to_ascii_lowercase().as_str() {
-            "select" => Some(token.with_kind(TokenKind::Select)),
-            "where" => Some(token.with_kind(TokenKind::Where)),
-            "from" => Some(token.with_kind(TokenKind::From)),
-            "order" => Some(token.with_kind(TokenKind::Order)),
-            "by" => Some(token.with_kind(TokenKind::By)),
-            "desc" => Some(token.with_kind(TokenKind::Desc)),
-            _ => Some(token),
-        }
+        let token = self.identifier_token().maybe_convert_to_keyword();
+        Some(token)
     }
 
     pub fn iter(self) -> Tokens<'a> {
