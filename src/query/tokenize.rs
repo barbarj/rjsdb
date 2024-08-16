@@ -1,7 +1,10 @@
-use std::str::Chars;
+use regex::Regex;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum TokenKind {
+    // for things like whitespace, etc.
+    None,
+
     // composite kinds
     Identifier,
     String,
@@ -20,128 +23,81 @@ pub enum TokenKind {
     Semicolon,
     EqualsSign,
 }
-impl TokenKind {
-    /// Converts from a single char to the correct TokenKind.
-    /// If this single char does not have a corresponding TokenKind
-    /// that is also a single char (i.e. it's part of a string or whitespace),
-    /// return None.
-    fn from_known_symbol(char: char) -> Option<Self> {
-        match char {
-            '*' => Some(Self::Star),
-            ',' => Some(Self::Comma),
-            ';' => Some(Self::Semicolon),
-            '=' => Some(Self::EqualsSign),
-            _ => None,
-        }
-    }
-}
 
 #[derive(PartialEq, Debug)]
-pub struct Token {
-    contents: String,
+pub struct Token<'a> {
+    contents: &'a str,
     kind: TokenKind,
 }
-impl Token {
-    pub fn new(contents: String, kind: TokenKind) -> Self {
+impl<'a> Token<'a> {
+    pub fn new(contents: &'a str, kind: TokenKind) -> Self {
         Token { contents, kind }
-    }
-
-    pub fn with_kind(self, kind: TokenKind) -> Self {
-        Token {
-            contents: self.contents,
-            kind,
-        }
-    }
-
-    pub fn maybe_convert_to_keyword(self) -> Self {
-        match self.contents.to_ascii_lowercase().as_str() {
-            "select" => self.with_kind(TokenKind::Select),
-            "where" => self.with_kind(TokenKind::Where),
-            "from" => self.with_kind(TokenKind::From),
-            "order" => self.with_kind(TokenKind::Order),
-            "by" => self.with_kind(TokenKind::By),
-            "desc" => self.with_kind(TokenKind::Desc),
-            _ => self,
-        }
     }
 }
 
+struct SpecItem(TokenKind, Regex);
+
+const TOKEN_SPEC_LEN: usize = 13;
 pub struct Tokenizer<'a> {
-    chars: Chars<'a>,
-    lookahead: Option<char>,
+    input: &'a str,
+    cursor: usize,
+    spec: [SpecItem; TOKEN_SPEC_LEN],
 }
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str) -> Self {
-        let mut chars = input.trim().chars();
-        let lookahead = chars.next();
-        Tokenizer { chars, lookahead }
+        Tokenizer {
+            input,
+            cursor: 0,
+            spec: Tokenizer::spec(),
+        }
     }
 
-    fn skip_whitespace(&mut self) {
-        loop {
-            match self.lookahead {
-                None => break,
-                Some(c) if !c.is_whitespace() => {
-                    break;
+    fn spec() -> [SpecItem; TOKEN_SPEC_LEN] {
+        [
+            // skip whitespace
+            SpecItem(TokenKind::None, Regex::new(r"^\s+").unwrap()),
+            // single chars
+            SpecItem(TokenKind::Star, Regex::new(r"^\*").unwrap()),
+            SpecItem(TokenKind::Comma, Regex::new(r"^,").unwrap()),
+            SpecItem(TokenKind::Semicolon, Regex::new(r"^;").unwrap()),
+            SpecItem(TokenKind::EqualsSign, Regex::new(r"^=").unwrap()),
+            // keywords
+            SpecItem(TokenKind::Select, Regex::new(r"^(?i)select\b").unwrap()),
+            SpecItem(TokenKind::Where, Regex::new(r"^(?i)where\b").unwrap()),
+            SpecItem(TokenKind::From, Regex::new(r"^(?i)from\b").unwrap()),
+            SpecItem(TokenKind::Order, Regex::new(r"^(?i)order\b").unwrap()),
+            SpecItem(TokenKind::By, Regex::new(r"^(?i)by\b").unwrap()),
+            SpecItem(TokenKind::Desc, Regex::new(r"^(?i)desc\b").unwrap()),
+            // composites
+            SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
+            SpecItem(TokenKind::Identifier, Regex::new(r"^[^\s*,;=]+").unwrap()),
+        ]
+    }
+
+    fn next_token(&mut self) -> Option<Token<'a>> {
+        if self.cursor >= self.input.len() {
+            return None;
+        }
+
+        let input = &self.input[self.cursor..];
+
+        for SpecItem(kind, regex) in &self.spec {
+            if let Some(m) = regex.find(input) {
+                println!("matches: '{}'({})", m.as_str(), m.len());
+                self.cursor += m.len();
+                // TODO: Make this happen iteratively instead of recursively
+                if matches!(kind, TokenKind::None) {
+                    return self.next_token();
                 }
-                _ => {
-                    self.lookahead = self.chars.next();
+                if matches!(kind, TokenKind::String) {
+                    let s = &m.as_str()[1..m.len() - 1];
+                    return Some(Token::new(s, *kind));
                 }
+                return Some(Token::new(m.as_str(), *kind));
             }
         }
-    }
-
-    // TODO: Make this break/return an error if there is no closing quote
-    /// This should only be called when we have verified
-    /// that the current lookahead is a single quote.
-    fn string_token(&mut self) -> Token {
-        assert_eq!(self.lookahead, Some('\''));
-        let mut contents = Vec::new();
-
-        for c in &mut self.chars {
-            if c == '\'' {
-                break;
-            }
-            contents.push(c);
-        }
-        self.lookahead = self.chars.next();
-        Token::new(contents.iter().collect(), TokenKind::String)
-    }
-
-    fn identifier_token(&mut self) -> Token {
-        // Should have already proved that lookahead is not empty
-        assert!(self.lookahead.is_some());
-        let lookahead = self.lookahead.unwrap();
-        let mut contents = vec![lookahead];
-
-        for c in &mut self.chars {
-            if c.is_whitespace() || TokenKind::from_known_symbol(c).is_some() {
-                self.lookahead = Some(c);
-                return Token::new(contents.iter().collect(), TokenKind::Identifier);
-            }
-            contents.push(c);
-        }
-        self.lookahead = self.chars.next();
-        Token::new(contents.iter().collect(), TokenKind::Identifier)
-    }
-
-    fn next_token(&mut self) -> Option<Token> {
-        self.skip_whitespace();
-        let lookahead = match self.lookahead {
-            None => return None,
-            Some(c) => c,
-        };
-
-        if let Some(kind) = TokenKind::from_known_symbol(lookahead) {
-            self.lookahead = self.chars.next();
-            return Some(Token::new(lookahead.to_string(), kind));
-        }
-        if lookahead == '\'' {
-            return Some(self.string_token());
-        }
-        // else construct identifier (and possibly convert to known keyword)
-        let token = self.identifier_token().maybe_convert_to_keyword();
-        Some(token)
+        // TODO: Change this to return an error
+        panic!("Unknown token type!");
     }
 
     pub fn iter(self) -> Tokens<'a> {
@@ -153,26 +109,34 @@ pub struct Tokens<'a> {
     tokenizer: Tokenizer<'a>,
 }
 impl<'a> Iterator for Tokens<'a> {
-    type Item = Token;
+    type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.tokenizer.next_token()
+        let token = self.tokenizer.next_token();
+        println!("{token:?}");
+        token
     }
 }
 
 #[cfg(test)]
 mod tokenizer_tests {
-
     use super::*;
+
+    #[test]
+    fn regex_test() {
+        let r = Regex::new(r"^(?i)(select)(\s|$)").unwrap();
+        let m = r.find("SELECT").unwrap();
+        println!("{}", m.as_str());
+    }
 
     #[test]
     fn whitespace_splitting() {
         let input = "a * b";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a".to_string(), TokenKind::Identifier),
-            Token::new("*".to_string(), TokenKind::Star),
-            Token::new("b".to_string(), TokenKind::Identifier),
+            Token::new("a", TokenKind::Identifier),
+            Token::new("*", TokenKind::Star),
+            Token::new("b", TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
     }
@@ -182,11 +146,11 @@ mod tokenizer_tests {
         let input = "select * from test_table;";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("select".to_string(), TokenKind::Select),
-            Token::new("*".to_string(), TokenKind::Star),
-            Token::new("from".to_string(), TokenKind::From),
-            Token::new("test_table".to_string(), TokenKind::Identifier),
-            Token::new(";".to_string(), TokenKind::Semicolon),
+            Token::new("select", TokenKind::Select),
+            Token::new("*", TokenKind::Star),
+            Token::new("from", TokenKind::From),
+            Token::new("test_table", TokenKind::Identifier),
+            Token::new(";", TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);
@@ -198,9 +162,9 @@ mod tokenizer_tests {
         let input = "a  * \t\n b";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a".to_string(), TokenKind::Identifier),
-            Token::new("*".to_string(), TokenKind::Star),
-            Token::new("b".to_string(), TokenKind::Identifier),
+            Token::new("a", TokenKind::Identifier),
+            Token::new("*", TokenKind::Star),
+            Token::new("b", TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
     }
@@ -211,9 +175,9 @@ mod tokenizer_tests {
         let input = "  a*b  ";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a".to_string(), TokenKind::Identifier),
-            Token::new("*".to_string(), TokenKind::Star),
-            Token::new("b".to_string(), TokenKind::Identifier),
+            Token::new("a", TokenKind::Identifier),
+            Token::new("*", TokenKind::Star),
+            Token::new("b", TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
 
@@ -235,11 +199,11 @@ mod tokenizer_tests {
         let input = "sElEcT * FrOm test_table;";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("sElEcT".to_string(), TokenKind::Select),
-            Token::new("*".to_string(), TokenKind::Star),
-            Token::new("FrOm".to_string(), TokenKind::From),
-            Token::new("test_table".to_string(), TokenKind::Identifier),
-            Token::new(";".to_string(), TokenKind::Semicolon),
+            Token::new("sElEcT", TokenKind::Select),
+            Token::new("*", TokenKind::Star),
+            Token::new("FrOm", TokenKind::From),
+            Token::new("test_table", TokenKind::Identifier),
+            Token::new(";", TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);
@@ -251,23 +215,23 @@ mod tokenizer_tests {
             "select foo, bar, baz from test_table where bar='that thing' order by foo desc;";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("select".to_string(), TokenKind::Select),
-            Token::new("foo".to_string(), TokenKind::Identifier),
-            Token::new(",".to_string(), TokenKind::Comma),
-            Token::new("bar".to_string(), TokenKind::Identifier),
-            Token::new(",".to_string(), TokenKind::Comma),
-            Token::new("baz".to_string(), TokenKind::Identifier),
-            Token::new("from".to_string(), TokenKind::From),
-            Token::new("test_table".to_string(), TokenKind::Identifier),
-            Token::new("where".to_string(), TokenKind::Where),
-            Token::new("bar".to_string(), TokenKind::Identifier),
-            Token::new("=".to_string(), TokenKind::EqualsSign),
-            Token::new("that thing".to_string(), TokenKind::String),
-            Token::new("order".to_string(), TokenKind::Order),
-            Token::new("by".to_string(), TokenKind::By),
-            Token::new("foo".to_string(), TokenKind::Identifier),
-            Token::new("desc".to_string(), TokenKind::Desc),
-            Token::new(";".to_string(), TokenKind::Semicolon),
+            Token::new("select", TokenKind::Select),
+            Token::new("foo", TokenKind::Identifier),
+            Token::new(",", TokenKind::Comma),
+            Token::new("bar", TokenKind::Identifier),
+            Token::new(",", TokenKind::Comma),
+            Token::new("baz", TokenKind::Identifier),
+            Token::new("from", TokenKind::From),
+            Token::new("test_table", TokenKind::Identifier),
+            Token::new("where", TokenKind::Where),
+            Token::new("bar", TokenKind::Identifier),
+            Token::new("=", TokenKind::EqualsSign),
+            Token::new("that thing", TokenKind::String),
+            Token::new("order", TokenKind::Order),
+            Token::new("by", TokenKind::By),
+            Token::new("foo", TokenKind::Identifier),
+            Token::new("desc", TokenKind::Desc),
+            Token::new(";", TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);

@@ -1,9 +1,15 @@
-use super::tokenize::Token;
+use super::tokenize::{Token, Tokenizer, Tokens};
 
-// struct Parser<'a> {
-//     input:
-//     cursor: usize,
-// }
+struct Parser<'a> {
+    tokens: Tokens<'a>,
+}
+impl<'a> Parser<'a> {
+    fn new(tokenizer: Tokenizer<'a>) -> Self {
+        Parser {
+            tokens: tokenizer.iter(),
+        }
+    }
+}
 
 enum DagNode {
     Select {
@@ -17,9 +23,9 @@ struct Clause {}
 
 // TODO:
 // - construct SQL grammar in ~BNF (Backus-Naur Form)
-// trait Parse {
-//     fn parse(parser: &mut Parser) -> Option<DagNode>;
-// }
+trait Parse {
+    fn parse(parser: &mut Parser) -> Option<DagNode>;
+}
 
 // TODO: Switch to using petgraph instead
 // this is not a great way to do this probably.

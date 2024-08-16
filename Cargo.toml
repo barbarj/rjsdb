@@ -7,4 +7,5 @@ edition = "2021"
 chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
+regex = "1.10.6"
 serde = { version = "1.0.205", features = ["derive"] }
