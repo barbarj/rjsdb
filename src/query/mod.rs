@@ -1,5 +1,8 @@
+use tokenize::Tokenizer;
+
 use crate::storage::{Row, StorageError};
 
+mod parse;
 mod tokenize;
 
 enum QueryError {
@@ -13,6 +16,8 @@ enum QueryResult {
 type Result<T> = std::result::Result<T, QueryError>;
 
 pub fn execute(command: &str) -> Result<QueryResult> {
+    let tokenizer = Tokenizer::new(command);
+    // let logical_plan = parse::parse(tokens);
     // parse sql into query plan
     // use tree-sitter for now to generate the AST?
     // run query plan

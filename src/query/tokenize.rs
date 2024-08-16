@@ -1,14 +1,10 @@
-use std::{
-    collections::VecDeque,
-    ops::{Range, RangeFrom, RangeTo},
-    str::CharIndices,
-};
+use std::str::Chars;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum TokenKind {
     // composite kinds
+    Identifier,
     String,
-    Whitespace,
 
     // reserved words
     Select,
@@ -23,7 +19,6 @@ pub enum TokenKind {
     Comma,
     Semicolon,
     EqualsSign,
-    SingleQuote,
 }
 impl TokenKind {
     /// Converts from a single char to the correct TokenKind.
@@ -36,190 +31,128 @@ impl TokenKind {
             ',' => Some(Self::Comma),
             ';' => Some(Self::Semicolon),
             '=' => Some(Self::EqualsSign),
-            '\'' => Some(Self::SingleQuote),
-            _ => None,
-        }
-    }
-
-    /// Converts from the provided string to the correct TokenKind.
-    /// If this string does not match a known symbol, return None.
-    fn from_reserved_word(str: &str) -> Option<Self> {
-        match str.to_ascii_lowercase().as_ref() {
-            "select" => Some(Self::Select),
-            "where" => Some(Self::Where),
-            "from" => Some(Self::From),
-            "order" => Some(Self::Order),
-            "by" => Some(Self::By),
-            "desc" => Some(Self::Desc),
             _ => None,
         }
     }
 }
 
 #[derive(PartialEq, Debug)]
-pub struct Token<'a> {
-    contents: &'a str,
+pub struct Token {
+    contents: String,
     kind: TokenKind,
 }
-impl<'a> Token<'a> {
-    pub fn new(contents: &'a str, kind: TokenKind) -> Self {
+impl Token {
+    pub fn new(contents: String, kind: TokenKind) -> Self {
         Token { contents, kind }
     }
-}
-enum TokenStateKind {
-    String,
-    Whitespace,
-    KnownSymbol(TokenKind),
-    None,
-}
-impl TokenStateKind {
-    fn from_char(c: char) -> Self {
-        if let Some(kind) = TokenKind::from_known_symbol(c) {
-            Self::KnownSymbol(kind)
-        } else if c.is_whitespace() {
-            Self::Whitespace
-        } else {
-            Self::String
-        }
-    }
-}
 
-struct TokenState {
-    first: usize,
-    last: usize,
-    kind: TokenStateKind,
-}
-impl TokenState {
-    fn new(start: usize, kind: TokenStateKind) -> Self {
-        TokenState {
-            first: start,
-            last: start,
+    pub fn with_kind(self, kind: TokenKind) -> Self {
+        Token {
+            contents: self.contents,
             kind,
-        }
-    }
-
-    fn slice<'a>(&self, reference_str: &'a str) -> &'a str {
-        &reference_str[self.first..self.last + 1]
-    }
-
-    fn to_token<'a>(&self, reference_str: &'a str) -> Token<'a> {
-        let kind = match self.kind {
-            TokenStateKind::KnownSymbol(kind) => kind,
-            TokenStateKind::String => TokenKind::from_reserved_word(self.slice(reference_str))
-                .unwrap_or(TokenKind::String),
-            TokenStateKind::Whitespace => TokenKind::Whitespace,
-            TokenStateKind::None => panic!("TokenStateKind::None -> TokenKind is not supported"),
-        };
-
-        Token::new(self.slice(reference_str), kind)
-    }
-}
-impl Default for TokenState {
-    fn default() -> Self {
-        TokenState {
-            first: 0,
-            last: 0,
-            kind: TokenStateKind::None,
         }
     }
 }
 
 pub struct Tokenizer<'a> {
-    input: &'a str,
-    iter: CharIndices<'a>,
-    unused_pair: Option<(usize, char)>,
+    chars: Chars<'a>,
+    lookahead: Option<char>,
 }
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Tokenizer {
-            input,
-            iter: input.char_indices(),
-            unused_pair: None,
+        let mut chars = input.trim().chars();
+        let lookahead = chars.next();
+        Tokenizer { chars, lookahead }
+    }
+
+    fn skip_whitespace(&mut self) {
+        loop {
+            match self.lookahead {
+                None => break,
+                Some(c) if !c.is_whitespace() => {
+                    break;
+                }
+                _ => {
+                    self.lookahead = self.chars.next();
+                }
+            }
         }
     }
 
-    fn next_token(&mut self) -> Option<Token<'a>> {
-        let mut token_state = TokenState::default();
-        if let Some((idx, char)) = self.unused_pair {
-            self.unused_pair = None;
-            if let Some(kind) = TokenKind::from_known_symbol(char) {
-                return Some(Token::new(&self.input[idx..idx + 1], kind));
-            } else {
-                let kind = if char.is_whitespace() {
-                    TokenStateKind::Whitespace
-                } else {
-                    TokenStateKind::String
-                };
-                token_state = TokenState::new(idx, kind)
-            }
-        }
+    // TODO: Make this break/return an error if there is no closing quote
+    /// This should only be called when we have verified
+    /// that the current lookahead is a single quote.
+    fn string_token(&mut self) -> Token {
+        assert_eq!(self.lookahead, Some('\''));
+        let mut contents = Vec::new();
 
-        for (idx, char) in &mut self.iter {
-            match TokenStateKind::from_char(char) {
-                TokenStateKind::KnownSymbol(kind) => {
-                    if matches!(token_state.kind, TokenStateKind::None) {
-                        return Some(Token::new(&self.input[idx..idx + 1], kind));
-                    } else {
-                        self.unused_pair = Some((idx, char));
-                        return Some(token_state.to_token(self.input));
-                    }
-                }
-                TokenStateKind::String if matches!(token_state.kind, TokenStateKind::None) => {
-                    token_state = TokenState::new(idx, TokenStateKind::String);
-                }
-                TokenStateKind::String if !matches!(token_state.kind, TokenStateKind::String) => {
-                    self.unused_pair = Some((idx, char));
-                    return Some(token_state.to_token(self.input));
-                }
-                TokenStateKind::Whitespace if matches!(token_state.kind, TokenStateKind::None) => {
-                    token_state = TokenState::new(idx, TokenStateKind::Whitespace);
-                }
-                TokenStateKind::Whitespace
-                    if !matches!(token_state.kind, TokenStateKind::Whitespace) =>
-                {
-                    self.unused_pair = Some((idx, char));
-                    return Some(token_state.to_token(self.input));
-                }
-                TokenStateKind::String | TokenStateKind::Whitespace => {
-                    token_state.last = idx;
-                }
-                TokenStateKind::None => panic!("This should never happen"),
+        for c in &mut self.chars {
+            if c == '\'' {
+                break;
             }
+            contents.push(c);
         }
-        if !matches!(token_state.kind, TokenStateKind::None) {
-            Some(token_state.to_token(self.input))
-        } else {
-            None
+        self.lookahead = self.chars.next();
+        Token::new(contents.iter().collect(), TokenKind::String)
+    }
+
+    fn identifier_token(&mut self) -> Token {
+        // Should have already proved that lookahead is not empty
+        assert!(self.lookahead.is_some());
+        let lookahead = self.lookahead.unwrap();
+        let mut contents = vec![lookahead];
+
+        for c in &mut self.chars {
+            if c.is_whitespace() || TokenKind::from_known_symbol(c).is_some() {
+                self.lookahead = Some(c);
+                return Token::new(contents.iter().collect(), TokenKind::Identifier);
+            }
+            contents.push(c);
+        }
+        self.lookahead = self.chars.next();
+        Token::new(contents.iter().collect(), TokenKind::Identifier)
+    }
+
+    fn next_token(&mut self) -> Option<Token> {
+        self.skip_whitespace();
+        let lookahead = match self.lookahead {
+            None => return None,
+            Some(c) => c,
+        };
+
+        if let Some(kind) = TokenKind::from_known_symbol(lookahead) {
+            self.lookahead = self.chars.next();
+            return Some(Token::new(lookahead.to_string(), kind));
+        }
+        if lookahead == '\'' {
+            return Some(self.string_token());
+        }
+        // else construct identifier (and possibly convert to known keyword)
+        let token = self.identifier_token();
+        match token.contents.to_ascii_lowercase().as_str() {
+            "select" => Some(token.with_kind(TokenKind::Select)),
+            "where" => Some(token.with_kind(TokenKind::Where)),
+            "from" => Some(token.with_kind(TokenKind::From)),
+            "order" => Some(token.with_kind(TokenKind::Order)),
+            "by" => Some(token.with_kind(TokenKind::By)),
+            "desc" => Some(token.with_kind(TokenKind::Desc)),
+            _ => Some(token),
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token<'a>> {
-        // scan through string slice
-        // when a special, known char is encountered:
-        // - end token being constructed, and call it string
-        // - add token for special char of type
+    pub fn iter(self) -> Tokens<'a> {
+        Tokens { tokenizer: self }
+    }
+}
 
-        let mut tokens = Vec::new();
-        while let Some(token) = self.next_token() {
-            println!("token: '{}'", token.contents);
-            tokens.push(token);
-        }
-        // trim token list of whitespace
-        let len = tokens.len();
-        match (
-            tokens.first().map(|x| x.kind),
-            tokens.last().map(|x| x.kind),
-        ) {
-            (Some(TokenKind::Whitespace), Some(TokenKind::Whitespace)) => tokens
-                .drain(Range {
-                    start: 1,
-                    end: len - 1,
-                })
-                .collect(),
-            (Some(TokenKind::Whitespace), _) => tokens.drain(RangeFrom { start: 1 }).collect(),
-            (_, Some(TokenKind::Whitespace)) => tokens.drain(RangeTo { end: len - 1 }).collect(),
-            _ => tokens,
-        }
+pub struct Tokens<'a> {
+    tokenizer: Tokenizer<'a>,
+}
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.tokenizer.next_token()
     }
 }
 
@@ -231,13 +164,11 @@ mod tokenizer_tests {
     #[test]
     fn whitespace_splitting() {
         let input = "a * b";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a", TokenKind::String),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("*", TokenKind::Star),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("b", TokenKind::String),
+            Token::new("a".to_string(), TokenKind::Identifier),
+            Token::new("*".to_string(), TokenKind::Star),
+            Token::new("b".to_string(), TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
     }
@@ -245,16 +176,13 @@ mod tokenizer_tests {
     #[test]
     fn basic_select() {
         let input = "select * from test_table;";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("select", TokenKind::Select),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("*", TokenKind::Star),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("from", TokenKind::From),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("test_table", TokenKind::String),
-            Token::new(";", TokenKind::Semicolon),
+            Token::new("select".to_string(), TokenKind::Select),
+            Token::new("*".to_string(), TokenKind::Star),
+            Token::new("from".to_string(), TokenKind::From),
+            Token::new("test_table".to_string(), TokenKind::Identifier),
+            Token::new(";".to_string(), TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);
@@ -264,13 +192,11 @@ mod tokenizer_tests {
     #[test]
     fn merges_whitespace() {
         let input = "a  * \t\n b";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a", TokenKind::String),
-            Token::new("  ", TokenKind::Whitespace),
-            Token::new("*", TokenKind::Star),
-            Token::new(" \t\n ", TokenKind::Whitespace),
-            Token::new("b", TokenKind::String),
+            Token::new("a".to_string(), TokenKind::Identifier),
+            Token::new("*".to_string(), TokenKind::Star),
+            Token::new("b".to_string(), TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
     }
@@ -279,40 +205,37 @@ mod tokenizer_tests {
     #[test]
     fn trims_whitespace() {
         let input = "  a*b  ";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("a", TokenKind::String),
-            Token::new("*", TokenKind::Star),
-            Token::new("b", TokenKind::String),
+            Token::new("a".to_string(), TokenKind::Identifier),
+            Token::new("*".to_string(), TokenKind::Star),
+            Token::new("b".to_string(), TokenKind::Identifier),
         ];
         assert_eq!(res, expected);
 
         let input = "  a*b";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         assert_eq!(res, expected);
 
         let input = "a*b  ";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         assert_eq!(res, expected);
 
         let input = "a*b";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         assert_eq!(res, expected);
     }
 
     #[test]
     fn case_insensitive_on_reserved_words() {
         let input = "sElEcT * FrOm test_table;";
-        let res = Tokenizer::new(input).tokenize();
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("sElEcT", TokenKind::Select),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("*", TokenKind::Star),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("FrOm", TokenKind::From),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("test_table", TokenKind::String),
-            Token::new(";", TokenKind::Semicolon),
+            Token::new("sElEcT".to_string(), TokenKind::Select),
+            Token::new("*".to_string(), TokenKind::Star),
+            Token::new("FrOm".to_string(), TokenKind::From),
+            Token::new("test_table".to_string(), TokenKind::Identifier),
+            Token::new(";".to_string(), TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);
@@ -320,31 +243,27 @@ mod tokenizer_tests {
 
     #[test]
     fn complicated_query() {
-        let input = "select foo, bar, baz from test_table order by foo desc;";
-        let res = Tokenizer::new(input).tokenize();
+        let input =
+            "select foo, bar, baz from test_table where bar='that thing' order by foo desc;";
+        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
-            Token::new("select", TokenKind::Select),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("foo", TokenKind::String),
-            Token::new(",", TokenKind::Comma),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("bar", TokenKind::String),
-            Token::new(",", TokenKind::Comma),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("baz", TokenKind::String),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("from", TokenKind::From),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("test_table", TokenKind::String),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("order", TokenKind::Order),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("by", TokenKind::By),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("foo", TokenKind::String),
-            Token::new(" ", TokenKind::Whitespace),
-            Token::new("desc", TokenKind::Desc),
-            Token::new(";", TokenKind::Semicolon),
+            Token::new("select".to_string(), TokenKind::Select),
+            Token::new("foo".to_string(), TokenKind::Identifier),
+            Token::new(",".to_string(), TokenKind::Comma),
+            Token::new("bar".to_string(), TokenKind::Identifier),
+            Token::new(",".to_string(), TokenKind::Comma),
+            Token::new("baz".to_string(), TokenKind::Identifier),
+            Token::new("from".to_string(), TokenKind::From),
+            Token::new("test_table".to_string(), TokenKind::Identifier),
+            Token::new("where".to_string(), TokenKind::Where),
+            Token::new("bar".to_string(), TokenKind::Identifier),
+            Token::new("=".to_string(), TokenKind::EqualsSign),
+            Token::new("that thing".to_string(), TokenKind::String),
+            Token::new("order".to_string(), TokenKind::Order),
+            Token::new("by".to_string(), TokenKind::By),
+            Token::new("foo".to_string(), TokenKind::Identifier),
+            Token::new("desc".to_string(), TokenKind::Desc),
+            Token::new(";".to_string(), TokenKind::Semicolon),
         ];
 
         assert_eq!(res, expected);
