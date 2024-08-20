@@ -18,12 +18,22 @@ pub enum TokenKind {
     Order,
     By,
     Desc,
+    Create,
+    Table,
+    If,
+    Not,
+    Exists,
+    TypeString,
+    TypeInteger,
+    TypeFloat,
 
     // known symbols
     Star,
     Comma,
     Semicolon,
     EqualsSign,
+    LeftParen,
+    RightParen,
 }
 
 #[derive(PartialEq, Debug)]
@@ -47,7 +57,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 15;
+const TOKEN_SPEC_LEN: usize = 25;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -71,6 +81,8 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Comma, Regex::new(r"^,").unwrap()),
             SpecItem(TokenKind::Semicolon, Regex::new(r"^;").unwrap()),
             SpecItem(TokenKind::EqualsSign, Regex::new(r"^=").unwrap()),
+            SpecItem(TokenKind::LeftParen, Regex::new(r"^\(").unwrap()),
+            SpecItem(TokenKind::RightParen, Regex::new(r"^\)").unwrap()),
             // keywords
             SpecItem(TokenKind::Select, Regex::new(r"^(?i)select\b").unwrap()),
             SpecItem(TokenKind::Where, Regex::new(r"^(?i)where\b").unwrap()),
@@ -78,6 +90,17 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Order, Regex::new(r"^(?i)order\b").unwrap()),
             SpecItem(TokenKind::By, Regex::new(r"^(?i)by\b").unwrap()),
             SpecItem(TokenKind::Desc, Regex::new(r"^(?i)desc\b").unwrap()),
+            SpecItem(TokenKind::Create, Regex::new(r"^(?i)create\b").unwrap()),
+            SpecItem(TokenKind::Table, Regex::new(r"^(?i)table\b").unwrap()),
+            SpecItem(TokenKind::If, Regex::new(r"^(?i)if\b").unwrap()),
+            SpecItem(TokenKind::Not, Regex::new(r"^(?i)not\b").unwrap()),
+            SpecItem(TokenKind::Exists, Regex::new(r"^(?i)Exists\b").unwrap()),
+            SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
+            SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
+            SpecItem(
+                TokenKind::TypeInteger,
+                Regex::new(r"^(?i)integer\b").unwrap(),
+            ),
             // composites
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
             SpecItem(TokenKind::Float, Regex::new(r"^-?\d+.\d+").unwrap()),
@@ -212,9 +235,9 @@ mod tokenizer_tests {
     }
 
     #[test]
-    fn complicated_query() {
+    fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo desc;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo desc; 12 -12.3 create table if not ( exists ) string integer float";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -234,6 +257,18 @@ mod tokenizer_tests {
             Token::new("foo", TokenKind::Identifier),
             Token::new("desc", TokenKind::Desc),
             Token::new(";", TokenKind::Semicolon),
+            Token::new("12", TokenKind::Integer),
+            Token::new("-12.3", TokenKind::Float),
+            Token::new("create", TokenKind::Create),
+            Token::new("table", TokenKind::Table),
+            Token::new("if", TokenKind::If),
+            Token::new("not", TokenKind::Not),
+            Token::new("(", TokenKind::LeftParen),
+            Token::new("exists", TokenKind::Exists),
+            Token::new(")", TokenKind::RightParen),
+            Token::new("string", TokenKind::TypeString),
+            Token::new("integer", TokenKind::TypeInteger),
+            Token::new("float", TokenKind::TypeFloat),
         ];
 
         assert_eq!(res, expected);

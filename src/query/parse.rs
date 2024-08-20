@@ -1,3 +1,5 @@
+use crate::DbType;
+
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
 #[derive(Debug)]
@@ -23,16 +25,31 @@ impl<'a> Parser<'a> {
         self.lookahead.is_none()
     }
 
-    fn consume(&mut self, _tk: TokenKind) -> Result<Token<'a>> {
+    fn consume(&mut self, tk: TokenKind) -> Result<Token<'a>> {
         let token = self.lookahead.take();
         match token {
-            Some(t) if matches!(t.kind(), _tk) => {
+            Some(t) if t.kind() == tk => {
                 self.lookahead = self.tokens.next();
                 Ok(t)
             }
             Some(_) => Err(ParsingError::UnexpectedTokenType),
             None => Err(ParsingError::UnexpectedEndOfStatement),
         }
+    }
+
+    fn consume_type_token(&mut self) -> Result<Token<'a>> {
+        let token = match self.lookahead.take() {
+            Some(t) => t,
+            None => return Err(ParsingError::UnexpectedEndOfStatement),
+        };
+        if matches!(
+            token.kind(),
+            TokenKind::TypeString | TokenKind::TypeInteger | TokenKind::TypeFloat
+        ) {
+            self.lookahead = self.tokens.next();
+            return Ok(token);
+        }
+        Err(ParsingError::UnexpectedTokenType)
     }
 
     fn peek_kind(&self) -> Option<TokenKind> {
@@ -57,6 +74,7 @@ impl<'a> Parser<'a> {
         let expr = match self.peek_kind() {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
             Some(TokenKind::Select) => self.select_expression()?,
+            Some(TokenKind::Create) => self.create_expression()?,
             Some(_) => panic!("unimplemented!"),
             // TODO: Other expression types
         };
@@ -105,7 +123,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(Expression::SelectExpression {
+        Ok(Expression::Select {
             columns,
             table,
             where_clause,
@@ -150,6 +168,49 @@ impl<'a> Parser<'a> {
         }
         Ok(OrderByClause { sort_column, desc })
     }
+
+    fn create_expression(&mut self) -> Result<Expression<'a>> {
+        _ = self.consume(TokenKind::Create)?;
+        _ = self.consume(TokenKind::Table)?;
+        let if_not_exists = self.peek_kind().filter(|k| *k == TokenKind::If).is_some();
+        if if_not_exists {
+            _ = self.consume(TokenKind::If)?;
+            _ = self.consume(TokenKind::Not)?;
+            _ = self.consume(TokenKind::Exists)?;
+        }
+        let table = self.consume(TokenKind::Identifier)?.contents();
+        let columns = self.create_columns()?;
+
+        Ok(Expression::Create {
+            table,
+            if_not_exists,
+            columns,
+        })
+    }
+
+    fn create_columns(&mut self) -> Result<CreateColumns<'a>> {
+        _ = self.consume(TokenKind::LeftParen)?;
+        let mut names = Vec::new();
+        let mut types = Vec::new();
+        while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
+            let name = self.consume(TokenKind::Identifier)?.contents();
+            let this_type = match self.consume_type_token()?.kind() {
+                TokenKind::TypeString => DbType::String,
+                TokenKind::TypeInteger => DbType::Integer,
+                TokenKind::TypeFloat => DbType::Float,
+                _ => panic!("Got a non-type token!"),
+            };
+
+            names.push(name);
+            types.push(this_type);
+
+            if self.peek_kind() != Some(TokenKind::RightParen) {
+                _ = self.consume(TokenKind::Comma)?;
+            }
+        }
+        _ = self.consume(TokenKind::RightParen)?;
+        Ok(CreateColumns { names, types })
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -159,12 +220,23 @@ pub enum SelectColumns<'a> {
 }
 
 #[derive(PartialEq, Debug)]
+pub struct CreateColumns<'a> {
+    names: Vec<&'a str>,
+    types: Vec<DbType>,
+}
+
+#[derive(PartialEq, Debug)]
 pub enum Expression<'a> {
-    SelectExpression {
+    Select {
         columns: SelectColumns<'a>,
         table: &'a str,
         where_clause: Option<WhereClause<'a>>,
         order_by_clause: Option<OrderByClause<'a>>,
+    },
+    Create {
+        table: &'a str,
+        if_not_exists: bool,
+        columns: CreateColumns<'a>,
     },
 }
 
@@ -216,12 +288,29 @@ mod parser_tests {
     use super::*;
 
     #[test]
-    fn test_basic_select() {
+    fn consume() {
+        let stmt = "'that' this";
+        let tokens = Tokenizer::new(stmt);
+        let mut parser = Parser::new(tokens);
+
+        assert_eq!(
+            parser.consume(TokenKind::String).unwrap(),
+            Token::new("that", TokenKind::String)
+        );
+
+        let res = parser.consume(TokenKind::String);
+        println!("{res:?}");
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn basic_select() {
         let stmt = "select foo, bar from the_data;";
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
@@ -232,12 +321,12 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_basic_select_star() {
+    fn basic_select_star() {
         let stmt = "select * from the_data;";
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::AllColumns,
             table: "the_data",
             where_clause: None,
@@ -253,7 +342,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
@@ -273,7 +362,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
@@ -292,7 +381,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
@@ -311,7 +400,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::SelectExpression {
+        let expected = vec![Expression::Select {
             columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
@@ -328,7 +417,57 @@ mod parser_tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn basic_create() {
+        let stmt = "create table the_data (foo string);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Create {
+            table: "the_data",
+            if_not_exists: false,
+            columns: CreateColumns {
+                names: vec!["foo"],
+                types: vec![DbType::String],
+            },
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_if_not_exists() {
+        let stmt = "create table if not exists the_data (foo string);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Create {
+            table: "the_data",
+            if_not_exists: true,
+            columns: CreateColumns {
+                names: vec!["foo"],
+                types: vec![DbType::String],
+            },
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_table_all_types() {
+        let stmt = "create table the_data (foo string, bar integer, baz float);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Create {
+            table: "the_data",
+            if_not_exists: false,
+            columns: CreateColumns {
+                names: vec!["foo", "bar", "baz"],
+                types: vec![DbType::String, DbType::Integer, DbType::Float],
+            },
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
     // TODO:
-    // - select *
     // - versions of missing parts returning errors
 }
