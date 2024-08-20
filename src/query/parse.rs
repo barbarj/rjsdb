@@ -69,7 +69,11 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn select_columns(&mut self) -> Result<Vec<&'a str>> {
+    fn select_columns(&mut self) -> Result<SelectColumns<'a>> {
+        if self.peek_kind() == Some(TokenKind::Star) {
+            _ = self.consume(TokenKind::Star)?;
+            return Ok(SelectColumns::AllColumns);
+        }
         let first = self.consume(TokenKind::Identifier)?;
         let mut cols = vec![first.contents()];
 
@@ -79,7 +83,7 @@ impl<'a> Parser<'a> {
             cols.push(token.contents());
         }
 
-        Ok(cols)
+        Ok(SelectColumns::OnlyColumns(cols))
     }
 
     fn select_expression(&mut self) -> Result<Expression<'a>> {
@@ -149,9 +153,15 @@ impl<'a> Parser<'a> {
 }
 
 #[derive(PartialEq, Debug)]
+pub enum SelectColumns<'a> {
+    AllColumns,
+    OnlyColumns(Vec<&'a str>),
+}
+
+#[derive(PartialEq, Debug)]
 pub enum Expression<'a> {
     SelectExpression {
-        columns: Vec<&'a str>,
+        columns: SelectColumns<'a>,
         table: &'a str,
         where_clause: Option<WhereClause<'a>>,
         order_by_clause: Option<OrderByClause<'a>>,
@@ -212,7 +222,23 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::SelectExpression {
-            columns: vec!["foo", "bar"],
+            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            table: "the_data",
+            where_clause: None,
+            order_by_clause: None,
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_basic_select_star() {
+        let stmt = "select * from the_data;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: SelectColumns::AllColumns,
             table: "the_data",
             where_clause: None,
             order_by_clause: None,
@@ -228,7 +254,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::SelectExpression {
-            columns: vec!["foo", "bar"],
+            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
                 left: Token::new("that", TokenKind::Identifier),
@@ -248,7 +274,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::SelectExpression {
-            columns: vec!["foo", "bar"],
+            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -267,7 +293,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::SelectExpression {
-            columns: vec!["foo", "bar"],
+            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -286,7 +312,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::SelectExpression {
-            columns: vec!["foo", "bar"],
+            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
                 left: Token::new("this", TokenKind::String),
