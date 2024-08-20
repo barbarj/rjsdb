@@ -1,5 +1,6 @@
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
+#[derive(Debug)]
 pub enum ParsingError {
     UnexpectedEndOfStatement,
     UnexpectedTokenType,
@@ -108,10 +109,17 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // TODO: Visit again after adding int and float tokens
+    fn is_where_clause_member_kind(tk: TokenKind) -> bool {
+        matches!(
+            tk,
+            TokenKind::Identifier | TokenKind::String | TokenKind::Integer | TokenKind::Float
+        )
+    }
+
     fn where_clause(&mut self) -> Result<WhereClause<'a>> {
+        _ = self.consume(TokenKind::Where)?;
         let left = match self.peek_kind() {
-            Some(k) if matches!(k, TokenKind::Identifier | TokenKind::String) => self.consume(k)?,
+            Some(k) if Parser::is_where_clause_member_kind(k) => self.consume(k)?,
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
@@ -121,7 +129,7 @@ impl<'a> Parser<'a> {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
         let right = match self.peek_kind() {
-            Some(k) if matches!(k, TokenKind::Identifier | TokenKind::String) => self.consume(k)?,
+            Some(k) if Parser::is_where_clause_member_kind(k) => self.consume(k)?,
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
@@ -140,6 +148,7 @@ impl<'a> Parser<'a> {
     }
 }
 
+#[derive(PartialEq, Debug)]
 pub enum Expression<'a> {
     SelectExpression {
         columns: Vec<&'a str>,
@@ -149,12 +158,14 @@ pub enum Expression<'a> {
     },
 }
 
+#[derive(PartialEq, Debug)]
 pub struct WhereClause<'a> {
     left: Token<'a>,
     cmp: Token<'a>,
     right: Token<'a>,
 }
 
+#[derive(PartialEq, Debug)]
 pub struct OrderByClause<'a> {
     sort_column: &'a str,
     desc: bool,
@@ -189,3 +200,109 @@ Select foo, bar from test_table where foo = 'a' order by bar desc;
 
 // Destroy
 // - table
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_select() {
+        let stmt = "select foo, bar from the_data;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: vec!["foo", "bar"],
+            table: "the_data",
+            where_clause: None,
+            order_by_clause: None,
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_where_only() {
+        let stmt = "select foo, bar from the_data where that = 'this';";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: vec!["foo", "bar"],
+            table: "the_data",
+            where_clause: Some(WhereClause {
+                left: Token::new("that", TokenKind::Identifier),
+                cmp: Token::new("=", TokenKind::EqualsSign),
+                right: Token::new("this", TokenKind::String),
+            }),
+            order_by_clause: None,
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_sort_only() {
+        let stmt = "select foo, bar from the_data order by baz;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: vec!["foo", "bar"],
+            table: "the_data",
+            where_clause: None,
+            order_by_clause: Some(OrderByClause {
+                sort_column: "baz",
+                desc: false,
+            }),
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_sort_desc() {
+        let stmt = "select foo, bar from the_data order by baz desc;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: vec!["foo", "bar"],
+            table: "the_data",
+            where_clause: None,
+            order_by_clause: Some(OrderByClause {
+                sort_column: "baz",
+                desc: true,
+            }),
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_where_and_sort() {
+        let stmt = "select foo, bar from the_data where 'this' = that order by baz desc;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::SelectExpression {
+            columns: vec!["foo", "bar"],
+            table: "the_data",
+            where_clause: Some(WhereClause {
+                left: Token::new("this", TokenKind::String),
+                cmp: Token::new("=", TokenKind::EqualsSign),
+                right: Token::new("that", TokenKind::Identifier),
+            }),
+            order_by_clause: Some(OrderByClause {
+                sort_column: "baz",
+                desc: true,
+            }),
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    // TODO:
+    // - select *
+    // - versions of missing parts returning errors
+}

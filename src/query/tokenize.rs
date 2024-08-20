@@ -8,6 +8,8 @@ pub enum TokenKind {
     // composite kinds
     Identifier,
     String,
+    Integer,
+    Float,
 
     // reserved words
     Select,
@@ -45,7 +47,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 13;
+const TOKEN_SPEC_LEN: usize = 15;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -78,6 +80,8 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Desc, Regex::new(r"^(?i)desc\b").unwrap()),
             // composites
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
+            SpecItem(TokenKind::Float, Regex::new(r"^-?\d+.\d+").unwrap()),
+            SpecItem(TokenKind::Integer, Regex::new(r"^-?\d+").unwrap()),
             SpecItem(TokenKind::Identifier, Regex::new(r"^[^\s*,;=]+").unwrap()),
         ]
     }
@@ -91,7 +95,6 @@ impl<'a> Tokenizer<'a> {
 
         for SpecItem(kind, regex) in &self.spec {
             if let Some(m) = regex.find(input) {
-                println!("matches: '{}'({})", m.as_str(), m.len());
                 self.cursor += m.len();
                 // TODO: Make this happen iteratively instead of recursively
                 if matches!(kind, TokenKind::None) {
@@ -120,22 +123,13 @@ impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let token = self.tokenizer.next_token();
-        println!("{token:?}");
-        token
+        self.tokenizer.next_token()
     }
 }
 
 #[cfg(test)]
 mod tokenizer_tests {
     use super::*;
-
-    #[test]
-    fn regex_test() {
-        let r = Regex::new(r"^(?i)(select)(\s|$)").unwrap();
-        let m = r.find("SELECT").unwrap();
-        println!("{}", m.as_str());
-    }
 
     #[test]
     fn whitespace_splitting() {
