@@ -33,6 +33,14 @@ impl<'a> Token<'a> {
     pub fn new(contents: &'a str, kind: TokenKind) -> Self {
         Token { contents, kind }
     }
+
+    pub fn kind(&self) -> TokenKind {
+        self.kind
+    }
+
+    pub fn contents(&self) -> &'a str {
+        self.contents
+    }
 }
 
 struct SpecItem(TokenKind, Regex);
