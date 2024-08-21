@@ -1,4 +1,6 @@
-use crate::DbType;
+use std::num::{ParseFloatError, ParseIntError};
+
+use crate::{DbType, DbValue};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
@@ -6,6 +8,18 @@ use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 pub enum ParsingError {
     UnexpectedEndOfStatement,
     UnexpectedTokenType,
+    ParseFloatError(ParseFloatError),
+    ParseIntError(ParseIntError),
+}
+impl From<ParseFloatError> for ParsingError {
+    fn from(value: ParseFloatError) -> Self {
+        ParsingError::ParseFloatError(value)
+    }
+}
+impl From<ParseIntError> for ParsingError {
+    fn from(value: ParseIntError) -> Self {
+        ParsingError::ParseIntError(value)
+    }
 }
 
 type Result<T> = std::result::Result<T, ParsingError>;
@@ -107,7 +121,7 @@ impl<'a> Parser<'a> {
     fn select_columns(&mut self) -> Result<SelectColumns<'a>> {
         if self.peek_kind() == Some(TokenKind::Star) {
             _ = self.consume(TokenKind::Star)?;
-            return Ok(SelectColumns::AllColumns);
+            return Ok(SelectColumns::All);
         }
         let first = self.consume(TokenKind::Identifier)?;
         let mut cols = vec![first.contents()];
@@ -118,7 +132,7 @@ impl<'a> Parser<'a> {
             cols.push(token.contents());
         }
 
-        Ok(SelectColumns::OnlyColumns(cols))
+        Ok(SelectColumns::Only(cols))
     }
 
     fn select_expression(&mut self) -> Result<Expression<'a>> {
@@ -250,8 +264,15 @@ impl<'a> Parser<'a> {
         let mut values = Vec::new();
         _ = self.consume(TokenKind::LeftParen)?;
         while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
-            let name = self.consume_value_token()?.contents();
-            values.push(name);
+            let token = self.consume_value_token()?;
+            let val = match token.kind() {
+                TokenKind::String => DbValue::String(token.contents().to_string()),
+                TokenKind::Float => DbValue::Float(token.contents().parse::<f32>()?),
+                TokenKind::Integer => DbValue::Integer(token.contents().parse::<i32>()?),
+                _ => panic!("Should not happen!"),
+            };
+
+            values.push(val);
             if self.peek_kind() != Some(TokenKind::RightParen) {
                 _ = self.consume(TokenKind::Comma)?;
             }
@@ -275,8 +296,8 @@ impl<'a> Parser<'a> {
 
 #[derive(PartialEq, Debug)]
 pub enum SelectColumns<'a> {
-    AllColumns,
-    OnlyColumns(Vec<&'a str>),
+    All,
+    Only(Vec<&'a str>),
 }
 
 #[derive(PartialEq, Debug)]
@@ -303,7 +324,7 @@ pub enum Expression<'a> {
         columns: Vec<&'a str>,
         // TODO: Figure out how to properly handle values.
         // should I convert number types during tokenization??
-        values: Vec<&'a str>,
+        values: Vec<DbValue>,
     },
     Destroy {
         table: &'a str,
@@ -349,7 +370,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: None,
@@ -365,7 +386,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::AllColumns,
+            columns: SelectColumns::All,
             table: "the_data",
             where_clause: None,
             order_by_clause: None,
@@ -381,7 +402,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
                 left: Token::new("that", TokenKind::Identifier),
@@ -401,7 +422,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -420,7 +441,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -439,7 +460,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select {
-            columns: SelectColumns::OnlyColumns(vec!["foo", "bar"]),
+            columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
                 left: Token::new("this", TokenKind::String),
@@ -514,7 +535,11 @@ mod parser_tests {
         let expected = vec![Expression::Insert {
             table: "the_data",
             columns: vec!["foo", "bar", "baz"],
-            values: vec!["thing", "42", "5.25"],
+            values: vec![
+                DbValue::String(String::from("thing")),
+                DbValue::Integer(42),
+                DbValue::Float(5.25),
+            ],
         }];
 
         assert_eq!(actual, expected);
@@ -545,7 +570,7 @@ mod parser_tests {
                 },
             },
             Expression::Select {
-                columns: SelectColumns::AllColumns,
+                columns: SelectColumns::All,
                 table: "the_data",
                 where_clause: None,
                 order_by_clause: None,
@@ -556,6 +581,5 @@ mod parser_tests {
     }
 
     // TODO:
-    // - multiple statements
     // - versions of missing parts returning errors
 }
