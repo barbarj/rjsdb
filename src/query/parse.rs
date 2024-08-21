@@ -530,6 +530,32 @@ mod parser_tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn multiple_statements() {
+        let input = "create table if not exists the_data (foo string, bar integer); select * from the_data;";
+        let tokens = Tokenizer::new(input);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![
+            Expression::Create {
+                table: "the_data",
+                if_not_exists: true,
+                columns: CreateColumns {
+                    names: vec!["foo", "bar"],
+                    types: vec![DbType::String, DbType::Integer],
+                },
+            },
+            Expression::Select {
+                columns: SelectColumns::AllColumns,
+                table: "the_data",
+                where_clause: None,
+                order_by_clause: None,
+            },
+        ];
+
+        assert_eq!(actual, expected);
+    }
+
     // TODO:
+    // - multiple statements
     // - versions of missing parts returning errors
 }
