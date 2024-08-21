@@ -52,6 +52,21 @@ impl<'a> Parser<'a> {
         Err(ParsingError::UnexpectedTokenType)
     }
 
+    fn consume_value_token(&mut self) -> Result<Token<'a>> {
+        let token = match self.lookahead.take() {
+            Some(t) => t,
+            None => return Err(ParsingError::UnexpectedEndOfStatement),
+        };
+        if matches!(
+            token.kind(),
+            TokenKind::String | TokenKind::Integer | TokenKind::Float
+        ) {
+            self.lookahead = self.tokens.next();
+            return Ok(token);
+        }
+        Err(ParsingError::UnexpectedTokenType)
+    }
+
     fn peek_kind(&self) -> Option<TokenKind> {
         self.lookahead.as_ref().map(|t| t.kind())
     }
@@ -75,6 +90,7 @@ impl<'a> Parser<'a> {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
             Some(TokenKind::Select) => self.select_expression()?,
             Some(TokenKind::Create) => self.create_expression()?,
+            Some(TokenKind::Insert) => self.insert_expression()?,
             Some(_) => panic!("unimplemented!"),
             // TODO: Other expression types
         };
@@ -211,6 +227,42 @@ impl<'a> Parser<'a> {
         _ = self.consume(TokenKind::RightParen)?;
         Ok(CreateColumns { names, types })
     }
+
+    fn insert_expression(&mut self) -> Result<Expression<'a>> {
+        _ = self.consume(TokenKind::Insert)?;
+        _ = self.consume(TokenKind::Into)?;
+
+        let table = self.consume(TokenKind::Identifier)?.contents();
+
+        let mut columns = Vec::new();
+        _ = self.consume(TokenKind::LeftParen)?;
+        while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
+            let name = self.consume(TokenKind::Identifier)?.contents();
+            columns.push(name);
+            if self.peek_kind() != Some(TokenKind::RightParen) {
+                _ = self.consume(TokenKind::Comma)?;
+            }
+        }
+        _ = self.consume(TokenKind::RightParen)?;
+
+        _ = self.consume(TokenKind::Values)?;
+        let mut values = Vec::new();
+        _ = self.consume(TokenKind::LeftParen)?;
+        while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
+            let name = self.consume_value_token()?.contents();
+            values.push(name);
+            if self.peek_kind() != Some(TokenKind::RightParen) {
+                _ = self.consume(TokenKind::Comma)?;
+            }
+        }
+        _ = self.consume(TokenKind::RightParen)?;
+
+        Ok(Expression::Insert {
+            table,
+            columns,
+            values,
+        })
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -237,6 +289,13 @@ pub enum Expression<'a> {
         table: &'a str,
         if_not_exists: bool,
         columns: CreateColumns<'a>,
+    },
+    Insert {
+        table: &'a str,
+        columns: Vec<&'a str>,
+        // TODO: Figure out how to properly handle values.
+        // should I convert number types during tokenization??
+        values: Vec<&'a str>,
     },
 }
 
@@ -275,16 +334,20 @@ Select foo, bar from test_table where foo = 'a' order by bar desc;
 // - if not exists?
 // - columns
 
+// insert into table_name (foo, bar) values (1, 2)
 // Insert (into)
 // - table
 // - columns
 // - values
 
+// destroy table table_name
 // Destroy
 // - table
 
 #[cfg(test)]
 mod parser_tests {
+    use serde::de::Expected;
+
     use super::*;
 
     #[test]
@@ -299,8 +362,6 @@ mod parser_tests {
         );
 
         let res = parser.consume(TokenKind::String);
-        println!("{res:?}");
-
         assert!(res.is_err());
     }
 
@@ -463,6 +524,20 @@ mod parser_tests {
                 names: vec!["foo", "bar", "baz"],
                 types: vec![DbType::String, DbType::Integer, DbType::Float],
             },
+        }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn insert_into() {
+        let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Insert {
+            table: "the_data",
+            columns: vec!["foo", "bar", "baz"],
+            values: vec!["thing", "42", "5.25"],
         }];
 
         assert_eq!(actual, expected);

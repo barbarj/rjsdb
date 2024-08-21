@@ -23,6 +23,9 @@ pub enum TokenKind {
     If,
     Not,
     Exists,
+    Insert,
+    Into,
+    Values,
     TypeString,
     TypeInteger,
     TypeFloat,
@@ -57,7 +60,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 25;
+const TOKEN_SPEC_LEN: usize = 28;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -94,7 +97,10 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Table, Regex::new(r"^(?i)table\b").unwrap()),
             SpecItem(TokenKind::If, Regex::new(r"^(?i)if\b").unwrap()),
             SpecItem(TokenKind::Not, Regex::new(r"^(?i)not\b").unwrap()),
-            SpecItem(TokenKind::Exists, Regex::new(r"^(?i)Exists\b").unwrap()),
+            SpecItem(TokenKind::Exists, Regex::new(r"^(?i)exists\b").unwrap()),
+            SpecItem(TokenKind::Insert, Regex::new(r"^(?i)insert\b").unwrap()),
+            SpecItem(TokenKind::Into, Regex::new(r"^(?i)into\b").unwrap()),
+            SpecItem(TokenKind::Values, Regex::new(r"^(?i)values\b").unwrap()),
             SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
             SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
             SpecItem(
@@ -105,7 +111,10 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
             SpecItem(TokenKind::Float, Regex::new(r"^-?\d+.\d+").unwrap()),
             SpecItem(TokenKind::Integer, Regex::new(r"^-?\d+").unwrap()),
-            SpecItem(TokenKind::Identifier, Regex::new(r"^[^\s*,;=]+").unwrap()),
+            SpecItem(
+                TokenKind::Identifier,
+                Regex::new(r"^[^\s*,;=\(\)]+").unwrap(),
+            ),
         ]
     }
 
@@ -237,7 +246,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo desc; 12 -12.3 create table if not ( exists ) string integer float";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; 12 -12.3 create table if not ( exists string integer float insert into values";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -255,6 +264,7 @@ mod tokenizer_tests {
             Token::new("order", TokenKind::Order),
             Token::new("by", TokenKind::By),
             Token::new("foo", TokenKind::Identifier),
+            Token::new(")", TokenKind::RightParen),
             Token::new("desc", TokenKind::Desc),
             Token::new(";", TokenKind::Semicolon),
             Token::new("12", TokenKind::Integer),
@@ -265,10 +275,12 @@ mod tokenizer_tests {
             Token::new("not", TokenKind::Not),
             Token::new("(", TokenKind::LeftParen),
             Token::new("exists", TokenKind::Exists),
-            Token::new(")", TokenKind::RightParen),
             Token::new("string", TokenKind::TypeString),
             Token::new("integer", TokenKind::TypeInteger),
             Token::new("float", TokenKind::TypeFloat),
+            Token::new("insert", TokenKind::Insert),
+            Token::new("into", TokenKind::Into),
+            Token::new("values", TokenKind::Values),
         ];
 
         assert_eq!(res, expected);
