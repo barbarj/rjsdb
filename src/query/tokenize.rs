@@ -26,6 +26,7 @@ pub enum TokenKind {
     Insert,
     Into,
     Values,
+    Destroy,
     TypeString,
     TypeInteger,
     TypeFloat,
@@ -60,7 +61,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 28;
+const TOKEN_SPEC_LEN: usize = 29;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -101,6 +102,7 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Insert, Regex::new(r"^(?i)insert\b").unwrap()),
             SpecItem(TokenKind::Into, Regex::new(r"^(?i)into\b").unwrap()),
             SpecItem(TokenKind::Values, Regex::new(r"^(?i)values\b").unwrap()),
+            SpecItem(TokenKind::Destroy, Regex::new(r"^(?i)destroy\b").unwrap()),
             SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
             SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
             SpecItem(
@@ -246,7 +248,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; 12 -12.3 create table if not ( exists string integer float insert into values";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; 12 -12.3 create table if not ( exists string integer float insert into values destroy";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -281,6 +283,7 @@ mod tokenizer_tests {
             Token::new("insert", TokenKind::Insert),
             Token::new("into", TokenKind::Into),
             Token::new("values", TokenKind::Values),
+            Token::new("destroy", TokenKind::Destroy),
         ];
 
         assert_eq!(res, expected);

@@ -91,6 +91,7 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Select) => self.select_expression()?,
             Some(TokenKind::Create) => self.create_expression()?,
             Some(TokenKind::Insert) => self.insert_expression()?,
+            Some(TokenKind::Destroy) => self.destroy_expression()?,
             Some(_) => panic!("unimplemented!"),
             // TODO: Other expression types
         };
@@ -263,6 +264,13 @@ impl<'a> Parser<'a> {
             values,
         })
     }
+
+    fn destroy_expression(&mut self) -> Result<Expression<'a>> {
+        _ = self.consume(TokenKind::Destroy)?;
+        _ = self.consume(TokenKind::Table)?;
+        let table = self.consume(TokenKind::Identifier)?.contents();
+        Ok(Expression::Destroy { table })
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -297,6 +305,9 @@ pub enum Expression<'a> {
         // should I convert number types during tokenization??
         values: Vec<&'a str>,
     },
+    Destroy {
+        table: &'a str,
+    },
 }
 
 #[derive(PartialEq, Debug)]
@@ -311,43 +322,9 @@ pub struct OrderByClause<'a> {
     sort_column: &'a str,
     desc: bool,
 }
-/*
-Select foo, bar from test_table where foo = 'a' order by bar desc;
-
----
-- access test_table
-- order by bar desc
-- where foo = 'a'
-- Select foo, bar
----
-
-*/
-
-// Select
-// - columns
-// - from table
-// - filter
-// - sort
-
-// Create
-// - table
-// - if not exists?
-// - columns
-
-// insert into table_name (foo, bar) values (1, 2)
-// Insert (into)
-// - table
-// - columns
-// - values
-
-// destroy table table_name
-// Destroy
-// - table
 
 #[cfg(test)]
 mod parser_tests {
-    use serde::de::Expected;
-
     use super::*;
 
     #[test]
@@ -539,6 +516,16 @@ mod parser_tests {
             columns: vec!["foo", "bar", "baz"],
             values: vec!["thing", "42", "5.25"],
         }];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn destroy() {
+        let stmt = "destroy table the_data;";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Destroy { table: "the_data" }];
 
         assert_eq!(actual, expected);
     }
