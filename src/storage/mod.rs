@@ -1,4 +1,6 @@
 use std::{
+    borrow::{Borrow, Cow},
+    collections::HashMap,
     fmt::{Display, Write as FmtWrite},
     fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
@@ -86,7 +88,7 @@ impl StorageLayer {
         if schema.schema.is_empty() {
             return Err(StorageError::EmptySchemaProvided);
         }
-        if has_duplicates(schema.schema.iter().map(|c| &c.name)) {
+        if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
         }
         let table = Table::new(name.to_string(), schema.clone());
@@ -148,7 +150,7 @@ impl StorageLayer {
         table.delete_rows(ids)
     }
 
-    pub fn table_scan(&self, table_name: &str) -> Result<impl Iterator<Item = &Row>> {
+    pub fn table_scan(&self, table_name: &str) -> Result<Rows> {
         let table = match self.table(table_name) {
             Some(table) => table,
             None => return Err(StorageError::TableDoesNotExist),
@@ -207,8 +209,13 @@ impl TableHeader {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Column {
-    name: String,
-    _type: DbType,
+    pub name: String,
+    pub _type: DbType,
+}
+impl Column {
+    pub fn new(name: String, _type: DbType) -> Self {
+        Column { name, _type }
+    }
 }
 impl Display for Column {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,29 +237,55 @@ impl Generate for Column {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+struct ColumnWithIndex {
+    column: Column,
+    index: usize,
+}
+impl ColumnWithIndex {
+    fn new(column: Column, index: usize) -> Self {
+        ColumnWithIndex { column, index }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Schema {
-    schema: Vec<Column>,
+    schema: HashMap<String, ColumnWithIndex>,
 }
 impl Schema {
-    pub fn new(cols: Vec<Column>) -> Self {
-        Schema { schema: cols }
+    pub fn new(schema: Vec<Column>) -> Self {
+        let mut map = HashMap::new();
+        let mut index: usize = 0;
+        for col in schema {
+            map.insert(col.name.clone(), ColumnWithIndex::new(col, index));
+            index += 1;
+        }
+        Schema { schema: map }
+    }
+
+    pub fn column_position(&self, name: &str) -> Option<usize> {
+        self.schema.get(name).map(|ci| ci.index)
+    }
+
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.schema.get(name).map(|ci| &ci.column)
     }
 
     pub fn matches(&self, row: &Row) -> bool {
-        let our_types = self.schema.iter().map(|c| &c._type);
+        let our_types = self.columns().map(|c| c._type);
         let their_types = row.data.iter().map(|v| v.db_type());
-        zip(our_types, their_types).all(|(a, b)| *a == b)
+        zip(our_types, their_types).all(|(a, b)| a == b)
+    }
+
+    fn columns(&self) -> impl Iterator<Item = &Column> {
+        self.schema.values().map(|v| &v.column)
     }
 
     pub fn gen_row(&self, rng: &mut RNG) -> Row {
         let mut data = Vec::new();
-        for col in self.schema.iter() {
+        for col in self.columns() {
             data.push(col._type.generate_val(rng));
         }
-        Row {
-            id: usize::generate(rng),
-            data,
-        }
+        Row::new(data)
     }
 }
 impl Display for Schema {
@@ -263,7 +296,7 @@ impl Display for Schema {
             if !first {
                 f.write_str(", ")?;
             }
-            c.fmt(f)?;
+            c.1.column.fmt(f)?;
             first = false;
         }
         f.write_char(']')
@@ -280,7 +313,7 @@ impl Generate for Schema {
         for _ in 0..col_count {
             cols.push(Column::generate(rng));
         }
-        Schema { schema: cols }
+        Schema::new(cols)
     }
 }
 
@@ -325,18 +358,25 @@ impl Table {
         Ok(())
     }
 
-    pub fn rows(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter()
+    pub fn rows(&self) -> Rows {
+        Rows {
+            rows: &self.rows,
+            schema: self.header.schema.clone(),
+        }
     }
 }
 
-// TODO: Privatize row
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+// TODO: Add reference to column list, and a way to get a specific columns value
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct Row {
-    pub id: usize,
+    id: usize,
     pub data: Vec<DbValue>,
 }
 impl Row {
+    pub fn new(data: Vec<DbValue>) -> Self {
+        Row { id: 0, data }
+    }
+
     pub fn schema(&self) -> Vec<DbType> {
         self.data.iter().map(|r| r.db_type()).collect()
     }
@@ -351,6 +391,11 @@ impl Display for Row {
         f.write_char(')')?;
         Ok(())
     }
+}
+
+pub struct Rows<'a> {
+    pub rows: &'a [Row],
+    pub schema: Schema,
 }
 
 #[derive(Debug)]

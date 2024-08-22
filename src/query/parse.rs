@@ -1,6 +1,6 @@
 use std::num::{ParseFloatError, ParseIntError};
 
-use crate::{DbType, DbValue};
+use crate::{storage::Row, DbType, DbValue};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
@@ -154,12 +154,12 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(Expression::Select {
+        Ok(Expression::Select(SelectExpression {
             columns,
             table,
             where_clause,
             order_by_clause,
-        })
+        }))
     }
 
     fn is_where_clause_member_kind(tk: TokenKind) -> bool {
@@ -212,11 +212,11 @@ impl<'a> Parser<'a> {
         let table = self.consume(TokenKind::Identifier)?.contents();
         let columns = self.create_columns()?;
 
-        Ok(Expression::Create {
+        Ok(Expression::Create(CreateExpression {
             table,
             if_not_exists,
             columns,
-        })
+        }))
     }
 
     fn create_columns(&mut self) -> Result<CreateColumns<'a>> {
@@ -279,18 +279,18 @@ impl<'a> Parser<'a> {
         }
         _ = self.consume(TokenKind::RightParen)?;
 
-        Ok(Expression::Insert {
+        Ok(Expression::Insert(InsertExpression {
             table,
             columns,
             values,
-        })
+        }))
     }
 
     fn destroy_expression(&mut self) -> Result<Expression<'a>> {
         _ = self.consume(TokenKind::Destroy)?;
         _ = self.consume(TokenKind::Table)?;
         let table = self.consume(TokenKind::Identifier)?.contents();
-        Ok(Expression::Destroy { table })
+        Ok(Expression::Destroy(DestroyExpression { table }))
     }
 }
 
@@ -302,33 +302,43 @@ pub enum SelectColumns<'a> {
 
 #[derive(PartialEq, Debug)]
 pub struct CreateColumns<'a> {
-    names: Vec<&'a str>,
-    types: Vec<DbType>,
+    pub names: Vec<&'a str>,
+    pub types: Vec<DbType>,
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Expression<'a> {
-    Select {
-        columns: SelectColumns<'a>,
-        table: &'a str,
-        where_clause: Option<WhereClause<'a>>,
-        order_by_clause: Option<OrderByClause<'a>>,
-    },
-    Create {
-        table: &'a str,
-        if_not_exists: bool,
-        columns: CreateColumns<'a>,
-    },
-    Insert {
-        table: &'a str,
-        columns: Vec<&'a str>,
-        // TODO: Figure out how to properly handle values.
-        // should I convert number types during tokenization??
-        values: Vec<DbValue>,
-    },
-    Destroy {
-        table: &'a str,
-    },
+    Select(SelectExpression<'a>),
+    Create(CreateExpression<'a>),
+    Insert(InsertExpression<'a>),
+    Destroy(DestroyExpression<'a>),
+}
+
+#[derive(PartialEq, Debug)]
+pub struct SelectExpression<'a> {
+    pub columns: SelectColumns<'a>,
+    pub table: &'a str,
+    pub where_clause: Option<WhereClause<'a>>,
+    pub order_by_clause: Option<OrderByClause<'a>>,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct CreateExpression<'a> {
+    pub table: &'a str,
+    pub if_not_exists: bool,
+    pub columns: CreateColumns<'a>,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct InsertExpression<'a> {
+    pub table: &'a str,
+    pub columns: Vec<&'a str>,
+    pub values: Vec<DbValue>,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct DestroyExpression<'a> {
+    pub table: &'a str,
 }
 
 #[derive(PartialEq, Debug)]
@@ -337,11 +347,26 @@ pub struct WhereClause<'a> {
     cmp: Token<'a>,
     right: Token<'a>,
 }
+impl<'a> WhereClause<'a> {
+    // TODO: Fill in necessary logic for boolean expressions
+    pub fn predicate(&self, row: &Row) -> bool {
+        true
+    }
+}
 
 #[derive(PartialEq, Debug)]
 pub struct OrderByClause<'a> {
     sort_column: &'a str,
     desc: bool,
+}
+impl<'a> OrderByClause<'a> {
+    pub fn sort_key(&self) -> &'a str {
+        self.sort_column
+    }
+
+    pub fn desc(&self) -> bool {
+        self.desc
+    }
 }
 
 #[cfg(test)]
@@ -369,12 +394,12 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
             order_by_clause: None,
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -385,12 +410,12 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::All,
             table: "the_data",
             where_clause: None,
             order_by_clause: None,
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -401,7 +426,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
@@ -410,7 +435,7 @@ mod parser_tests {
                 right: Token::new("this", TokenKind::String),
             }),
             order_by_clause: None,
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -421,7 +446,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
@@ -429,7 +454,7 @@ mod parser_tests {
                 sort_column: "baz",
                 desc: false,
             }),
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -440,7 +465,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: None,
@@ -448,7 +473,7 @@ mod parser_tests {
                 sort_column: "baz",
                 desc: true,
             }),
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -459,7 +484,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Select {
+        let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec!["foo", "bar"]),
             table: "the_data",
             where_clause: Some(WhereClause {
@@ -471,7 +496,7 @@ mod parser_tests {
                 sort_column: "baz",
                 desc: true,
             }),
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -481,14 +506,14 @@ mod parser_tests {
         let stmt = "create table the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Create {
+        let expected = vec![Expression::Create(CreateExpression {
             table: "the_data",
             if_not_exists: false,
             columns: CreateColumns {
                 names: vec!["foo"],
                 types: vec![DbType::String],
             },
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -498,14 +523,14 @@ mod parser_tests {
         let stmt = "create table if not exists the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Create {
+        let expected = vec![Expression::Create(CreateExpression {
             table: "the_data",
             if_not_exists: true,
             columns: CreateColumns {
                 names: vec!["foo"],
                 types: vec![DbType::String],
             },
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -515,14 +540,14 @@ mod parser_tests {
         let stmt = "create table the_data (foo string, bar integer, baz float);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Create {
+        let expected = vec![Expression::Create(CreateExpression {
             table: "the_data",
             if_not_exists: false,
             columns: CreateColumns {
                 names: vec!["foo", "bar", "baz"],
                 types: vec![DbType::String, DbType::Integer, DbType::Float],
             },
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -532,7 +557,7 @@ mod parser_tests {
         let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Insert {
+        let expected = vec![Expression::Insert(InsertExpression {
             table: "the_data",
             columns: vec!["foo", "bar", "baz"],
             values: vec![
@@ -540,7 +565,7 @@ mod parser_tests {
                 DbValue::Integer(42),
                 DbValue::Float(5.25),
             ],
-        }];
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -550,7 +575,7 @@ mod parser_tests {
         let stmt = "destroy table the_data;";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Destroy { table: "the_data" }];
+        let expected = vec![Expression::Destroy(DestroyExpression { table: "the_data" })];
 
         assert_eq!(actual, expected);
     }
@@ -561,20 +586,20 @@ mod parser_tests {
         let tokens = Tokenizer::new(input);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![
-            Expression::Create {
+            Expression::Create(CreateExpression {
                 table: "the_data",
                 if_not_exists: true,
                 columns: CreateColumns {
                     names: vec!["foo", "bar"],
                     types: vec![DbType::String, DbType::Integer],
                 },
-            },
-            Expression::Select {
+            }),
+            Expression::Select(SelectExpression {
                 columns: SelectColumns::All,
                 table: "the_data",
                 where_clause: None,
                 order_by_clause: None,
-            },
+            }),
         ];
 
         assert_eq!(actual, expected);

@@ -8,7 +8,7 @@ pub mod query;
 pub mod storage;
 
 const DB_TYPE_COUNT: u32 = 3;
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Copy, Clone)]
 pub enum DbType {
     String,
     Integer,
@@ -36,7 +36,7 @@ impl Generate for DbType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum DbValue {
     String(String),
     Integer(i32),
