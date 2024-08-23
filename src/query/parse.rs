@@ -1,6 +1,9 @@
 use std::num::{ParseFloatError, ParseIntError};
 
-use crate::{storage::Row, DbType, DbValue};
+use crate::{
+    storage::{Row, Schema},
+    DbType, DbValue,
+};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
@@ -349,8 +352,8 @@ pub struct WhereClause<'a> {
 }
 impl<'a> WhereClause<'a> {
     // TODO: Fill in necessary logic for boolean expressions
-    pub fn predicate(&self, row: &Row) -> bool {
-        true
+    pub fn predicate(&self) -> impl Fn(&Row) -> bool {
+        |r: &Row| true
     }
 }
 
@@ -360,8 +363,17 @@ pub struct OrderByClause<'a> {
     desc: bool,
 }
 impl<'a> OrderByClause<'a> {
-    pub fn sort_key(&self) -> &'a str {
-        self.sort_column
+    pub fn sort_key(&self) -> impl Fn(&Row, &Schema) -> Vec<DbValue> {
+        let sort_col = self.sort_column.to_string();
+        move |r: &Row, schema: &Schema| {
+            // TODO: Handle bad column name here
+            let pos = schema.column_position(&sort_col).unwrap();
+            let mut key = Vec::new();
+            if let Some(v) = r.data.get(pos) {
+                key.push(v.clone());
+            }
+            key
+        }
     }
 
     pub fn desc(&self) -> bool {

@@ -2,13 +2,13 @@ use execute::{ExecutablePlan, ExecutionError, QueryResult};
 use parse::{Parser, ParsingError};
 use tokenize::Tokenizer;
 
-use crate::storage::{Row, StorageError, StorageLayer};
+use crate::storage::{StorageError, StorageLayer};
 
 mod execute;
 mod parse;
 mod tokenize;
 
-enum QueryError {
+pub enum QueryError {
     StorageError(StorageError),
     ParsingError(ParsingError),
     ExecutionError(ExecutionError),

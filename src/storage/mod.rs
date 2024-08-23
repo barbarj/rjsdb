@@ -1,5 +1,4 @@
 use std::{
-    borrow::{Borrow, Cow},
     collections::HashMap,
     fmt::{Display, Write as FmtWrite},
     fs::{File, OpenOptions},
@@ -254,10 +253,8 @@ pub struct Schema {
 impl Schema {
     pub fn new(schema: Vec<Column>) -> Self {
         let mut map = HashMap::new();
-        let mut index: usize = 0;
-        for col in schema {
+        for (index, col) in schema.into_iter().enumerate() {
             map.insert(col.name.clone(), ColumnWithIndex::new(col, index));
-            index += 1;
         }
         Schema { schema: map }
     }

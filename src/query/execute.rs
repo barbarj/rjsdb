@@ -1,16 +1,13 @@
-use std::{
-    borrow::Cow,
-    iter::{zip, FromFn},
-};
+use std::{borrow::Cow, iter::zip};
 
 use crate::{
-    storage::{Column, Row, Rows, Schema, StorageError, StorageLayer, Table},
+    storage::{Column, Row, Rows, Schema, StorageError, StorageLayer},
     DbValue,
 };
 
 use super::parse::{
-    CreateExpression, DestroyExpression, Expression, InsertExpression, SelectColumns,
-    SelectExpression,
+    CreateExpression, DestroyExpression, Expression, InsertExpression, OrderByClause,
+    SelectColumns, SelectExpression, WhereClause,
 };
 
 pub enum ExecutionError {
@@ -92,8 +89,7 @@ impl<'plan> ExecutablePlan<'plan> {
         }
         let values: Vec<DbValue> = order
             .iter()
-            .map(|i| insert_expr.values.get(*i).cloned())
-            .flatten()
+            .filter_map(|i| insert_expr.values.get(*i).cloned())
             .collect();
         let rows: Vec<Row> = vec![Row::new(values)];
         self.storage.insert_rows(insert_expr.table, rows)?;
@@ -182,7 +178,7 @@ impl<'a> Iterator for TableRowsIter<'a> {
         }
         let row = self.rows.rows.get(self.cursor);
         self.cursor += 1;
-        row.map(|r| Cow::Borrowed(r))
+        row.map(Cow::Borrowed)
     }
 }
 
@@ -205,24 +201,21 @@ impl<'a> SelectRowsIter<'a> {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
                 let columns: Vec<Column> = cols
                     .iter()
-                    .map(|name| schema.column(name))
-                    .flatten()
-                    .map(|c| c.clone())
+                    .filter_map(|name| schema.column(name))
+                    .cloned()
                     .collect();
                 let schema: Cow<'a, Schema> = Cow::Owned(Schema::new(columns));
                 let indices: Vec<usize> = cols
                     .iter()
-                    .map(|name| schema.column_position(name))
-                    .flatten()
+                    .filter_map(|name| schema.column_position(name))
                     .collect();
 
                 let projection = move |r: Cow<'a, Row>| {
                     // TODO: Handle situations where column name that doesn't exist in schema is provided
                     let data = indices
                         .iter()
-                        .map(|idx| r.data.get(*idx))
-                        .flatten()
-                        .map(|x| x.clone())
+                        .filter_map(|idx| r.data.get(*idx))
+                        .cloned()
                         .collect();
                     Cow::Owned(Row::new(data))
                 };
@@ -247,13 +240,15 @@ impl<'a> Iterator for SelectRowsIter<'a> {
 // TODO: Make actually filter
 struct FilterRowsIter<'a> {
     source: Box<RowsSource<'a>>,
+    predicate: Box<dyn Fn(&Row) -> bool>,
     schema: Cow<'a, Schema>,
 }
 impl<'a> FilterRowsIter<'a> {
-    pub fn new(source: RowsSource<'a>) -> Self {
+    pub fn new(source: RowsSource<'a>, where_clause: &WhereClause) -> Self {
         let schema = source.schema();
         FilterRowsIter {
             source: Box::new(source),
+            predicate: Box::new(where_clause.predicate()),
             schema,
         }
     }
@@ -262,7 +257,7 @@ impl<'a> Iterator for FilterRowsIter<'a> {
     type Item = Cow<'a, Row>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.source.next()
+        self.source.next().filter(|row| (self.predicate)(row))
     }
 }
 
@@ -272,30 +267,16 @@ struct SortRowsIter<'a> {
     cursor: usize,
 }
 impl<'a> SortRowsIter<'a> {
-    pub fn new(source: RowsSource<'a>, sort_cols: &[&str], desc: bool) -> Self {
+    pub fn new(source: RowsSource<'a>, sort_clause: &OrderByClause<'a>) -> Self {
         let schema = source.schema();
-        // TODO: handle positions where non-existent column name is provided
-        let index_positions: Vec<usize> = sort_cols
-            .iter()
-            .map(|c| schema.column_position(c))
-            .flatten()
-            .collect();
-        let key_fn = move |row: &Cow<'a, Row>| {
-            let key: Vec<DbValue> = index_positions
-                .iter()
-                .map(|i| row.data.get(*i).cloned())
-                .flatten()
-                .collect();
-            key
-        };
-
         let mut rows = Vec::new();
         for row in source {
             rows.push(row);
         }
 
-        rows.sort_by_cached_key(|r| key_fn(r));
-        if desc {
+        let key_fn = sort_clause.sort_key();
+        rows.sort_by_cached_key(|r: &Cow<'a, Row>| key_fn(r, &schema));
+        if sort_clause.desc() {
             rows.reverse();
         }
 
