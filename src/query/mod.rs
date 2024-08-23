@@ -26,10 +26,13 @@ impl From<ExecutionError> for QueryError {
 
 type Result<T> = std::result::Result<T, QueryError>;
 
-pub fn execute(command: &str, storage: &mut StorageLayer) -> Result<QueryResult> {
+pub fn execute<'strg>(
+    command: &str,
+    storage: &'strg mut StorageLayer,
+) -> Result<QueryResult<'strg>> {
     let tokenizer = Tokenizer::new(command);
     let plan = Parser::new(tokenizer).parse()?;
-    let mut executable_plan = ExecutablePlan::new(&plan, storage);
-    let res = executable_plan.execute()?;
+    let executable_plan = ExecutablePlan::new(plan);
+    let res = executable_plan.execute(storage)?;
     Ok(res)
 }

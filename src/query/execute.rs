@@ -22,48 +22,46 @@ impl From<StorageError> for ExecutionError {
 
 type Result<T> = std::result::Result<T, ExecutionError>;
 
-pub enum QueryResult {
+pub enum QueryResult<'a> {
     Ok,
-    Rows(QueryRows),
-}
-pub struct QueryRows {
-    schema: Schema,
-    rows: Vec<Row>,
+    Rows(RowsSource<'a>),
 }
 
 // TODO: Rework this at some point to actually do plan optimization
-pub struct ExecutablePlan<'plan> {
-    storage: &'plan mut StorageLayer,
-    plan: &'plan Vec<Expression<'plan>>,
+pub struct ExecutablePlan {
+    plan: Vec<Expression>,
 }
-impl<'plan> ExecutablePlan<'plan> {
-    pub fn new(plan: &'plan Vec<Expression<'plan>>, storage: &'plan mut StorageLayer) -> Self {
-        ExecutablePlan { storage, plan }
+impl ExecutablePlan {
+    pub fn new(plan: Vec<Expression>) -> Self {
+        ExecutablePlan { plan }
     }
 
-    fn select(&mut self, select_expr: &SelectExpression) -> Result<QueryResult> {
-        let rows = self.storage.table_scan(select_expr.table)?;
-
-        // where
-        // if let Some(where_clause) = select_expr.where_clause {
-        //     rows = rows.filter(where_clause.predicate);
-        // }
-        // // order by
-        // // if let Some(order_by_clause) = select_expr.order_by_clause {
-        // //     let mut all: Vec<Row> = rows.collect();
-        // //     all.sort_by(|a, b|
-        // // }
-
-        // // select cols
-        // if select_expr.columns != SelectColumns::All {
-        //     rows = rows.map(|row| {
-        //         let data = row.data.iter().filter(|)
-        //     })
-        // }
-        Ok(QueryResult::Ok)
+    fn select<'strg>(
+        &self,
+        select_expr: &SelectExpression,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        let rows = storage.table_scan(&select_expr.table)?;
+        let source = RowsSource::Table(TableRowsIter::new(rows));
+        let source = if let Some(where_clause) = &select_expr.where_clause {
+            RowsSource::Filter(FilterRowsIter::new(source, where_clause))
+        } else {
+            source
+        };
+        let source = if let Some(order_by_clause) = &select_expr.order_by_clause {
+            RowsSource::Sort(SortRowsIter::new(source, order_by_clause))
+        } else {
+            source
+        };
+        let source = RowsSource::Select(SelectRowsIter::new(source, &select_expr.columns));
+        Ok(QueryResult::Rows(source))
     }
 
-    fn create(&mut self, create_expr: &CreateExpression) -> Result<QueryResult> {
+    fn create<'strg>(
+        &self,
+        create_expr: &CreateExpression,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
         let pairs = zip(
             create_expr.columns.names.iter(),
             create_expr.columns.types.iter(),
@@ -72,13 +70,16 @@ impl<'plan> ExecutablePlan<'plan> {
             .map(|(name, _type)| Column::new(name.to_string(), *_type))
             .collect();
 
-        self.storage
-            .create_table(create_expr.table, &Schema::new(cols))?;
+        storage.create_table(&create_expr.table, &Schema::new(cols))?;
         Ok(QueryResult::Ok)
     }
 
-    fn insert(&mut self, insert_expr: &InsertExpression) -> Result<QueryResult> {
-        let schema = self.storage.table_schema(insert_expr.table)?;
+    fn insert<'strg>(
+        &self,
+        insert_expr: &InsertExpression,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        let schema = storage.table_schema(&insert_expr.table)?;
         let mut order = Vec::new();
         for col in insert_expr.columns.iter() {
             let index = match schema.column_position(col) {
@@ -92,12 +93,16 @@ impl<'plan> ExecutablePlan<'plan> {
             .filter_map(|i| insert_expr.values.get(*i).cloned())
             .collect();
         let rows: Vec<Row> = vec![Row::new(values)];
-        self.storage.insert_rows(insert_expr.table, rows)?;
+        storage.insert_rows(&insert_expr.table, rows)?;
         Ok(QueryResult::Ok)
     }
 
-    fn destroy(&mut self, destroy_expr: &DestroyExpression) -> Result<QueryResult> {
-        self.storage.destroy_table(destroy_expr.table)?;
+    fn destroy<'strg>(
+        &self,
+        destroy_expr: &DestroyExpression,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        storage.destroy_table(&destroy_expr.table)?;
         Ok(QueryResult::Ok)
     }
 
@@ -109,20 +114,29 @@ impl<'plan> ExecutablePlan<'plan> {
             > 0
     }
 
-    pub fn execute(&mut self) -> Result<QueryResult> {
-        let mut res = QueryResult::Ok;
-        for expr in self.plan.iter() {
-            res = match expr {
-                Expression::Select(s) => self.select(s)?,
-                Expression::Create(c) => self.create(c)?,
-                Expression::Insert(i) => self.insert(i)?,
-                Expression::Destroy(d) => self.destroy(d)?,
-            }
+    fn execute_expression<'strg>(
+        &self,
+        expr: &Expression,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        match expr {
+            Expression::Select(s) => self.select(s, storage),
+            Expression::Create(c) => self.create(c, storage),
+            Expression::Insert(i) => self.insert(i, storage),
+            Expression::Destroy(d) => self.destroy(d, storage),
         }
-        if self.should_flush() {
-            self.storage.flush()?;
+    }
+
+    pub fn execute<'strg>(&self, storage: &'strg mut StorageLayer) -> Result<QueryResult<'strg>> {
+        let last_idx = self.plan.len() - 1;
+        let last_expr = self
+            .plan
+            .get(last_idx)
+            .expect("There should be an expression here");
+        for expr in self.plan[0..last_idx].iter() {
+            _ = self.execute_expression(expr, storage)?;
         }
-        Ok(res)
+        self.execute_expression(last_expr, storage)
     }
 }
 
@@ -135,7 +149,7 @@ enum RowsSource<'a> {
 impl<'a> RowsSource<'a> {
     fn schema(&self) -> Cow<'a, Schema> {
         match self {
-            Self::Table(t) => t.schema.clone(),
+            Self::Table(t) => Cow::Owned(t.rows.schema.clone()),
             Self::Select(s) => s.schema.clone(),
             Self::Filter(f) => f.schema.clone(),
             Self::Sort(s) => s.schema.clone(),
@@ -157,16 +171,11 @@ impl<'a> Iterator for RowsSource<'a> {
 
 struct TableRowsIter<'a> {
     rows: Rows<'a>,
-    schema: Cow<'a, Schema>,
     cursor: usize,
 }
 impl<'a> TableRowsIter<'a> {
-    fn new(rows: Rows<'a>, schema: Cow<'a, Schema>) -> Self {
-        TableRowsIter {
-            rows,
-            schema,
-            cursor: 0,
-        }
+    fn new(rows: Rows<'a>) -> Self {
+        TableRowsIter { rows, cursor: 0 }
     }
 }
 impl<'a> Iterator for TableRowsIter<'a> {
@@ -188,7 +197,7 @@ struct SelectRowsIter<'a> {
     column_project: Box<dyn Fn(Cow<'a, Row>) -> Cow<'a, Row>>,
 }
 impl<'a> SelectRowsIter<'a> {
-    fn new(source: RowsSource<'a>, columns: SelectColumns) -> Self {
+    fn new(source: RowsSource<'a>, columns: &SelectColumns) -> Self {
         let schema = source.schema();
         match columns {
             SelectColumns::All => SelectRowsIter {
@@ -267,7 +276,7 @@ struct SortRowsIter<'a> {
     cursor: usize,
 }
 impl<'a> SortRowsIter<'a> {
-    pub fn new(source: RowsSource<'a>, sort_clause: &OrderByClause<'a>) -> Self {
+    pub fn new(source: RowsSource<'a>, sort_clause: &OrderByClause) -> Self {
         let schema = source.schema();
         let mut rows = Vec::new();
         for row in source {

@@ -6,10 +6,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - Get a basic query layer written, via an "execute" function.
-//   - Interpret SQL
-//   - Construct query plan
-//   - Return results
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests

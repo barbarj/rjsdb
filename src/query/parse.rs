@@ -88,11 +88,11 @@ impl<'a> Parser<'a> {
         self.lookahead.as_ref().map(|t| t.kind())
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Expression<'a>>> {
+    pub fn parse(&mut self) -> Result<Vec<Expression>> {
         self.expression_list()
     }
 
-    fn expression_list(&mut self) -> Result<Vec<Expression<'a>>> {
+    fn expression_list(&mut self) -> Result<Vec<Expression>> {
         let mut expressions = Vec::new();
 
         while !self.done_parsing() {
@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
         Ok(expressions)
     }
 
-    fn expression(&mut self) -> Result<Expression<'a>> {
+    fn expression(&mut self) -> Result<Expression> {
         let expr = match self.peek_kind() {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
             Some(TokenKind::Select) => self.select_expression()?,
@@ -121,30 +121,30 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn select_columns(&mut self) -> Result<SelectColumns<'a>> {
+    fn select_columns(&mut self) -> Result<SelectColumns> {
         if self.peek_kind() == Some(TokenKind::Star) {
             _ = self.consume(TokenKind::Star)?;
             return Ok(SelectColumns::All);
         }
         let first = self.consume(TokenKind::Identifier)?;
-        let mut cols = vec![first.contents()];
+        let mut cols = vec![first.contents().to_string()];
 
         while self.peek_kind() == Some(TokenKind::Comma) {
             _ = self.consume(TokenKind::Comma)?;
             let token = self.consume(TokenKind::Identifier)?;
-            cols.push(token.contents());
+            cols.push(token.contents().to_string());
         }
 
         Ok(SelectColumns::Only(cols))
     }
 
-    fn select_expression(&mut self) -> Result<Expression<'a>> {
+    fn select_expression(&mut self) -> Result<Expression> {
         _ = self.consume(TokenKind::Select)?;
 
         let columns = self.select_columns()?;
 
         _ = self.consume(TokenKind::From)?;
-        let table = self.consume(TokenKind::Identifier)?.contents();
+        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
 
         let where_clause = if self.peek_kind() == Some(TokenKind::Where) {
             Some(self.where_clause()?)
@@ -172,30 +172,55 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn where_clause(&mut self) -> Result<WhereClause<'a>> {
+    fn where_token_to_where_member(token: Token) -> Result<WhereMember> {
+        match token.kind() {
+            TokenKind::Identifier => Ok(WhereMember::Column(token.contents().to_string())),
+            TokenKind::String => Ok(WhereMember::Value(DbValue::String(
+                token.contents().to_string(),
+            ))),
+            TokenKind::Integer => Ok(WhereMember::Value(DbValue::Integer(
+                token.contents().parse::<i32>()?,
+            ))),
+            TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(
+                token.contents().parse::<f32>()?,
+            ))),
+            _ => panic!("This should never happen"),
+        }
+    }
+
+    fn where_clause(&mut self) -> Result<WhereClause> {
         _ = self.consume(TokenKind::Where)?;
         let left = match self.peek_kind() {
-            Some(k) if Parser::is_where_clause_member_kind(k) => self.consume(k)?,
+            Some(k) if Parser::is_where_clause_member_kind(k) => {
+                let token = self.consume(k)?;
+                Parser::where_token_to_where_member(token)?
+            }
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
         let cmp = match self.peek_kind() {
-            Some(k) if matches!(k, TokenKind::EqualsSign) => self.consume(k)?,
+            Some(k) if matches!(k, TokenKind::EqualsSign) => {
+                _ = self.consume(k)?;
+                WhereCmp::Eq
+            }
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
         let right = match self.peek_kind() {
-            Some(k) if Parser::is_where_clause_member_kind(k) => self.consume(k)?,
+            Some(k) if Parser::is_where_clause_member_kind(k) => {
+                let token = self.consume(k)?;
+                Parser::where_token_to_where_member(token)?
+            }
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
         Ok(WhereClause { left, cmp, right })
     }
 
-    fn order_by_clause(&mut self) -> Result<OrderByClause<'a>> {
+    fn order_by_clause(&mut self) -> Result<OrderByClause> {
         _ = self.consume(TokenKind::Order)?;
         _ = self.consume(TokenKind::By)?;
-        let sort_column = self.consume(TokenKind::Identifier)?.contents();
+        let sort_column = self.consume(TokenKind::Identifier)?.contents().to_string();
         let desc = self.peek_kind().filter(|k| *k == TokenKind::Desc).is_some();
         if desc {
             _ = self.consume(TokenKind::Desc)?;
@@ -203,7 +228,7 @@ impl<'a> Parser<'a> {
         Ok(OrderByClause { sort_column, desc })
     }
 
-    fn create_expression(&mut self) -> Result<Expression<'a>> {
+    fn create_expression(&mut self) -> Result<Expression> {
         _ = self.consume(TokenKind::Create)?;
         _ = self.consume(TokenKind::Table)?;
         let if_not_exists = self.peek_kind().filter(|k| *k == TokenKind::If).is_some();
@@ -212,7 +237,7 @@ impl<'a> Parser<'a> {
             _ = self.consume(TokenKind::Not)?;
             _ = self.consume(TokenKind::Exists)?;
         }
-        let table = self.consume(TokenKind::Identifier)?.contents();
+        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
         let columns = self.create_columns()?;
 
         Ok(Expression::Create(CreateExpression {
@@ -222,12 +247,12 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn create_columns(&mut self) -> Result<CreateColumns<'a>> {
+    fn create_columns(&mut self) -> Result<CreateColumns> {
         _ = self.consume(TokenKind::LeftParen)?;
         let mut names = Vec::new();
         let mut types = Vec::new();
         while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
-            let name = self.consume(TokenKind::Identifier)?.contents();
+            let name = self.consume(TokenKind::Identifier)?.contents().to_string();
             let this_type = match self.consume_type_token()?.kind() {
                 TokenKind::TypeString => DbType::String,
                 TokenKind::TypeInteger => DbType::Integer,
@@ -246,16 +271,16 @@ impl<'a> Parser<'a> {
         Ok(CreateColumns { names, types })
     }
 
-    fn insert_expression(&mut self) -> Result<Expression<'a>> {
+    fn insert_expression(&mut self) -> Result<Expression> {
         _ = self.consume(TokenKind::Insert)?;
         _ = self.consume(TokenKind::Into)?;
 
-        let table = self.consume(TokenKind::Identifier)?.contents();
+        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
 
         let mut columns = Vec::new();
         _ = self.consume(TokenKind::LeftParen)?;
         while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
-            let name = self.consume(TokenKind::Identifier)?.contents();
+            let name = self.consume(TokenKind::Identifier)?.contents().to_string();
             columns.push(name);
             if self.peek_kind() != Some(TokenKind::RightParen) {
                 _ = self.consume(TokenKind::Comma)?;
@@ -289,68 +314,79 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn destroy_expression(&mut self) -> Result<Expression<'a>> {
+    fn destroy_expression(&mut self) -> Result<Expression> {
         _ = self.consume(TokenKind::Destroy)?;
         _ = self.consume(TokenKind::Table)?;
-        let table = self.consume(TokenKind::Identifier)?.contents();
+        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
         Ok(Expression::Destroy(DestroyExpression { table }))
     }
 }
 
 #[derive(PartialEq, Debug)]
-pub enum SelectColumns<'a> {
+pub enum SelectColumns {
     All,
-    Only(Vec<&'a str>),
+    Only(Vec<String>),
 }
 
 #[derive(PartialEq, Debug)]
-pub struct CreateColumns<'a> {
-    pub names: Vec<&'a str>,
+pub struct CreateColumns {
+    pub names: Vec<String>,
     pub types: Vec<DbType>,
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Expression<'a> {
-    Select(SelectExpression<'a>),
-    Create(CreateExpression<'a>),
-    Insert(InsertExpression<'a>),
-    Destroy(DestroyExpression<'a>),
+pub enum Expression {
+    Select(SelectExpression),
+    Create(CreateExpression),
+    Insert(InsertExpression),
+    Destroy(DestroyExpression),
 }
 
 #[derive(PartialEq, Debug)]
-pub struct SelectExpression<'a> {
-    pub columns: SelectColumns<'a>,
-    pub table: &'a str,
-    pub where_clause: Option<WhereClause<'a>>,
-    pub order_by_clause: Option<OrderByClause<'a>>,
+pub struct SelectExpression {
+    pub columns: SelectColumns,
+    pub table: String,
+    pub where_clause: Option<WhereClause>,
+    pub order_by_clause: Option<OrderByClause>,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct CreateExpression<'a> {
-    pub table: &'a str,
+pub struct CreateExpression {
+    pub table: String,
     pub if_not_exists: bool,
-    pub columns: CreateColumns<'a>,
+    pub columns: CreateColumns,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct InsertExpression<'a> {
-    pub table: &'a str,
-    pub columns: Vec<&'a str>,
+pub struct InsertExpression {
+    pub table: String,
+    pub columns: Vec<String>,
     pub values: Vec<DbValue>,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct DestroyExpression<'a> {
-    pub table: &'a str,
+pub struct DestroyExpression {
+    pub table: String,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct WhereClause<'a> {
-    left: Token<'a>,
-    cmp: Token<'a>,
-    right: Token<'a>,
+enum WhereMember {
+    Value(DbValue),
+    Column(String),
 }
-impl<'a> WhereClause<'a> {
+
+#[derive(PartialEq, Debug)]
+enum WhereCmp {
+    Eq,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct WhereClause {
+    left: WhereMember,
+    cmp: WhereCmp,
+    right: WhereMember,
+}
+impl WhereClause {
     // TODO: Fill in necessary logic for boolean expressions
     pub fn predicate(&self) -> impl Fn(&Row) -> bool {
         |r: &Row| true
@@ -358,11 +394,11 @@ impl<'a> WhereClause<'a> {
 }
 
 #[derive(PartialEq, Debug)]
-pub struct OrderByClause<'a> {
-    sort_column: &'a str,
+pub struct OrderByClause {
+    sort_column: String,
     desc: bool,
 }
-impl<'a> OrderByClause<'a> {
+impl OrderByClause {
     pub fn sort_key(&self) -> impl Fn(&Row, &Schema) -> Vec<DbValue> {
         let sort_col = self.sort_column.to_string();
         move |r: &Row, schema: &Schema| {
@@ -407,8 +443,8 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec!["foo", "bar"]),
-            table: "the_data",
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
             where_clause: None,
             order_by_clause: None,
         })];
@@ -424,7 +460,7 @@ mod parser_tests {
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::All,
-            table: "the_data",
+            table: String::from("the_data"),
             where_clause: None,
             order_by_clause: None,
         })];
@@ -439,12 +475,12 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec!["foo", "bar"]),
-            table: "the_data",
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
             where_clause: Some(WhereClause {
-                left: Token::new("that", TokenKind::Identifier),
-                cmp: Token::new("=", TokenKind::EqualsSign),
-                right: Token::new("this", TokenKind::String),
+                left: WhereMember::Column(String::from("that")),
+                cmp: WhereCmp::Eq,
+                right: WhereMember::Value(DbValue::String(String::from("this"))),
             }),
             order_by_clause: None,
         })];
@@ -459,11 +495,11 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec!["foo", "bar"]),
-            table: "the_data",
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
-                sort_column: "baz",
+                sort_column: String::from("baz"),
                 desc: false,
             }),
         })];
@@ -478,11 +514,11 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec!["foo", "bar"]),
-            table: "the_data",
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
-                sort_column: "baz",
+                sort_column: String::from("baz"),
                 desc: true,
             }),
         })];
@@ -497,15 +533,15 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec!["foo", "bar"]),
-            table: "the_data",
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
             where_clause: Some(WhereClause {
-                left: Token::new("this", TokenKind::String),
-                cmp: Token::new("=", TokenKind::EqualsSign),
-                right: Token::new("that", TokenKind::Identifier),
+                left: WhereMember::Value(DbValue::String(String::from("this"))),
+                cmp: WhereCmp::Eq,
+                right: WhereMember::Column(String::from("that")),
             }),
             order_by_clause: Some(OrderByClause {
-                sort_column: "baz",
+                sort_column: String::from("baz"),
                 desc: true,
             }),
         })];
@@ -519,10 +555,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
-            table: "the_data",
+            table: String::from("the_data"),
             if_not_exists: false,
             columns: CreateColumns {
-                names: vec!["foo"],
+                names: vec![String::from("foo")],
                 types: vec![DbType::String],
             },
         })];
@@ -536,10 +572,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
-            table: "the_data",
+            table: String::from("the_data"),
             if_not_exists: true,
             columns: CreateColumns {
-                names: vec!["foo"],
+                names: vec![String::from("foo")],
                 types: vec![DbType::String],
             },
         })];
@@ -553,10 +589,14 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
-            table: "the_data",
+            table: String::from("the_data"),
             if_not_exists: false,
             columns: CreateColumns {
-                names: vec!["foo", "bar", "baz"],
+                names: vec![
+                    String::from("foo"),
+                    String::from("bar"),
+                    String::from("baz"),
+                ],
                 types: vec![DbType::String, DbType::Integer, DbType::Float],
             },
         })];
@@ -570,8 +610,12 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Insert(InsertExpression {
-            table: "the_data",
-            columns: vec!["foo", "bar", "baz"],
+            table: String::from("the_data"),
+            columns: vec![
+                String::from("foo"),
+                String::from("bar"),
+                String::from("baz"),
+            ],
             values: vec![
                 DbValue::String(String::from("thing")),
                 DbValue::Integer(42),
@@ -587,7 +631,9 @@ mod parser_tests {
         let stmt = "destroy table the_data;";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
-        let expected = vec![Expression::Destroy(DestroyExpression { table: "the_data" })];
+        let expected = vec![Expression::Destroy(DestroyExpression {
+            table: String::from("the_data"),
+        })];
 
         assert_eq!(actual, expected);
     }
@@ -599,16 +645,16 @@ mod parser_tests {
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![
             Expression::Create(CreateExpression {
-                table: "the_data",
+                table: String::from("the_data"),
                 if_not_exists: true,
                 columns: CreateColumns {
-                    names: vec!["foo", "bar"],
+                    names: vec![String::from("foo"), String::from("bar")],
                     types: vec![DbType::String, DbType::Integer],
                 },
             }),
             Expression::Select(SelectExpression {
                 columns: SelectColumns::All,
-                table: "the_data",
+                table: String::from("the_data"),
                 where_clause: None,
                 order_by_clause: None,
             }),
