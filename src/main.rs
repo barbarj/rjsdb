@@ -6,6 +6,10 @@ use rjsdb::{
 };
 
 // TODO:
+// - Get row generation to not use disallowed chars in names
+// - basic test in main
+// - repl
+// - actual filtering
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests

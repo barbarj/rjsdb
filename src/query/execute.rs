@@ -24,7 +24,26 @@ type Result<T> = std::result::Result<T, ExecutionError>;
 
 pub enum QueryResult<'a> {
     Ok,
-    Rows(RowsSource<'a>),
+    Rows(ResultRows<'a>),
+}
+pub struct ResultRows<'a> {
+    source: RowsSource<'a>,
+}
+impl<'a> ResultRows<'a> {
+    fn new(source: RowsSource<'a>) -> Self {
+        ResultRows { source }
+    }
+
+    pub fn schema(&self) -> Cow<'a, Schema> {
+        self.source.schema()
+    }
+}
+impl<'a> Iterator for ResultRows<'a> {
+    type Item = Cow<'a, Row>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.source.next()
+    }
 }
 
 // TODO: Rework this at some point to actually do plan optimization
@@ -54,7 +73,7 @@ impl ExecutablePlan {
             source
         };
         let source = RowsSource::Select(SelectRowsIter::new(source, &select_expr.columns));
-        Ok(QueryResult::Rows(source))
+        Ok(QueryResult::Rows(ResultRows::new(source)))
     }
 
     fn create<'strg>(
@@ -104,14 +123,6 @@ impl ExecutablePlan {
     ) -> Result<QueryResult<'strg>> {
         storage.destroy_table(&destroy_expr.table)?;
         Ok(QueryResult::Ok)
-    }
-
-    fn should_flush(&self) -> bool {
-        self.plan
-            .iter()
-            .filter(|e| !matches!(e, Expression::Select(_)))
-            .count()
-            > 0
     }
 
     fn execute_expression<'strg>(
