@@ -86,9 +86,10 @@ impl Generate for char {
             .expect("Failed a u32->char conversion that should have already been proven to work.")
     }
 }
+const DISSALOWED_CHARS: [char; 6] = ['*', ',', ';', '=', '(', ')'];
 fn to_useful_char(n: u32) -> Option<char> {
     let ch = char::from_u32(n)?;
-    if ch.is_control() {
+    if ch.is_control() || DISSALOWED_CHARS.contains(&ch) {
         None
     } else {
         Some(ch)

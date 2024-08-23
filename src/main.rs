@@ -6,7 +6,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - Get row generation to not use disallowed chars in names
 // - basic test in main
 // - repl
 // - actual filtering
