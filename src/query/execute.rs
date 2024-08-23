@@ -33,16 +33,6 @@ pub struct QueryRows {
     schema: Schema,
     rows: Vec<Row>,
 }
-// impl<Iter> From<Iter> for QueryRows
-// where
-//     Iter: Iterator<Item = Row>,
-// {
-//     fn from(value: Iter) -> Self {
-//         QueryRows {
-//             rows: value.collect(),
-//         }
-//     }
-// }
 
 // TODO: Rework this at some point to actually do plan optimization
 pub struct ExecutablePlan<'plan> {
@@ -139,100 +129,6 @@ impl<'plan> ExecutablePlan<'plan> {
         Ok(res)
     }
 }
-
-// trait RowsIterator<'a>: Iterator<Item = &'a Row> {
-//     fn schema(&self) -> &Schema;
-// }
-
-// struct RowsIterator<'a, F>
-// where
-//     F: FnMut() -> Option<Cow<'a, Row>>,
-// {
-//     schema: Cow<'a, Schema>,
-//     rows: FromFn<F>,
-// }
-// impl<'a, F> RowsIterator<'a, F>
-// where
-//     F: FnMut() -> Option<Cow<'a, Row>>,
-// {
-//     fn select<G>(rows_iter: RowsIterator<'a, G>, columns: SelectColumns) -> Self
-//     where
-//         G: FnMut() -> Option<Cow<'a, Row>>,
-//     {
-//         let (schema, indices_to_keep) = match columns {
-//             SelectColumns::All => (
-//                 rows_iter.schema,
-//                 (0..rows_iter.schema.schema().len()).collect(),
-//             ),
-//             SelectColumns::Only(cols) => {
-//                 let new_cols: Vec<(usize, &Column)> = rows_iter
-//                     .schema
-//                     .schema()
-//                     .iter()
-//                     .enumerate()
-//                     .filter(|(idx, schema_col)| {
-//                         cols.iter().any(|select_col| schema_col.name == *select_col)
-//                     })
-//                     .collect();
-//                 let schema_cols = new_cols.iter().map(|p| p.1.clone()).collect();
-//                 let schema = Cow::Owned(Schema::new(schema_cols));
-//                 let indices_to_keep: Vec<usize> = new_cols.iter().map(|p| p.0).collect();
-//                 (schema, indices_to_keep)
-//             }
-//         };
-
-//         let iter = std::iter::from_fn(move || {
-//             rows_iter.rows.next().map(|r| {
-//                 Cow::Owned(Row::new(
-//                     r.data
-//                         .iter()
-//                         .enumerate()
-//                         .filter(|(idx, v)| indices_to_keep.contains(idx))
-//                         .map(|p| p.1.to_owned())
-//                         .collect(),
-//                 ))
-//             })
-//         });
-
-//         RowsIterator { schema, rows: iter }
-
-//         // match columns {
-//         //     SelectColumns::All => RowsIterator {
-//         //         schema: rows_iter.schema,
-//         //         rows: std::iter::from_fn(move || rows_iter.rows.next()),
-//         //     }, // TODO: Apply the type-mapping equivalent of identity to this
-//         //     SelectColumns::Only(cols) => {
-//         //         let new_cols: Vec<(usize, &Column)> = rows_iter
-//         //             .schema
-//         //             .schema()
-//         //             .iter()
-//         //             .enumerate()
-//         //             .filter(|(idx, schema_col)| {
-//         //                 cols.iter().any(|select_col| schema_col.name == *select_col)
-//         //             })
-//         //             .collect();
-//         //         let schema_cols = new_cols.iter().map(|p| p.1.clone()).collect();
-//         //         let schema = Cow::Owned(Schema::new(schema_cols));
-//         //         let indices_to_keep: Vec<usize> = new_cols.iter().map(|p| p.0).collect();
-
-//         //         let iter = std::iter::from_fn(move || {
-//         //             rows_iter.rows.next().map(|r| {
-//         //                 Row::new(
-//         //                     r.data
-//         //                         .iter()
-//         //                         .enumerate()
-//         //                         .filter(|(idx, v)| indices_to_keep.contains(idx))
-//         //                         .map(|p| p.1.to_owned())
-//         //                         .collect(),
-//         //                 )
-//         //             })
-//         //         });
-
-//         //         RowsIterator { schema, rows: iter }
-//         //     }
-//         // };
-//     }
-// }
 
 enum RowsSource<'a> {
     Table(TableRowsIter<'a>),
@@ -362,122 +258,63 @@ impl<'a> FilterRowsIter<'a> {
         }
     }
 }
-// impl<'a> RowsIterator for FilterRowsIter<'a> {
-//     fn iter(&self) -> impl Iterator<Item = &Row> {
-//         self.input.iter()
-//     }
+impl<'a> Iterator for FilterRowsIter<'a> {
+    type Item = Cow<'a, Row>;
 
-//     fn schema(&self) -> &Schema {
-//         self.input.schema()
-//     }
-// }
+    fn next(&mut self) -> Option<Self::Item> {
+        self.source.next()
+    }
+}
+
 struct SortRowsIter<'a> {
-    source: Box<RowsSource<'a>>,
     schema: Cow<'a, Schema>,
-    //TODO:  sorted rows and cursor
+    sorted_rows: Vec<Cow<'a, Row>>,
+    cursor: usize,
 }
 impl<'a> SortRowsIter<'a> {
-    // TODO: Should take sort columns
-    pub fn new(source: RowsSource<'a>) -> Self {
+    pub fn new(source: RowsSource<'a>, sort_cols: &[&str], desc: bool) -> Self {
         let schema = source.schema();
+        // TODO: handle positions where non-existent column name is provided
+        let index_positions: Vec<usize> = sort_cols
+            .iter()
+            .map(|c| schema.column_position(c))
+            .flatten()
+            .collect();
+        let key_fn = move |row: &Cow<'a, Row>| {
+            let key: Vec<DbValue> = index_positions
+                .iter()
+                .map(|i| row.data.get(*i).cloned())
+                .flatten()
+                .collect();
+            key
+        };
+
+        let mut rows = Vec::new();
+        for row in source {
+            rows.push(row);
+        }
+
+        rows.sort_by_cached_key(|r| key_fn(r));
+        if desc {
+            rows.reverse();
+        }
+
         SortRowsIter {
-            source: Box::new(source),
             schema,
+            sorted_rows: rows,
+            cursor: 0,
         }
     }
 }
-// impl<'a> RowsIterator for SortRowsIter<'a> {
-//     fn iter(&self) -> impl Iterator<Item = &Row> {
-//         self.input.iter()
-//     }
+impl<'a> Iterator for SortRowsIter<'a> {
+    type Item = Cow<'a, Row>;
 
-//     fn schema(&self) -> &Schema {
-//         self.input.schema()
-//     }
-// }
-
-// struct Select<Iter>
-// where
-//     Iter: Iterator<Item = Row>,
-// {
-//     input: Iter,
-// }
-// impl<Iter> Iterator for Select<Iter>
-// where
-//     Iter: Iterator<Item = Row>,
-// {
-//     type Item = Row;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         self.input.next()
-//     }
-// }
-
-// struct Filter<Iter>
-// where
-//     Iter: Iterator<Item = Row>,
-// {
-//     input: Iter,
-//     predicate: fn(&Row) -> bool,
-// }
-// impl<Iter> Iterator for Filter<Iter>
-// where
-//     Iter: Iterator<Item = Row>,
-// {
-//     type Item = Row;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         self.input.find(self.predicate)
-//     }
-// }
-
-// /// Stores rows in reverse order, so first item is at end
-// /// of the vec, giving O(1) access with pop()
-// struct Sort<Iter, K>
-// where
-//     Iter: Iterator<Item = Row>,
-//     K: Ord,
-// {
-//     input: Iter,
-//     rows: Vec<Row>,
-//     is_sorted: bool,
-//     key_fn: fn(&Row) -> K,
-//     desc: bool,
-// }
-// impl<Iter, K> Sort<Iter, K>
-// where
-//     Iter: Iterator<Item = Row>,
-//     K: Ord,
-// {
-//     fn new(input: Iter, key_fn: fn(&Row) -> K, desc: bool) -> Self {
-//         Sort {
-//             input,
-//             rows: Vec::new(),
-//             is_sorted: false,
-//             key_fn,
-//             desc,
-//         }
-//     }
-// }
-// impl<Iter, K> Iterator for Sort<Iter, K>
-// where
-//     Iter: Iterator<Item = Row>,
-//     K: Ord,
-// {
-//     type Item = Row;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         if !self.is_sorted {
-//             for row in &mut self.input {
-//                 self.rows.push(row);
-//             }
-//             self.rows.sort_by_key(self.key_fn);
-//             if !self.desc {
-//                 self.rows.reverse();
-//             }
-//             self.is_sorted = true;
-//         }
-
-//         self.rows.pop()
-//     }
-// }
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.sorted_rows.len() {
+            return None;
+        }
+        let row = self.sorted_rows.get(self.cursor);
+        self.cursor += 1;
+        row.cloned()
+    }
+}

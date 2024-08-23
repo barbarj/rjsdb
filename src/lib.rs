@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Display, hash::Hash};
+use std::{cmp::Ordering, collections::HashSet, fmt::Display, hash::Hash};
 
 use generate::Generate;
 use serde::{self, Deserialize, Serialize};
@@ -36,7 +36,7 @@ impl Generate for DbType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
 pub enum DbValue {
     String(String),
     Integer(i32),
@@ -57,6 +57,22 @@ impl Display for DbValue {
             Self::Float(v) => v.fmt(f),
             Self::Integer(v) => v.fmt(f),
             Self::String(v) => f.write_fmt(format_args!("\"{v}\"")),
+        }
+    }
+}
+impl Eq for DbValue {}
+// TODO: Handle this issue
+#[allow(clippy::derive_ord_xor_partial_ord)]
+impl Ord for DbValue {
+    // TODO: Do the setup to make this ordering actually safe
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::String(s1), Self::String(s2)) => s1.cmp(s2),
+            (Self::Integer(i1), Self::Integer(i2)) => i1.cmp(i2),
+            (Self::Float(f1), Self::Float(f2)) => {
+                f1.partial_cmp(f2).expect("Should always have valid order")
+            }
+            _ => panic!("Non-supported comparison!"),
         }
     }
 }
