@@ -1,7 +1,15 @@
-use std::{cmp::Ordering, collections::HashSet, fmt::Display, hash::Hash};
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    fmt::Display,
+    hash::Hash,
+    io::{stdin, stdout, Write},
+};
 
 use generate::Generate;
+use query::{execute, QueryResult};
 use serde::{self, Deserialize, Serialize};
+use storage::StorageLayer;
 
 pub mod generate;
 pub mod query;
@@ -90,4 +98,27 @@ where
         seen.insert(i);
     }
     false
+}
+
+pub fn repl(storage: &mut StorageLayer) {
+    let mut s = String::new();
+    while !s.contains(';') {
+        print!("> ");
+        stdout().flush().unwrap();
+        stdin().read_line(&mut s).unwrap();
+        if s.trim() == "exit" {
+            break;
+        }
+        match execute(s.trim(), storage) {
+            Err(err) => println!("{err:?}"),
+            Ok(QueryResult::Ok) => println!("ok"),
+            Ok(QueryResult::Rows(rows)) => {
+                for row in rows {
+                    println!("{:?}", row.data);
+                }
+            }
+        }
+        s.clear();
+    }
+    storage.flush().unwrap();
 }

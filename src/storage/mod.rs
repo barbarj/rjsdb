@@ -273,18 +273,6 @@ impl Schema {
     pub fn matches(&self, row: &Row) -> bool {
         let our_types = self.columns().map(|c| c._type);
         let their_types = row.data.iter().map(|v| v.db_type());
-        println!("-----");
-        println!(
-            "{:?}",
-            self.columns().map(|c| c._type).collect::<Vec<DbType>>()
-        );
-        println!(
-            "{:?}",
-            row.data
-                .iter()
-                .map(|v| v.db_type())
-                .collect::<Vec<DbType>>()
-        );
         zip(our_types, their_types).all(|(a, b)| a == b)
     }
 
