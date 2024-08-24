@@ -10,6 +10,7 @@ use super::parse::{
     SelectColumns, SelectExpression, WhereClause,
 };
 
+#[derive(Debug)]
 pub enum ExecutionError {
     StorageError(StorageError),
     UnknownColumnNameProvided,
@@ -26,6 +27,7 @@ pub enum QueryResult<'a> {
     Ok,
     Rows(ResultRows<'a>),
 }
+
 pub struct ResultRows<'a> {
     source: RowsSource<'a>,
 }
@@ -88,6 +90,7 @@ impl ExecutablePlan {
         let cols = pairs
             .map(|(name, _type)| Column::new(name.to_string(), *_type))
             .collect();
+        println!("cols: {:?}", cols);
 
         storage.create_table(&create_expr.table, &Schema::new(cols))?;
         Ok(QueryResult::Ok)

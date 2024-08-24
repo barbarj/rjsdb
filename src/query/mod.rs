@@ -1,4 +1,4 @@
-use execute::{ExecutablePlan, ExecutionError, QueryResult};
+use execute::{ExecutablePlan, ExecutionError};
 use parse::{Parser, ParsingError};
 use tokenize::Tokenizer;
 
@@ -8,6 +8,10 @@ mod execute;
 mod parse;
 mod tokenize;
 
+pub use execute::QueryResult;
+pub use execute::ResultRows;
+
+#[derive(Debug)]
 pub enum QueryError {
     StorageError(StorageError),
     ParsingError(ParsingError),
@@ -25,7 +29,6 @@ impl From<ExecutionError> for QueryError {
 }
 
 type Result<T> = std::result::Result<T, QueryError>;
-
 pub fn execute<'strg>(
     command: &str,
     storage: &'strg mut StorageLayer,

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use rjsdb::{
     generate::{Generate, RNG},
+    query::{execute, QueryResult, ResultRows},
     storage,
 };
 
@@ -14,46 +15,44 @@ use rjsdb::{
 //     need something like tokio to manage threads/requests
 
 fn main() {
-    // let mut rng = RNG::new();
+    let mut rng = RNG::new();
 
-    // let path = Path::new("db.db");
-    // // if path.exists() {
-    // //     fs::remove_file(path).unwrap();
-    // //     println!("db file removed");
-    // // }
-    // let mut db = storage::StorageLayer::init(path).unwrap();
-    // let mut name = String::generate(&mut rng);
-    // name.truncate(5);
-    // let name = String::from("test_table");
-    // // let schema = Schema::generate(&mut rng);
-    // let schema = db.table_schema(&name).unwrap();
-    // // db.create_table(&name, &schema).unwrap();
+    let path = Path::new("db.db");
+    let mut storage = storage::StorageLayer::init(path).unwrap();
 
-    // let mut rows = Vec::new();
-    // for _ in 0..20 {
-    //     rows.push(schema.gen_row(&mut rng))
-    // }
+    let create_table =
+        "CREATE TABLE IF NOT EXISTS the_mf_table (foo string, bar integer, baz float);";
+    let insert_expr = |foo: String, bar: i32, baz: f32| {
+        println!("bar: {bar}");
+        format!(
+            "INSERT INTO the_mf_table (foo, bar, baz) VALUES ('{}', {}, {});",
+            foo, bar, baz
+        )
+    };
+    let select_expr = "SELECT * from the_mf_table;";
 
-    // db.insert_rows(&name, rows).unwrap();
-    // db.show_table_info();
-    // db.flush().unwrap();
+    _ = execute(create_table, &mut storage).unwrap();
+    println!("schema: {}", storage.table_schema("the_mf_table").unwrap());
+    for _ in 0..10 {
+        let foo = String::generate(&mut rng);
+        let bar = i32::generate(&mut rng);
+        let baz = f32::generate(&mut rng);
+        let stmt = insert_expr(foo, bar, baz);
+        _ = execute(&stmt, &mut storage).unwrap();
+    }
 
-    // drop(db);
+    {
+        let rows = execute(select_expr, &mut storage).unwrap();
+        match rows {
+            QueryResult::Ok => println!("uh oh"),
+            QueryResult::Rows(rows) => print_result(rows),
+        }
+    }
+    storage.flush().unwrap();
+}
 
-    // let mut db = storage::StorageLayer::init(path).unwrap();
-    // db.show_table_info();
-
-    // // assert_eq!(db.table_scan(&name).unwrap().count(), 20);
-    // let removed_ids: Vec<usize> = db
-    //     .table_scan(&name)
-    //     .unwrap()
-    //     .map(|row| row.id)
-    //     .filter(|id| id % 2 == 0)
-    //     .collect();
-    // db.delete_rows(&name, &removed_ids).unwrap();
-    // // assert_eq!(db.table_scan(&name).unwrap().count(), 10);
-    // db.show_table_info();
-    // let ids: Vec<usize> = db.table_scan(&name).unwrap().map(|row| row.id).collect();
-    // println!("{ids:?}");
-    // db.flush().unwrap();
+fn print_result(rows: ResultRows) {
+    for row in rows {
+        println!("{row}");
+    }
 }

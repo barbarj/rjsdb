@@ -90,7 +90,12 @@ impl StorageLayer {
         if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
         }
+        println!("before : {:?}", schema.columns().collect::<Vec<&Column>>());
         let table = Table::new(name.to_string(), schema.clone());
+        println!(
+            "cloned: {:?}",
+            table.header.schema.columns().collect::<Vec<&Column>>()
+        );
         self.tables.push(table);
         Ok(())
     }
@@ -270,11 +275,23 @@ impl Schema {
     pub fn matches(&self, row: &Row) -> bool {
         let our_types = self.columns().map(|c| c._type);
         let their_types = row.data.iter().map(|v| v.db_type());
+        println!("-----");
+        println!(
+            "{:?}",
+            self.columns().map(|c| c._type).collect::<Vec<DbType>>()
+        );
+        println!(
+            "{:?}",
+            row.data
+                .iter()
+                .map(|v| v.db_type())
+                .collect::<Vec<DbType>>()
+        );
         zip(our_types, their_types).all(|(a, b)| a == b)
     }
 
     fn columns(&self) -> impl Iterator<Item = &Column> {
-        self.schema.values().map(|v| &v.column)
+        SchemaColumns::new(self)
     }
 
     pub fn gen_row(&self, rng: &mut RNG) -> Row {
@@ -289,11 +306,11 @@ impl Display for Schema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_char('[')?;
         let mut first = true;
-        for c in self.schema.iter() {
+        for c in self.columns() {
             if !first {
                 f.write_str(", ")?;
             }
-            c.1.column.fmt(f)?;
+            c.fmt(f)?;
             first = false;
         }
         f.write_char(']')
@@ -311,6 +328,31 @@ impl Generate for Schema {
             cols.push(Column::generate(rng));
         }
         Schema::new(cols)
+    }
+}
+
+struct SchemaColumns<'a> {
+    columns: Vec<&'a Column>,
+    cursor: usize,
+}
+impl<'a> SchemaColumns<'a> {
+    fn new(schema: &'a Schema) -> Self {
+        let mut columns_with_index: Vec<&ColumnWithIndex> = schema.schema.values().collect();
+        columns_with_index.sort_by_key(|ci| ci.index);
+        let columns = columns_with_index.iter().map(|ci| &ci.column).collect();
+        SchemaColumns { columns, cursor: 0 }
+    }
+}
+impl<'a> Iterator for SchemaColumns<'a> {
+    type Item = &'a Column;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.columns.len() {
+            return None;
+        }
+        let res = self.columns.get(self.cursor).copied();
+        self.cursor += 1;
+        res
     }
 }
 

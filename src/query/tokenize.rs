@@ -248,7 +248,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; 12 -12.3 create table if not ( exists string integer float insert into values destroy";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -269,7 +269,8 @@ mod tokenizer_tests {
             Token::new(")", TokenKind::RightParen),
             Token::new("desc", TokenKind::Desc),
             Token::new(";", TokenKind::Semicolon),
-            Token::new("12", TokenKind::Integer),
+            Token::new("-12", TokenKind::Integer),
+            Token::new(",", TokenKind::Comma),
             Token::new("-12.3", TokenKind::Float),
             Token::new("create", TokenKind::Create),
             Token::new("table", TokenKind::Table),
