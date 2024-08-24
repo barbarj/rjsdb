@@ -11,7 +11,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - basic test in main
 // - repl
 // - actual filtering
 // - Figure out how to manage database connections and accept requests

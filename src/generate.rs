@@ -42,7 +42,7 @@ impl Generate for i32 {
 impl Generate for f32 {
     fn generate(rng: &mut RNG) -> Self {
         let num = rng.next_value();
-        num as f32
+        f32::from_bits(num)
     }
 }
 impl Generate for usize {

@@ -111,7 +111,10 @@ impl<'a> Tokenizer<'a> {
             ),
             // composites
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
-            SpecItem(TokenKind::Float, Regex::new(r"^-?\d+\.\d+").unwrap()),
+            SpecItem(
+                TokenKind::Float,
+                Regex::new(r"^-?\d+\.\d+(e-*\d+)*").unwrap(),
+            ),
             SpecItem(TokenKind::Integer, Regex::new(r"^-?\d+").unwrap()),
             SpecItem(
                 TokenKind::Identifier,
@@ -248,7 +251,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -285,6 +288,8 @@ mod tokenizer_tests {
             Token::new("into", TokenKind::Into),
             Token::new("values", TokenKind::Values),
             Token::new("destroy", TokenKind::Destroy),
+            Token::new("-5.134e11", TokenKind::Float),
+            Token::new("4.122e-38", TokenKind::Float),
         ];
 
         assert_eq!(res, expected);
