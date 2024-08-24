@@ -173,14 +173,18 @@ impl<'a> Parser<'a> {
     }
 
     fn where_token_to_where_member(token: Token) -> Result<WhereMember> {
+        println!("handling token kind: {:?}", token.kind());
         match token.kind() {
             TokenKind::Identifier => Ok(WhereMember::Column(token.contents().to_string())),
             TokenKind::String => Ok(WhereMember::Value(DbValue::String(
                 token.contents().to_string(),
             ))),
-            TokenKind::Integer => Ok(WhereMember::Value(DbValue::Integer(
-                token.contents().parse::<i32>()?,
-            ))),
+            TokenKind::Integer => {
+                println!("parsing int");
+                Ok(WhereMember::Value(DbValue::Integer(
+                    token.contents().parse::<i32>()?,
+                )))
+            }
             TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(
                 token.contents().parse::<f32>()?,
             ))),

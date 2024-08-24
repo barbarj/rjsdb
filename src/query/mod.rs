@@ -6,7 +6,7 @@ use crate::storage::{StorageError, StorageLayer};
 
 mod execute;
 mod parse;
-mod tokenize;
+pub mod tokenize; // TODO: make not public
 
 pub use execute::QueryResult;
 pub use execute::ResultRows;

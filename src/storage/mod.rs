@@ -73,7 +73,7 @@ impl StorageLayer {
         Ok(())
     }
 
-    fn table_exists(&self, name: &str) -> bool {
+    pub fn table_exists(&self, name: &str) -> bool {
         self.tables.iter().any(|t| t.header.table_name == name)
     }
 
@@ -90,12 +90,7 @@ impl StorageLayer {
         if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
         }
-        println!("before : {:?}", schema.columns().collect::<Vec<&Column>>());
         let table = Table::new(name.to_string(), schema.clone());
-        println!(
-            "cloned: {:?}",
-            table.header.schema.columns().collect::<Vec<&Column>>()
-        );
         self.tables.push(table);
         Ok(())
     }
@@ -251,6 +246,9 @@ impl ColumnWithIndex {
     }
 }
 
+// TODO: Need to consider storing column order explicitly somewhere
+//      so that we're not re-sorting it every time, or consider how to do
+//      differently the things `columns()` is currently being used for.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Schema {
     schema: HashMap<String, ColumnWithIndex>,

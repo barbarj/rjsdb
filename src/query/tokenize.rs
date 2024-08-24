@@ -111,7 +111,7 @@ impl<'a> Tokenizer<'a> {
             ),
             // composites
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
-            SpecItem(TokenKind::Float, Regex::new(r"^-?\d+.\d+").unwrap()),
+            SpecItem(TokenKind::Float, Regex::new(r"^-?\d+\.\d+").unwrap()),
             SpecItem(TokenKind::Integer, Regex::new(r"^-?\d+").unwrap()),
             SpecItem(
                 TokenKind::Identifier,

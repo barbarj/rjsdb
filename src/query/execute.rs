@@ -83,6 +83,9 @@ impl ExecutablePlan {
         create_expr: &CreateExpression,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
+        if create_expr.if_not_exists && storage.table_exists(&create_expr.table) {
+            return Ok(QueryResult::Ok);
+        }
         let pairs = zip(
             create_expr.columns.names.iter(),
             create_expr.columns.types.iter(),
@@ -90,7 +93,6 @@ impl ExecutablePlan {
         let cols = pairs
             .map(|(name, _type)| Column::new(name.to_string(), *_type))
             .collect();
-        println!("cols: {:?}", cols);
 
         storage.create_table(&create_expr.table, &Schema::new(cols))?;
         Ok(QueryResult::Ok)
