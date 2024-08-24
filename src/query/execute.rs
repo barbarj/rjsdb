@@ -7,13 +7,14 @@ use crate::{
 
 use super::parse::{
     CreateExpression, DestroyExpression, Expression, InsertExpression, OrderByClause,
-    SelectColumns, SelectExpression, WhereClause,
+    SelectColumns, SelectExpression, WhereClause, WhereCmp, WhereMember,
 };
 
 #[derive(Debug)]
 pub enum ExecutionError {
     StorageError(StorageError),
     UnknownColumnNameProvided,
+    MismatchedTypeComparision,
 }
 impl From<StorageError> for ExecutionError {
     fn from(value: StorageError) -> Self {
@@ -65,7 +66,9 @@ impl ExecutablePlan {
         let rows = storage.table_scan(&select_expr.table)?;
         let source = RowsSource::Table(TableRowsIter::new(rows));
         let source = if let Some(where_clause) = &select_expr.where_clause {
-            RowsSource::Filter(FilterRowsIter::new(source, where_clause))
+            let filter = FilterRowsIter::build(source, where_clause)?;
+            println!("{:?}", filter.predicate);
+            RowsSource::Filter(filter)
         } else {
             source
         };
@@ -262,27 +265,152 @@ impl<'a> Iterator for SelectRowsIter<'a> {
     }
 }
 
-// TODO: Make actually filter
+#[derive(Debug)]
+enum FilterType {
+    ValueValue {
+        left: DbValue,
+        right: DbValue,
+        cmp: WhereCmp,
+    },
+    ColumnValue {
+        col_pos: usize,
+        val: DbValue,
+        cmp: WhereCmp,
+    },
+    ColumnColumn {
+        col1_pos: usize,
+        col2_pos: usize,
+        cmp: WhereCmp,
+    },
+}
+impl FilterType {
+    fn build(where_clause: &WhereClause, schema: &Schema) -> Result<Self> {
+        match (&where_clause.left, &where_clause.right) {
+            (WhereMember::Value(val), WhereMember::Column(name)) => match schema.column(name) {
+                Some(col) if col._type == val.db_type() => {
+                    let col_pos = match schema.column_position(&col.name) {
+                        Some(pos) => pos,
+                        None => return Err(ExecutionError::UnknownColumnNameProvided),
+                    };
+                    Ok(Self::ColumnValue {
+                        col_pos,
+                        val: val.clone(),
+                        cmp: where_clause.cmp,
+                    })
+                }
+                Some(_) => Err(ExecutionError::MismatchedTypeComparision),
+                None => Err(ExecutionError::UnknownColumnNameProvided),
+            },
+            (WhereMember::Column(name), WhereMember::Value(val)) => match schema.column(name) {
+                Some(col) if col._type == val.db_type() => {
+                    let col_pos = match schema.column_position(&col.name) {
+                        Some(pos) => pos,
+                        None => return Err(ExecutionError::UnknownColumnNameProvided),
+                    };
+                    Ok(FilterType::ColumnValue {
+                        col_pos,
+                        val: val.clone(),
+                        cmp: where_clause.cmp,
+                    })
+                }
+                Some(_) => Err(ExecutionError::MismatchedTypeComparision),
+                None => Err(ExecutionError::UnknownColumnNameProvided),
+            },
+            (WhereMember::Value(val1), WhereMember::Value(val2)) => {
+                if val1.db_type() != val2.db_type() {
+                    Err(ExecutionError::MismatchedTypeComparision)
+                } else {
+                    Ok(FilterType::ValueValue {
+                        left: val1.clone(),
+                        right: val2.clone(),
+                        cmp: where_clause.cmp,
+                    })
+                }
+            }
+            (WhereMember::Column(name1), WhereMember::Column(name2)) => {
+                match (schema.column(name1), schema.column(name2)) {
+                    (None, _) => Err(ExecutionError::UnknownColumnNameProvided),
+                    (_, None) => Err(ExecutionError::UnknownColumnNameProvided),
+                    (Some(col1), Some(col2)) if col1._type != col2._type => {
+                        Err(ExecutionError::MismatchedTypeComparision)
+                    }
+                    _ => {
+                        let left_pos = match schema.column_position(name1) {
+                            Some(pos) => pos,
+                            None => return Err(ExecutionError::UnknownColumnNameProvided),
+                        };
+                        let right_pos = match schema.column_position(name2) {
+                            Some(pos) => pos,
+                            None => return Err(ExecutionError::UnknownColumnNameProvided),
+                        };
+                        Ok(FilterType::ColumnColumn {
+                            col1_pos: left_pos,
+                            col2_pos: right_pos,
+                            cmp: where_clause.cmp,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    fn row_predicate(&self, row: &Row) -> bool {
+        let (left, right, cmp) = match self {
+            Self::ColumnColumn {
+                col1_pos,
+                col2_pos,
+                cmp,
+            } => {
+                let left = row
+                    .data
+                    .get(*col1_pos)
+                    .expect("Should always have a value here");
+                let right = row
+                    .data
+                    .get(*col2_pos)
+                    .expect("Should always have a value here");
+                (left, right, cmp)
+            }
+            Self::ColumnValue { col_pos, val, cmp } => {
+                let left = row
+                    .data
+                    .get(*col_pos)
+                    .expect("Should always have a value here");
+                (left, val, cmp)
+            }
+            Self::ValueValue { left, right, cmp } => (left, right, cmp),
+        };
+        println!("res: {} == {} -> {}", left, right, left == right);
+        match cmp {
+            WhereCmp::Eq => left == right,
+        }
+    }
+}
+
+// TODO: Construct predicate in a more intentional way, probably during physical plan phase
+// when I get that set up
 struct FilterRowsIter<'a> {
     source: Box<RowsSource<'a>>,
-    predicate: Box<dyn Fn(&Row) -> bool>,
+    predicate: FilterType,
     schema: Cow<'a, Schema>,
 }
 impl<'a> FilterRowsIter<'a> {
-    pub fn new(source: RowsSource<'a>, where_clause: &WhereClause) -> Self {
+    pub fn build(source: RowsSource<'a>, where_clause: &WhereClause) -> Result<Self> {
         let schema = source.schema();
-        FilterRowsIter {
+        let predicate = FilterType::build(where_clause, &schema)?;
+
+        Ok(FilterRowsIter {
             source: Box::new(source),
-            predicate: Box::new(where_clause.predicate()),
+            predicate,
             schema,
-        }
+        })
     }
 }
 impl<'a> Iterator for FilterRowsIter<'a> {
     type Item = Cow<'a, Row>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.source.next().filter(|row| (self.predicate)(row))
+        self.source.find(|row| self.predicate.row_predicate(row))
     }
 }
 

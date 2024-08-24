@@ -11,8 +11,11 @@ use rjsdb::{
 };
 
 // TODO:
-// - actual filtering
 // - allow data to be inserted in any column order
+// - add tests for parser, execution
+// - missing stuff to support my RSS feed
+// - missing options for trawler testing
+// - repl improvements (arrow navigation, command history)
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests

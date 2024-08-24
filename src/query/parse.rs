@@ -173,18 +173,14 @@ impl<'a> Parser<'a> {
     }
 
     fn where_token_to_where_member(token: Token) -> Result<WhereMember> {
-        println!("handling token kind: {:?}", token.kind());
         match token.kind() {
             TokenKind::Identifier => Ok(WhereMember::Column(token.contents().to_string())),
             TokenKind::String => Ok(WhereMember::Value(DbValue::String(
                 token.contents().to_string(),
             ))),
-            TokenKind::Integer => {
-                println!("parsing int");
-                Ok(WhereMember::Value(DbValue::Integer(
-                    token.contents().parse::<i32>()?,
-                )))
-            }
+            TokenKind::Integer => Ok(WhereMember::Value(DbValue::Integer(
+                token.contents().parse::<i32>()?,
+            ))),
             TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(
                 token.contents().parse::<f32>()?,
             ))),
@@ -373,28 +369,22 @@ pub struct DestroyExpression {
     pub table: String,
 }
 
-#[derive(PartialEq, Debug)]
-enum WhereMember {
+#[derive(PartialEq, Debug, Clone)]
+pub enum WhereMember {
     Value(DbValue),
     Column(String),
 }
 
-#[derive(PartialEq, Debug)]
-enum WhereCmp {
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum WhereCmp {
     Eq,
 }
 
 #[derive(PartialEq, Debug)]
 pub struct WhereClause {
-    left: WhereMember,
-    cmp: WhereCmp,
-    right: WhereMember,
-}
-impl WhereClause {
-    // TODO: Fill in necessary logic for boolean expressions
-    pub fn predicate(&self) -> impl Fn(&Row) -> bool {
-        |r: &Row| true
-    }
+    pub left: WhereMember,
+    pub cmp: WhereCmp,
+    pub right: WhereMember,
 }
 
 #[derive(PartialEq, Debug)]
