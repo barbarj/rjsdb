@@ -1,7 +1,7 @@
 use std::{borrow::Cow, iter::zip};
 
 use crate::{
-    storage::{Column, Row, Rows, Schema, StorageError, StorageLayer},
+    storage::{Column, ColumnWithIndex, Row, Rows, Schema, StorageError, StorageLayer},
     DbValue,
 };
 
@@ -227,16 +227,15 @@ impl<'a> SelectRowsIter<'a> {
             // TODO: Probably refactor this. It's a bit of a mess
             SelectColumns::Only(cols) => {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
-                let columns: Vec<Column> = cols
+                let columns_with_indexes: Vec<&ColumnWithIndex> =
+                    cols.iter().filter_map(|name| schema.get(name)).collect();
+                let indices: Vec<usize> = columns_with_indexes.iter().map(|ci| ci.index).collect();
+
+                let columns = columns_with_indexes
                     .iter()
-                    .filter_map(|name| schema.column(name))
-                    .cloned()
+                    .map(|ci| ci.column.clone())
                     .collect();
-                let schema: Cow<'a, Schema> = Cow::Owned(Schema::new(columns));
-                let indices: Vec<usize> = cols
-                    .iter()
-                    .filter_map(|name| schema.column_position(name))
-                    .collect();
+                let new_schema = Cow::Owned(Schema::new(columns));
 
                 let projection = move |r: Cow<'a, Row>| {
                     // TODO: Handle situations where column name that doesn't exist in schema is provided
@@ -250,7 +249,7 @@ impl<'a> SelectRowsIter<'a> {
 
                 SelectRowsIter {
                     source: Box::new(source),
-                    schema,
+                    schema: new_schema,
                     column_project: Box::new(projection),
                 }
             }

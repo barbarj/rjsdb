@@ -113,6 +113,11 @@ pub fn repl(storage: &mut StorageLayer) {
             Err(err) => println!("{err:?}"),
             Ok(QueryResult::Ok) => println!("ok"),
             Ok(QueryResult::Rows(rows)) => {
+                for col in rows.schema().columns() {
+                    print!("{}, ", col.name);
+                }
+                print!("\n");
+                println!("-------------");
                 for row in rows {
                     println!("{:?}", row.data);
                 }

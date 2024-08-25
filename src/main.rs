@@ -12,6 +12,7 @@ use rjsdb::{
 
 // TODO:
 // - allow data to be inserted in any column order
+// - improve select results display in repl
 // - add tests for parser, execution
 // - missing stuff to support my RSS feed
 // - missing options for trawler testing

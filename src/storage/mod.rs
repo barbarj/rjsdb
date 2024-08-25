@@ -236,9 +236,9 @@ impl Generate for Column {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct ColumnWithIndex {
-    column: Column,
-    index: usize,
+pub struct ColumnWithIndex {
+    pub column: Column,
+    pub index: usize,
 }
 impl ColumnWithIndex {
     fn new(column: Column, index: usize) -> Self {
@@ -270,13 +270,17 @@ impl Schema {
         self.schema.get(name).map(|ci| &ci.column)
     }
 
+    pub fn get(&self, name: &str) -> Option<&ColumnWithIndex> {
+        self.schema.get(name)
+    }
+
     pub fn matches(&self, row: &Row) -> bool {
         let our_types = self.columns().map(|c| c._type);
         let their_types = row.data.iter().map(|v| v.db_type());
         zip(our_types, their_types).all(|(a, b)| a == b)
     }
 
-    fn columns(&self) -> impl Iterator<Item = &Column> {
+    pub fn columns(&self) -> impl Iterator<Item = &Column> {
         SchemaColumns::new(self)
     }
 
