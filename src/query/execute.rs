@@ -107,19 +107,23 @@ impl ExecutablePlan {
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         let schema = storage.table_schema(&insert_expr.table)?;
-        let mut order = Vec::new();
-        for col in insert_expr.columns.iter() {
-            let index = match schema.column_position(col) {
-                Some(i) => i,
-                None => return Err(ExecutionError::UnknownColumnNameProvided),
-            };
-            order.push(index);
-        }
-        let values: Vec<DbValue> = order
+        let order: Result<Vec<usize>> = insert_expr
+            .columns
             .iter()
-            .filter_map(|i| insert_expr.values.get(*i).cloned())
+            .map(|name| match schema.column_position(name) {
+                Some(pos) => Ok(pos),
+                None => Err(ExecutionError::UnknownColumnNameProvided),
+            })
             .collect();
-        let rows: Vec<Row> = vec![Row::new(values)];
+        let order = order?;
+
+        let mut unordered_vals: Vec<(usize, &DbValue)> =
+            zip(order, insert_expr.values.iter()).collect();
+        unordered_vals.sort_by_key(|p| p.0);
+
+        let vals = unordered_vals.iter().map(|r| r.1.clone()).collect();
+        let rows = vec![Row::new(vals)];
+
         storage.insert_rows(&insert_expr.table, rows)?;
         Ok(QueryResult::Ok)
     }

@@ -116,7 +116,7 @@ pub fn repl(storage: &mut StorageLayer) {
                 for col in rows.schema().columns() {
                     print!("{}, ", col.name);
                 }
-                print!("\n");
+                println!();
                 println!("-------------");
                 for row in rows {
                     println!("{:?}", row.data);
