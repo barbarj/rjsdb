@@ -11,7 +11,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - improve select results display in repl
 // - add tests for parser, execution
 // - missing stuff to support my RSS feed
 // - missing options for trawler testing

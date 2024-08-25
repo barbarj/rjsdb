@@ -228,7 +228,6 @@ impl<'a> SelectRowsIter<'a> {
                 schema,
                 column_project: Box::new(|r| r.clone()),
             },
-            // TODO: Probably refactor this. It's a bit of a mess
             SelectColumns::Only(cols) => {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
                 let columns_with_indexes: Vec<&ColumnWithIndex> =

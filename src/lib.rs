@@ -1,15 +1,17 @@
 use std::{
-    cmp::Ordering,
+    borrow::Cow,
+    cmp::{max, Ordering},
     collections::HashSet,
     fmt::Display,
     hash::Hash,
     io::{stdin, stdout, Write},
+    iter::zip,
 };
 
 use generate::Generate;
-use query::{execute, QueryResult};
+use query::{execute, QueryResult, ResultRows};
 use serde::{self, Deserialize, Serialize};
-use storage::StorageLayer;
+use storage::{Row, StorageLayer};
 
 pub mod generate;
 pub mod query;
@@ -64,7 +66,10 @@ impl Display for DbValue {
         match self {
             Self::Float(v) => v.fmt(f),
             Self::Integer(v) => v.fmt(f),
-            Self::String(v) => f.write_fmt(format_args!("\"{v}\"")),
+            Self::String(v) => {
+                let str = format!("\"{v}\"");
+                str.fmt(f)
+            }
         }
     }
 }
@@ -112,18 +117,51 @@ pub fn repl(storage: &mut StorageLayer) {
         match execute(s.trim(), storage) {
             Err(err) => println!("{err:?}"),
             Ok(QueryResult::Ok) => println!("ok"),
-            Ok(QueryResult::Rows(rows)) => {
-                for col in rows.schema().columns() {
-                    print!("{}, ", col.name);
-                }
-                println!();
-                println!("-------------");
-                for row in rows {
-                    println!("{:?}", row.data);
-                }
-            }
+            Ok(QueryResult::Rows(rows)) => display_rows(rows),
         }
         s.clear();
     }
     storage.flush().unwrap();
+}
+
+fn print_row(col_widths: &[usize], row: &Row) {
+    for (val, width) in zip(row.data.iter(), col_widths) {
+        print!("| {:<width$} ", val);
+    }
+    println!("|");
+}
+
+fn row_width(col_widths: &[usize]) -> usize {
+    let row_width: usize = col_widths.iter().sum(); // string widths themselves
+    let row_width = row_width + (col_widths.len() * 3); // to account for spacing and dividers;
+    row_width + 1 // last dividider;
+}
+
+fn display_rows(rows: ResultRows) {
+    // limit to 20 rows, mainly to not dump a crazy amount of
+    // data on the user.
+    let schema = rows.schema();
+    let all_rows: Vec<Cow<Row>> = rows.take(20).collect();
+    let init_widths: Vec<usize> = schema.columns().map(|_| 0).collect();
+    let col_widths = all_rows.iter().fold(init_widths, |widths, row| {
+        let row_widths = row.data.iter().map(|x| format!("{x}").len());
+        zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
+    });
+
+    let divider = "-".repeat(row_width(&col_widths));
+
+    // header
+    println!("{}", divider);
+    for (col, width) in zip(schema.columns(), col_widths.iter()) {
+        print!("| {:<width$} ", col.name);
+    }
+    println!("|");
+    println!("{}", divider);
+
+    // body
+    for row in all_rows {
+        print_row(&col_widths, &row);
+    }
+
+    println!("{}", divider);
 }
