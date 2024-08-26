@@ -109,8 +109,7 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Create) => self.create_expression()?,
             Some(TokenKind::Insert) => self.insert_expression()?,
             Some(TokenKind::Destroy) => self.destroy_expression()?,
-            Some(_) => panic!("unimplemented!"),
-            // TODO: Other expression types
+            Some(_) => return Err(ParsingError::UnexpectedTokenType),
         };
         self.end_of_statement()?;
         Ok(expr)

@@ -105,63 +105,78 @@ where
     false
 }
 
-pub fn repl(storage: &mut StorageLayer) {
-    let mut s = String::new();
-    while !s.contains(';') {
-        print!("> ");
-        stdout().flush().unwrap();
-        stdin().read_line(&mut s).unwrap();
-        if s.trim() == "exit" {
-            break;
+pub struct Repl<'a> {
+    storage: &'a mut StorageLayer,
+    history: Vec<String>,
+}
+impl<'a> Repl<'a> {
+    pub fn new(storage: &'a mut StorageLayer) -> Self {
+        Repl {
+            storage,
+            history: Vec::new(),
         }
-        match execute(s.trim(), storage) {
-            Err(err) => println!("{err:?}"),
-            Ok(QueryResult::Ok) => println!("ok"),
-            Ok(QueryResult::Rows(rows)) => display_rows(rows),
+    }
+
+    pub fn run(&mut self) {
+        loop {
+            let mut s = String::new();
+            print!("> ");
+            stdout().flush().unwrap();
+            while !s.contains(';') {
+                stdin().read_line(&mut s).unwrap();
+            }
+            if s.trim() == "exit;" {
+                break;
+            }
+            match execute(s.trim(), self.storage) {
+                Err(err) => println!("{err:?}"),
+                Ok(QueryResult::Ok) => println!("ok"),
+                Ok(QueryResult::Rows(rows)) => Repl::display_rows(rows),
+            }
+            self.history.push(s);
         }
-        s.clear();
-    }
-    storage.flush().unwrap();
-}
-
-fn print_row(col_widths: &[usize], row: &Row) {
-    for (val, width) in zip(row.data.iter(), col_widths) {
-        print!("| {:<width$} ", val);
-    }
-    println!("|");
-}
-
-fn row_width(col_widths: &[usize]) -> usize {
-    let row_width: usize = col_widths.iter().sum(); // string widths themselves
-    let row_width = row_width + (col_widths.len() * 3); // to account for spacing and dividers;
-    row_width + 1 // last dividider;
-}
-
-fn display_rows(rows: ResultRows) {
-    // limit to 20 rows, mainly to not dump a crazy amount of
-    // data on the user.
-    let schema = rows.schema();
-    let all_rows: Vec<Cow<Row>> = rows.take(20).collect();
-    let name_widths: Vec<usize> = schema.columns().map(|c| c.name.len()).collect();
-    let col_widths = all_rows.iter().fold(name_widths, |widths, row| {
-        let row_widths = row.data.iter().map(|x| format!("{x}").len());
-        zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
-    });
-
-    let divider = "-".repeat(row_width(&col_widths));
-
-    // header
-    println!("{}", divider);
-    for (col, width) in zip(schema.columns(), col_widths.iter()) {
-        print!("| {:<width$} ", col.name);
-    }
-    println!("|");
-    println!("{}", divider);
-
-    // body
-    for row in all_rows {
-        print_row(&col_widths, &row);
+        self.storage.flush().unwrap();
     }
 
-    println!("{}", divider);
+    fn print_row(col_widths: &[usize], row: &Row) {
+        for (val, width) in zip(row.data.iter(), col_widths) {
+            print!("| {:<width$} ", val);
+        }
+        println!("|");
+    }
+
+    fn row_width(col_widths: &[usize]) -> usize {
+        let row_width: usize = col_widths.iter().sum(); // string widths themselves
+        let row_width = row_width + (col_widths.len() * 3); // to account for spacing and dividers;
+        row_width + 1 // last dividider;
+    }
+
+    fn display_rows(rows: ResultRows) {
+        // limit to 20 rows, mainly to not dump a crazy amount of
+        // data on the user.
+        let schema = rows.schema();
+        let all_rows: Vec<Cow<Row>> = rows.take(20).collect();
+        let name_widths: Vec<usize> = schema.columns().map(|c| c.name.len()).collect();
+        let col_widths = all_rows.iter().fold(name_widths, |widths, row| {
+            let row_widths = row.data.iter().map(|x| format!("{x}").len());
+            zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
+        });
+
+        let divider = "-".repeat(Repl::row_width(&col_widths));
+
+        // header
+        println!("{}", divider);
+        for (col, width) in zip(schema.columns(), col_widths.iter()) {
+            print!("| {:<width$} ", col.name);
+        }
+        println!("|");
+        println!("{}", divider);
+
+        // body
+        for row in all_rows {
+            Repl::print_row(&col_widths, &row);
+        }
+
+        println!("{}", divider);
+    }
 }

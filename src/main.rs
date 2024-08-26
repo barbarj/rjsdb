@@ -1,9 +1,8 @@
 use std::path::Path;
 
-use rjsdb::{query::execute, repl, storage};
+use rjsdb::{query::execute, storage, Repl};
 
 // TODO:
-// - >=, <= support
 // - repl improvements (arrow navigation, command history)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
@@ -29,5 +28,6 @@ fn main() {
     let create_table =
         "CREATE TABLE IF NOT EXISTS the_mf_table (foo string, bar integer, baz float);";
     _ = execute(create_table, &mut storage).unwrap();
-    repl(&mut storage);
+    let mut repl = Repl::new(&mut storage);
+    repl.run();
 }
