@@ -26,6 +26,7 @@ type Result<T> = std::result::Result<T, ExecutionError>;
 
 pub enum QueryResult<'a> {
     Ok,
+    NothingToDo,
     Rows(ResultRows<'a>),
 }
 
@@ -157,6 +158,9 @@ impl ExecutablePlan {
     }
 
     pub fn execute<'strg>(&self, storage: &'strg mut StorageLayer) -> Result<QueryResult<'strg>> {
+        if self.plan.len() == 0 {
+            return Ok(QueryResult::NothingToDo);
+        }
         let last_idx = self.plan.len() - 1;
         let last_expr = self
             .plan

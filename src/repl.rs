@@ -1,68 +1,195 @@
 use std::{
     borrow::Cow,
     cmp::max,
-    io::{stdin, stdout, Write},
+    io::{Error as IoError, Write},
     iter::zip,
+    string::FromUtf8Error,
 };
+
+use console::{Key, Term};
 
 use crate::{
     query::{execute, QueryResult, ResultRows},
-    storage::{Row, StorageLayer},
+    storage::{Row, StorageError, StorageLayer},
 };
 
-pub struct Repl<'a> {
-    storage: &'a mut StorageLayer,
-    history: Vec<String>,
+#[derive(Debug)]
+pub enum ReplError {
+    StorageError(StorageError),
+    IoError(IoError),
+    FromUtf8Error(FromUtf8Error),
 }
-impl<'a> Repl<'a> {
-    pub fn new(storage: &'a mut StorageLayer) -> Self {
+impl From<StorageError> for ReplError {
+    fn from(value: StorageError) -> Self {
+        Self::StorageError(value)
+    }
+}
+impl From<IoError> for ReplError {
+    fn from(value: IoError) -> Self {
+        Self::IoError(value)
+    }
+}
+impl From<FromUtf8Error> for ReplError {
+    fn from(value: FromUtf8Error) -> Self {
+        Self::FromUtf8Error(value)
+    }
+}
+
+type Result<T> = std::result::Result<T, ReplError>;
+
+struct DisplayState {
+    new_line: String,
+    display_line: String,
+    showing_new_line: bool,
+}
+impl DisplayState {
+    fn new() -> Self {
+        DisplayState {
+            new_line: String::new(),
+            display_line: String::new(),
+            showing_new_line: true,
+        }
+    }
+
+    fn use_new_line_as_display(&mut self) {
+        self.display_line = self.new_line.clone();
+        self.showing_new_line = true;
+    }
+
+    fn backspace(&mut self) {
+        _ = self.display_line.pop();
+        if self.showing_new_line {
+            _ = self.new_line.pop();
+        }
+    }
+
+    fn push_char(&mut self, ch: char) {
+        if self.showing_new_line {
+            self.new_line.push(ch);
+        }
+        self.display_line.push(ch);
+    }
+
+    fn reset(&mut self) {
+        self.new_line = String::new();
+        self.display_line = String::new();
+        self.showing_new_line = true;
+    }
+}
+
+pub struct Repl<'strg> {
+    storage: &'strg mut StorageLayer,
+    history: Vec<String>,
+    cursor: usize,
+    term: Term,
+    display: DisplayState,
+}
+impl<'strg> Repl<'strg> {
+    pub fn new(storage: &'strg mut StorageLayer) -> Self {
         Repl {
             storage,
             history: Vec::new(),
+            cursor: 0,
+            term: Term::buffered_stdout(),
+            display: DisplayState::new(),
         }
     }
 
-    fn get_next_line() -> String {
-        print!("> ");
-        stdout().flush().unwrap();
-        let mut line = String::new();
-
-        /*
-        cursor = 0
-        while fill_buff (enough bytes for escape codes, 3?) {
-            if buff == 'UP' {
-                cursor = min(0, cursor - 1);
-                display_history(cursor)
-                clear_line()
-            }
-            // down
-            if buff == '\n' {
-                return line
-            }
-
-        }
-         */
-
-        while !line.contains(';') {
-            stdin().read_line(&mut line).unwrap();
-        }
-        line
+    fn prompt(&mut self) -> Result<()> {
+        self.term.write_all("> ".as_bytes())?;
+        self.term.write_all(self.display.display_line.as_bytes())?;
+        self.term.flush()?;
+        Ok(())
     }
 
-    pub fn run(&mut self) {
+    fn echo_char(&mut self, ch: char) -> Result<()> {
+        self.term.write_all(ch.to_string().as_bytes())?;
+        self.term.flush()?;
+        Ok(())
+    }
+
+    fn show_previous_line(&mut self) -> Result<()> {
+        if !self.history.is_empty() && self.cursor > 0 {
+            if self.display.showing_new_line {
+                self.display.showing_new_line = false;
+            }
+            self.cursor -= 1;
+            self.display.display_line = self
+                .history
+                .get(self.cursor)
+                .expect("Should always be something here")
+                .clone();
+            self.term.clear_line()?;
+            self.prompt()?;
+        }
+        Ok(())
+    }
+
+    fn show_next_line(&mut self) -> Result<()> {
+        if self.cursor < self.history.len() {
+            self.term.clear_line()?;
+            self.cursor += 1;
+            if self.cursor < self.history.len() {
+                self.display.showing_new_line = false;
+                self.display.display_line = self
+                    .history
+                    .get(self.cursor)
+                    .expect("Should always be something here")
+                    .clone();
+            } else {
+                self.display.use_new_line_as_display();
+            }
+            self.prompt()?;
+        }
+        Ok(())
+    }
+
+    fn get_user_input(&mut self) -> Result<String> {
+        self.display.reset();
+        self.prompt()?;
         loop {
-            let line = Repl::get_next_line();
+            let key = self.term.read_key()?;
+            match key {
+                Key::ArrowUp => self.show_previous_line()?,
+                Key::ArrowDown => self.show_next_line()?,
+                Key::Backspace => {
+                    self.term.clear_chars(1)?;
+                    self.display.backspace();
+                    self.term.flush()?;
+                }
+                Key::Char(ch) => {
+                    self.display.push_char(ch);
+                    self.echo_char(ch)?;
+                }
+                Key::Enter => {
+                    self.display.display_line.push('\n');
+                    self.echo_char('\n')?;
+                    break;
+                }
+                _ => (),
+            }
+        }
+        self.history
+            .push(self.display.display_line.trim().to_string());
+        self.cursor = self.history.len();
+        Ok(self.display.display_line.clone())
+    }
+
+    pub fn run(&mut self) -> Result<()> {
+        loop {
+            let line = self.get_user_input()?;
             if line.trim() == "exit;" {
                 break;
             }
             match execute(line.trim(), self.storage) {
                 Err(err) => println!("{err:?}"),
                 Ok(QueryResult::Ok) => println!("ok"),
+                Ok(QueryResult::NothingToDo) => (),
                 Ok(QueryResult::Rows(rows)) => Repl::display_rows(rows),
             }
-            self.history.push(line);
         }
-        self.storage.flush().unwrap();
+        self.storage.flush()?;
+        Ok(())
     }
 
     fn print_row(col_widths: &[usize], row: &Row) {

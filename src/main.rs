@@ -1,9 +1,8 @@
-use std::path::Path;
+use std::{io::stdin, path::Path};
 
 use rjsdb::{query::execute, repl::Repl, storage};
 
 // TODO:
-// - repl improvements (arrow navigation, command history)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
 //   - PRIMARY KEY (maybe, may not strictly be necessary yet)
@@ -29,5 +28,5 @@ fn main() {
         "CREATE TABLE IF NOT EXISTS the_mf_table (foo string, bar integer, baz float);";
     _ = execute(create_table, &mut storage).unwrap();
     let mut repl = Repl::new(&mut storage);
-    repl.run();
+    repl.run().unwrap();
 }
