@@ -78,6 +78,12 @@ impl ExecutablePlan {
             source
         };
         let source = RowsSource::Select(SelectRowsIter::new(source, &select_expr.columns));
+        let source = if let Some(limit) = &select_expr.limit {
+            RowsSource::Limit(LimitRowsIter::new(source, limit))
+        } else {
+            source
+        };
+
         Ok(QueryResult::Rows(ResultRows::new(source)))
     }
 
@@ -168,6 +174,7 @@ enum RowsSource<'a> {
     Select(SelectRowsIter<'a>),
     Filter(FilterRowsIter<'a>),
     Sort(SortRowsIter<'a>),
+    Limit(LimitRowsIter<'a>),
 }
 impl<'a> RowsSource<'a> {
     fn schema(&self) -> Cow<'a, Schema> {
@@ -176,6 +183,7 @@ impl<'a> RowsSource<'a> {
             Self::Select(s) => s.schema.clone(),
             Self::Filter(f) => f.schema.clone(),
             Self::Sort(s) => s.schema.clone(),
+            Self::Limit(l) => l.schema.clone(),
         }
     }
 }
@@ -188,6 +196,7 @@ impl<'a> Iterator for RowsSource<'a> {
             Self::Select(s) => s.next(),
             Self::Filter(f) => f.next(),
             Self::Sort(s) => s.next(),
+            Self::Limit(l) => l.next(),
         }
     }
 }
@@ -264,6 +273,34 @@ impl<'a> Iterator for SelectRowsIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.source.next().map(|r| (self.column_project)(r.clone()))
+    }
+}
+
+struct LimitRowsIter<'a> {
+    source: Box<RowsSource<'a>>,
+    schema: Cow<'a, Schema>,
+    rows_left: usize,
+}
+impl<'a> LimitRowsIter<'a> {
+    fn new(source: RowsSource<'a>, limit: &usize) -> Self {
+        let schema = source.schema();
+        LimitRowsIter {
+            source: Box::new(source),
+            schema,
+            rows_left: *limit,
+        }
+    }
+}
+impl<'a> Iterator for LimitRowsIter<'a> {
+    type Item = Cow<'a, Row>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(row) = self.source.next().filter(|_| self.rows_left > 0) {
+            self.rows_left -= 1;
+            Some(row)
+        } else {
+            None
+        }
     }
 }
 

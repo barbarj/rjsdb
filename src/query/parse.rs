@@ -156,12 +156,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let limit = if self.peek_kind() == Some(TokenKind::Limit) {
+            Some(self.limit()?)
+        } else {
+            None
+        };
 
         Ok(Expression::Select(SelectExpression {
             columns,
             table,
             where_clause,
             order_by_clause,
+            limit,
         }))
     }
 
@@ -226,6 +232,13 @@ impl<'a> Parser<'a> {
             _ = self.consume(TokenKind::Desc)?;
         }
         Ok(OrderByClause { sort_column, desc })
+    }
+
+    fn limit(&mut self) -> Result<usize> {
+        _ = self.consume(TokenKind::Limit)?;
+        let token = self.consume(TokenKind::Integer)?;
+        let limit = token.contents().parse::<usize>()?;
+        Ok(limit)
     }
 
     fn create_expression(&mut self) -> Result<Expression> {
@@ -348,6 +361,7 @@ pub struct SelectExpression {
     pub table: String,
     pub where_clause: Option<WhereClause>,
     pub order_by_clause: Option<OrderByClause>,
+    pub limit: Option<usize>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -441,6 +455,7 @@ mod parser_tests {
             table: String::from("the_data"),
             where_clause: None,
             order_by_clause: None,
+            limit: None,
         })];
 
         assert_eq!(actual, expected);
@@ -457,6 +472,7 @@ mod parser_tests {
             table: String::from("the_data"),
             where_clause: None,
             order_by_clause: None,
+            limit: None,
         })];
 
         assert_eq!(actual, expected);
@@ -477,6 +493,7 @@ mod parser_tests {
                 right: WhereMember::Value(DbValue::String(String::from("this"))),
             }),
             order_by_clause: None,
+            limit: None,
         })];
 
         assert_eq!(actual, expected);
@@ -496,6 +513,7 @@ mod parser_tests {
                 sort_column: String::from("baz"),
                 desc: false,
             }),
+            limit: None,
         })];
 
         assert_eq!(actual, expected);
@@ -515,14 +533,32 @@ mod parser_tests {
                 sort_column: String::from("baz"),
                 desc: true,
             }),
+            limit: None,
         })];
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn select_with_where_and_sort() {
-        let stmt = "select foo, bar from the_data where 'this' = that order by baz desc;";
+    fn select_with_limit() {
+        let stmt = "select * from the_data limit 42;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Select(SelectExpression {
+            columns: SelectColumns::All,
+            table: String::from("the_data"),
+            where_clause: None,
+            order_by_clause: None,
+            limit: Some(42),
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_all_clauses() {
+        let stmt = "select foo, bar from the_data where 'this' = that order by baz desc limit 5;";
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
@@ -538,6 +574,7 @@ mod parser_tests {
                 sort_column: String::from("baz"),
                 desc: true,
             }),
+            limit: Some(5),
         })];
 
         assert_eq!(actual, expected);
@@ -651,6 +688,7 @@ mod parser_tests {
                 table: String::from("the_data"),
                 where_clause: None,
                 order_by_clause: None,
+                limit: None,
             }),
         ];
 
