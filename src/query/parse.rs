@@ -205,9 +205,17 @@ impl<'a> Parser<'a> {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
         let cmp = match self.peek_kind() {
-            Some(k) if matches!(k, TokenKind::EqualsSign) => {
-                _ = self.consume(k)?;
+            Some(TokenKind::EqualsSign) => {
+                _ = self.consume(TokenKind::EqualsSign)?;
                 WhereCmp::Eq
+            }
+            Some(TokenKind::LeftAngleBracket) => {
+                _ = self.consume(TokenKind::LeftAngleBracket)?;
+                WhereCmp::LessThan
+            }
+            Some(TokenKind::RightAngleBracket) => {
+                _ = self.consume(TokenKind::RightAngleBracket)?;
+                WhereCmp::GreaterThan
             }
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
@@ -392,6 +400,8 @@ pub enum WhereMember {
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum WhereCmp {
     Eq,
+    LessThan,
+    GreaterThan,
 }
 
 #[derive(PartialEq, Debug)]
@@ -491,6 +501,48 @@ mod parser_tests {
                 left: WhereMember::Column(String::from("that")),
                 cmp: WhereCmp::Eq,
                 right: WhereMember::Value(DbValue::String(String::from("this"))),
+            }),
+            order_by_clause: None,
+            limit: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_where_lt_only() {
+        let stmt = "select foo, bar from the_data where 1 < 2;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Select(SelectExpression {
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
+            where_clause: Some(WhereClause {
+                left: WhereMember::Value(DbValue::Integer(1)),
+                cmp: WhereCmp::LessThan,
+                right: WhereMember::Value(DbValue::Integer(2)),
+            }),
+            order_by_clause: None,
+            limit: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_where_gt_only() {
+        let stmt = "select foo, bar from the_data where 1 > 2;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Select(SelectExpression {
+            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            table: String::from("the_data"),
+            where_clause: Some(WhereClause {
+                left: WhereMember::Value(DbValue::Integer(1)),
+                cmp: WhereCmp::GreaterThan,
+                right: WhereMember::Value(DbValue::Integer(2)),
             }),
             order_by_clause: None,
             limit: None,

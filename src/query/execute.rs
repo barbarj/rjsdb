@@ -419,9 +419,10 @@ impl FilterType {
             }
             Self::ValueValue { left, right, cmp } => (left, right, cmp),
         };
-        println!("res: {} == {} -> {}", left, right, left == right);
         match cmp {
             WhereCmp::Eq => left == right,
+            WhereCmp::LessThan => left < right,
+            WhereCmp::GreaterThan => left > right,
         }
     }
 }

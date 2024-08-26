@@ -3,7 +3,7 @@ use std::path::Path;
 use rjsdb::{query::execute, repl, storage};
 
 // TODO:
-// - fix issue with 'select * from the_mf_table where bar > 0 order by bar';
+// - >, < support
 // - repl improvements (arrow navigation, command history)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
