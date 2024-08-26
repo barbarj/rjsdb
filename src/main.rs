@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rjsdb::{query::execute, storage, Repl};
+use rjsdb::{query::execute, repl::Repl, storage};
 
 // TODO:
 // - repl improvements (arrow navigation, command history)
