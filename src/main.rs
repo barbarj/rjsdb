@@ -3,7 +3,7 @@ use std::path::Path;
 use rjsdb::{query::execute, repl, storage};
 
 // TODO:
-// - >, < support
+// - >=, <= support
 // - repl improvements (arrow navigation, command history)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)

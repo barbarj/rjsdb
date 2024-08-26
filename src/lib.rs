@@ -142,8 +142,8 @@ fn display_rows(rows: ResultRows) {
     // data on the user.
     let schema = rows.schema();
     let all_rows: Vec<Cow<Row>> = rows.take(20).collect();
-    let init_widths: Vec<usize> = schema.columns().map(|_| 0).collect();
-    let col_widths = all_rows.iter().fold(init_widths, |widths, row| {
+    let name_widths: Vec<usize> = schema.columns().map(|c| c.name.len()).collect();
+    let col_widths = all_rows.iter().fold(name_widths, |widths, row| {
         let row_widths = row.data.iter().map(|x| format!("{x}").len());
         zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
     });
