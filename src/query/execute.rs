@@ -423,6 +423,8 @@ impl FilterType {
             WhereCmp::Eq => left == right,
             WhereCmp::LessThan => left < right,
             WhereCmp::GreaterThan => left > right,
+            WhereCmp::LessThanEquals => left <= right,
+            WhereCmp::GreaterThanEquals => left >= right,
         }
     }
 }

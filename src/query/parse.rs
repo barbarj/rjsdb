@@ -217,6 +217,14 @@ impl<'a> Parser<'a> {
                 _ = self.consume(TokenKind::RightAngleBracket)?;
                 WhereCmp::GreaterThan
             }
+            Some(TokenKind::LessThanEquals) => {
+                _ = self.consume(TokenKind::LessThanEquals)?;
+                WhereCmp::LessThanEquals
+            }
+            Some(TokenKind::GreaterThanEquals) => {
+                _ = self.consume(TokenKind::GreaterThanEquals)?;
+                WhereCmp::GreaterThanEquals
+            }
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
             None => return Err(ParsingError::UnexpectedEndOfStatement),
         };
@@ -402,6 +410,8 @@ pub enum WhereCmp {
     Eq,
     LessThan,
     GreaterThan,
+    LessThanEquals,
+    GreaterThanEquals,
 }
 
 #[derive(PartialEq, Debug)]

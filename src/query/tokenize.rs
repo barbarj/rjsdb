@@ -41,6 +41,8 @@ pub enum TokenKind {
     RightParen,
     LeftAngleBracket,
     RightAngleBracket,
+    LessThanEquals,
+    GreaterThanEquals,
 }
 
 #[derive(PartialEq, Debug)]
@@ -64,7 +66,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 32;
+const TOKEN_SPEC_LEN: usize = 34;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -90,6 +92,8 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::EqualsSign, Regex::new(r"^=").unwrap()),
             SpecItem(TokenKind::LeftParen, Regex::new(r"^\(").unwrap()),
             SpecItem(TokenKind::RightParen, Regex::new(r"^\)").unwrap()),
+            SpecItem(TokenKind::LessThanEquals, Regex::new(r"^<=").unwrap()),
+            SpecItem(TokenKind::GreaterThanEquals, Regex::new(r"^>=").unwrap()),
             SpecItem(TokenKind::LeftAngleBracket, Regex::new(r"^<").unwrap()),
             SpecItem(TokenKind::RightAngleBracket, Regex::new(r"^>").unwrap()),
             // keywords
@@ -257,7 +261,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <>;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >=;";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -299,6 +303,8 @@ mod tokenizer_tests {
             Token::new("limit", TokenKind::Limit),
             Token::new("<", TokenKind::LeftAngleBracket),
             Token::new(">", TokenKind::RightAngleBracket),
+            Token::new("<=", TokenKind::LessThanEquals),
+            Token::new(">=", TokenKind::GreaterThanEquals),
             Token::new(";", TokenKind::Semicolon),
         ];
 
