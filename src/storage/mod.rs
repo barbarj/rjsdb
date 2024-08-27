@@ -22,12 +22,61 @@ pub mod write;
 // NOTE: This implementation is intenationally stupid right now. We re-write the entire db file on every commit!.
 // Good first change would be to figure out how to make that partial
 
+#[derive(Debug)]
+pub enum StorageError {
+    SerdeError(SerdeError),
+    TableAlreadyExists,
+    TableDoesNotExist,
+    DuplicateColumnNames,
+    EmptyTableName,
+    EmptySchemaProvided,
+    SchemaDoesntMatch,
+}
+impl Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SerdeError(serde_err) => serde_err.fmt(f),
+            Self::TableAlreadyExists => f.write_str("Table already exists"),
+            Self::TableDoesNotExist => f.write_str("The requested table does not exist"),
+            Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
+            Self::EmptyTableName => f.write_str("An empty table name was provided"),
+            Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
+            Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
+        }
+    }
+}
+impl From<SerdeError> for StorageError {
+    fn from(value: SerdeError) -> Self {
+        Self::SerdeError(value)
+    }
+}
+impl From<io::Error> for StorageError {
+    fn from(value: io::Error) -> Self {
+        Self::SerdeError(SerdeError::from(value))
+    }
+}
+
 type Result<T> = std::result::Result<T, StorageError>;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
+struct DeserializableStorageLayer {
+    db_header: DbHeader,
+    tables: Vec<Table>,
+}
+impl DeserializableStorageLayer {
+    fn into_storage_layer(self, file: File) -> StorageLayer {
+        StorageLayer {
+            file,
+            db_header: self.db_header,
+            tables: self.tables,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct StorageLayer {
     #[serde(skip)]
-    file: Option<File>,
+    file: File,
     pub db_header: DbHeader,
     tables: Vec<Table>,
 }
@@ -44,8 +93,8 @@ impl StorageLayer {
         let mut file = OpenOptions::new().read(true).write(true).open(db_file)?;
         let mut buff = Vec::new();
         file.read_to_end(&mut buff)?;
-        let mut db: StorageLayer = read::from_bytes(&buff)?;
-        db.file = Some(file);
+        let ser_db: DeserializableStorageLayer = read::from_bytes(&buff)?;
+        let db = ser_db.into_storage_layer(file);
         Ok(db)
     }
 
@@ -56,7 +105,7 @@ impl StorageLayer {
             .create_new(true)
             .open(db_file)?;
         let db = StorageLayer {
-            file: Some(file),
+            file,
             db_header: DbHeader::new(),
             tables: Vec::new(),
         };
@@ -64,7 +113,8 @@ impl StorageLayer {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        let mut file = self.file.as_ref().expect("File should be set by now");
+        // temporary file reference to allow borrow of self in to_writer
+        let mut file = self.file.try_clone()?;
         file.rewind()?;
         file.set_len(0)?;
         self.db_header.last_modified = Utc::now();
@@ -96,19 +146,11 @@ impl StorageLayer {
     }
 
     pub fn destroy_table(&mut self, name: &str) -> Result<()> {
-        if !self.table_exists(name) {
-            return Err(StorageError::TableDoesNotExist);
-        }
-
-        // find table index
-        let idx = || -> usize {
-            for index in 0..self.tables.len() {
-                if self.tables[index].header.table_name == name {
-                    return index;
-                }
-            }
-            panic!("Should never happen");
-        }();
+        let idx = self.tables.iter().position(|t| t.header.table_name == name);
+        let idx = match idx {
+            Some(idx) => idx,
+            None => return Err(StorageError::TableDoesNotExist),
+        };
 
         self.tables.swap_remove(idx);
         Ok(())
@@ -480,39 +522,5 @@ impl From<io::Error> for SerdeError {
 impl From<Utf8Error> for SerdeError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8ParsingError(value)
-    }
-}
-
-#[derive(Debug)]
-pub enum StorageError {
-    SerdeError(SerdeError),
-    TableAlreadyExists,
-    TableDoesNotExist,
-    DuplicateColumnNames,
-    EmptyTableName,
-    EmptySchemaProvided,
-    SchemaDoesntMatch,
-}
-impl Display for StorageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SerdeError(serde_err) => serde_err.fmt(f),
-            Self::TableAlreadyExists => f.write_str("Table already exists"),
-            Self::TableDoesNotExist => f.write_str("The requested table does not exist"),
-            Self::DuplicateColumnNames => f.write_str("Duplicate column names found"),
-            Self::EmptyTableName => f.write_str("An empty table name was provided"),
-            Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
-            Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
-        }
-    }
-}
-impl From<SerdeError> for StorageError {
-    fn from(value: SerdeError) -> Self {
-        Self::SerdeError(value)
-    }
-}
-impl From<io::Error> for StorageError {
-    fn from(value: io::Error) -> Self {
-        Self::SerdeError(SerdeError::from(value))
     }
 }

@@ -177,7 +177,7 @@ pub struct Tokens<'a> {
     tokenizer: Tokenizer<'a>,
 }
 impl<'a> Tokens<'a> {
-    fn to_vec(&mut self) -> Result<Vec<Token<'a>>> {
+    pub fn to_vec(&mut self) -> Result<Vec<Token<'a>>> {
         let mut tokens = Vec::new();
         while let Some(token) = self.next_token()? {
             tokens.push(token);
