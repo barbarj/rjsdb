@@ -6,8 +6,8 @@ use crate::{
 };
 
 use super::parse::{
-    CreateExpression, DestroyExpression, Expression, InsertExpression, OrderByClause,
-    SelectColumns, SelectExpression, WhereClause, WhereCmp, WhereMember,
+    CreateStatement, DestroyStatement, InsertStatement, OrderByClause, SelectColumns,
+    SelectStatement, Statement, WhereClause, WhereCmp, WhereMember,
 };
 
 #[derive(Debug)]
@@ -52,16 +52,16 @@ impl<'a> Iterator for ResultRows<'a> {
 
 // TODO: Rework this at some point to actually do plan optimization
 pub struct ExecutablePlan {
-    plan: Vec<Expression>,
+    plan: Vec<Statement>,
 }
 impl ExecutablePlan {
-    pub fn new(plan: Vec<Expression>) -> Self {
+    pub fn new(plan: Vec<Statement>) -> Self {
         ExecutablePlan { plan }
     }
 
     fn select<'strg>(
         &self,
-        select_expr: &SelectExpression,
+        select_expr: &SelectStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         let rows = storage.table_scan(&select_expr.table)?;
@@ -90,7 +90,7 @@ impl ExecutablePlan {
 
     fn create<'strg>(
         &self,
-        create_expr: &CreateExpression,
+        create_expr: &CreateStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         if create_expr.if_not_exists && storage.table_exists(&create_expr.table) {
@@ -110,7 +110,7 @@ impl ExecutablePlan {
 
     fn insert<'strg>(
         &self,
-        insert_expr: &InsertExpression,
+        insert_expr: &InsertStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         let schema = storage.table_schema(&insert_expr.table)?;
@@ -137,7 +137,7 @@ impl ExecutablePlan {
 
     fn destroy<'strg>(
         &self,
-        destroy_expr: &DestroyExpression,
+        destroy_expr: &DestroyStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         storage.destroy_table(&destroy_expr.table)?;
@@ -146,14 +146,14 @@ impl ExecutablePlan {
 
     fn execute_expression<'strg>(
         &self,
-        expr: &Expression,
+        expr: &Statement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         match expr {
-            Expression::Select(s) => self.select(s, storage),
-            Expression::Create(c) => self.create(c, storage),
-            Expression::Insert(i) => self.insert(i, storage),
-            Expression::Destroy(d) => self.destroy(d, storage),
+            Statement::Select(s) => self.select(s, storage),
+            Statement::Create(c) => self.create(c, storage),
+            Statement::Insert(i) => self.insert(i, storage),
+            Statement::Destroy(d) => self.destroy(d, storage),
         }
     }
 

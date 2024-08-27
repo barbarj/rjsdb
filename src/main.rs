@@ -3,7 +3,6 @@ use std::path::Path;
 use rjsdb::{query::execute, repl::Repl, storage};
 
 // TODO:
-// - return errors in places I'm currently not but should be
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
 //   - PRIMARY KEY (maybe, may not strictly be necessary yet)

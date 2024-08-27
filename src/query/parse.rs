@@ -91,27 +91,27 @@ impl<'a> Parser<'a> {
         self.lookahead.as_ref().map(|t| t.kind())
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Expression>> {
+    pub fn parse(&mut self) -> Result<Vec<Statement>> {
         self.expression_list()
     }
 
-    fn expression_list(&mut self) -> Result<Vec<Expression>> {
+    fn expression_list(&mut self) -> Result<Vec<Statement>> {
         let mut expressions = Vec::new();
 
         while !self.done_parsing() {
-            expressions.push(self.expression()?);
+            expressions.push(self.statement()?);
         }
 
         Ok(expressions)
     }
 
-    fn expression(&mut self) -> Result<Expression> {
+    fn statement(&mut self) -> Result<Statement> {
         let expr = match self.peek_kind() {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
-            Some(TokenKind::Select) => self.select_expression()?,
-            Some(TokenKind::Create) => self.create_expression()?,
-            Some(TokenKind::Insert) => self.insert_expression()?,
-            Some(TokenKind::Destroy) => self.destroy_expression()?,
+            Some(TokenKind::Select) => self.select_statement()?,
+            Some(TokenKind::Create) => self.create_statement()?,
+            Some(TokenKind::Insert) => self.insert_statement()?,
+            Some(TokenKind::Destroy) => self.destroy_statement()?,
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
         };
         self.end_of_statement()?;
@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
         Ok(SelectColumns::Only(cols))
     }
 
-    fn select_expression(&mut self) -> Result<Expression> {
+    fn select_statement(&mut self) -> Result<Statement> {
         _ = self.consume(TokenKind::Select)?;
 
         let columns = self.select_columns()?;
@@ -174,7 +174,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(Expression::Select(SelectExpression {
+        Ok(Statement::Select(SelectStatement {
             columns,
             table,
             where_clause,
@@ -269,7 +269,7 @@ impl<'a> Parser<'a> {
         Ok(limit)
     }
 
-    fn create_expression(&mut self) -> Result<Expression> {
+    fn create_statement(&mut self) -> Result<Statement> {
         _ = self.consume(TokenKind::Create)?;
         _ = self.consume(TokenKind::Table)?;
         let if_not_exists = self.peek_kind().filter(|k| *k == TokenKind::If).is_some();
@@ -281,7 +281,7 @@ impl<'a> Parser<'a> {
         let table = self.consume(TokenKind::Identifier)?.contents().to_string();
         let columns = self.create_columns()?;
 
-        Ok(Expression::Create(CreateExpression {
+        Ok(Statement::Create(CreateStatement {
             table,
             if_not_exists,
             columns,
@@ -312,7 +312,7 @@ impl<'a> Parser<'a> {
         Ok(CreateColumns { names, types })
     }
 
-    fn insert_expression(&mut self) -> Result<Expression> {
+    fn insert_statement(&mut self) -> Result<Statement> {
         _ = self.consume(TokenKind::Insert)?;
         _ = self.consume(TokenKind::Into)?;
 
@@ -348,18 +348,18 @@ impl<'a> Parser<'a> {
         }
         _ = self.consume(TokenKind::RightParen)?;
 
-        Ok(Expression::Insert(InsertExpression {
+        Ok(Statement::Insert(InsertStatement {
             table,
             columns,
             values,
         }))
     }
 
-    fn destroy_expression(&mut self) -> Result<Expression> {
+    fn destroy_statement(&mut self) -> Result<Statement> {
         _ = self.consume(TokenKind::Destroy)?;
         _ = self.consume(TokenKind::Table)?;
         let table = self.consume(TokenKind::Identifier)?.contents().to_string();
-        Ok(Expression::Destroy(DestroyExpression { table }))
+        Ok(Statement::Destroy(DestroyStatement { table }))
     }
 }
 
@@ -394,15 +394,15 @@ pub struct CreateColumns {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Expression {
-    Select(SelectExpression),
-    Create(CreateExpression),
-    Insert(InsertExpression),
-    Destroy(DestroyExpression),
+pub enum Statement {
+    Select(SelectStatement),
+    Create(CreateStatement),
+    Insert(InsertStatement),
+    Destroy(DestroyStatement),
 }
 
 #[derive(PartialEq, Debug)]
-pub struct SelectExpression {
+pub struct SelectStatement {
     pub columns: SelectColumns,
     pub table: String,
     pub where_clause: Option<WhereClause>,
@@ -411,21 +411,21 @@ pub struct SelectExpression {
 }
 
 #[derive(PartialEq, Debug)]
-pub struct CreateExpression {
+pub struct CreateStatement {
     pub table: String,
     pub if_not_exists: bool,
     pub columns: CreateColumns,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct InsertExpression {
+pub struct InsertStatement {
     pub table: String,
     pub columns: Vec<String>,
     pub values: Vec<DbValue>,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct DestroyExpression {
+pub struct DestroyStatement {
     pub table: String,
 }
 
@@ -491,7 +491,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -511,7 +511,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::new(String::from("a"), String::from("b")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -532,7 +532,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::All,
             table: String::from("the_data"),
             where_clause: None,
@@ -549,7 +549,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -573,7 +573,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -597,7 +597,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -621,7 +621,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -644,7 +644,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -667,7 +667,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::All,
             table: String::from("the_data"),
             where_clause: None,
@@ -684,7 +684,7 @@ mod parser_tests {
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Select(SelectExpression {
+        let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
@@ -710,7 +710,7 @@ mod parser_tests {
         let stmt = "create table the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Create(CreateExpression {
+        let expected = vec![Statement::Create(CreateStatement {
             table: String::from("the_data"),
             if_not_exists: false,
             columns: CreateColumns {
@@ -727,7 +727,7 @@ mod parser_tests {
         let stmt = "create table if not exists the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Create(CreateExpression {
+        let expected = vec![Statement::Create(CreateStatement {
             table: String::from("the_data"),
             if_not_exists: true,
             columns: CreateColumns {
@@ -744,7 +744,7 @@ mod parser_tests {
         let stmt = "create table the_data (foo string, bar integer, baz float);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Create(CreateExpression {
+        let expected = vec![Statement::Create(CreateStatement {
             table: String::from("the_data"),
             if_not_exists: false,
             columns: CreateColumns {
@@ -765,7 +765,7 @@ mod parser_tests {
         let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Insert(InsertExpression {
+        let expected = vec![Statement::Insert(InsertStatement {
             table: String::from("the_data"),
             columns: vec![
                 String::from("foo"),
@@ -787,7 +787,7 @@ mod parser_tests {
         let stmt = "destroy table the_data;";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
-        let expected = vec![Expression::Destroy(DestroyExpression {
+        let expected = vec![Statement::Destroy(DestroyStatement {
             table: String::from("the_data"),
         })];
 
@@ -800,7 +800,7 @@ mod parser_tests {
         let tokens = Tokenizer::new(input);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![
-            Expression::Create(CreateExpression {
+            Statement::Create(CreateStatement {
                 table: String::from("the_data"),
                 if_not_exists: true,
                 columns: CreateColumns {
@@ -808,7 +808,7 @@ mod parser_tests {
                     types: vec![DbType::String, DbType::Integer],
                 },
             }),
-            Expression::Select(SelectExpression {
+            Statement::Select(SelectStatement {
                 columns: SelectColumns::All,
                 table: String::from("the_data"),
                 where_clause: None,
