@@ -1,4 +1,4 @@
-use std::{borrow::Cow, iter::zip};
+use std::{borrow::Cow, cmp::Ordering, iter::zip};
 
 use crate::{
     storage::{Column, ColumnWithIndex, Row, Rows, Schema, StorageError, StorageLayer},
@@ -482,7 +482,33 @@ impl<'a> SortRowsIter<'a> {
         }
 
         let key_fn = sort_clause.sort_key();
-        rows.sort_by_cached_key(|r: &Cow<'a, Row>| key_fn(r, &schema));
+        rows.sort_by(|a, b| {
+            let a_key = key_fn(a, &schema);
+            let b_key = key_fn(b, &schema);
+            for (a, b) in zip(a_key, b_key) {
+                let res = match (a, b) {
+                    (DbValue::String(a), DbValue::String(b)) => a.cmp(&b),
+                    (DbValue::Float(a), DbValue::Float(b)) => {
+                        if a > b {
+                            Ordering::Greater
+                        } else if a < b {
+                            Ordering::Less
+                        } else {
+                            Ordering::Equal
+                        }
+                    }
+                    (DbValue::Integer(a), DbValue::Integer(b)) => a.cmp(&b),
+                    // we're comparing the same columns, so the types of two values in the same position should always match
+                    _ => panic!("Mis-matched type comparisons should be impossible"),
+                };
+                match res {
+                    Ordering::Equal => (),
+                    Ordering::Greater => return Ordering::Greater,
+                    Ordering::Less => return Ordering::Less,
+                }
+            }
+            Ordering::Equal
+        });
         if sort_clause.desc() {
             rows.reverse();
         }

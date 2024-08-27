@@ -3,7 +3,6 @@ use std::path::Path;
 use rjsdb::{query::execute, repl::Repl, storage};
 
 // TODO:
-// - 'as' projection
 // - return errors in places I'm currently not but should be
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
