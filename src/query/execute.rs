@@ -74,7 +74,7 @@ impl ExecutablePlan {
             source
         };
         let source = if let Some(order_by_clause) = &select_expr.order_by_clause {
-            RowsSource::Sort(SortRowsIter::new(source, order_by_clause))
+            RowsSource::Sort(SortRowsIter::build(source, order_by_clause)?)
         } else {
             source
         };
@@ -468,23 +468,41 @@ impl<'a> Iterator for FilterRowsIter<'a> {
     }
 }
 
+fn sort_key_fn(clause: &OrderByClause, schema: &Schema) -> Result<impl Fn(&Row) -> Vec<DbValue>> {
+    let sort_col = clause.sort_column().to_string();
+    let pos = match schema.column_position(&sort_col) {
+        Some(pos) => pos,
+        None => return Err(ExecutionError::UnknownColumnNameProvided),
+    };
+    let key_fn = move |r: &Row| {
+        let mut key = Vec::new();
+        let v = r
+            .data
+            .get(pos)
+            .expect("We've already verified this will exist");
+        key.push(v.clone());
+        key
+    };
+    Ok(key_fn)
+}
+
 struct SortRowsIter<'a> {
     schema: Cow<'a, Schema>,
     sorted_rows: Vec<Cow<'a, Row>>,
     cursor: usize,
 }
 impl<'a> SortRowsIter<'a> {
-    pub fn new(source: RowsSource<'a>, sort_clause: &OrderByClause) -> Self {
+    pub fn build(source: RowsSource<'a>, sort_clause: &OrderByClause) -> Result<Self> {
         let schema = source.schema();
         let mut rows = Vec::new();
         for row in source {
             rows.push(row);
         }
 
-        let key_fn = sort_clause.sort_key();
+        let key_fn = sort_key_fn(sort_clause, &schema)?;
         rows.sort_by(|a, b| {
-            let a_key = key_fn(a, &schema);
-            let b_key = key_fn(b, &schema);
+            let a_key = key_fn(a);
+            let b_key = key_fn(b);
             for (a, b) in zip(a_key, b_key) {
                 let res = match (a, b) {
                     (DbValue::String(a), DbValue::String(b)) => a.cmp(&b),
@@ -513,11 +531,11 @@ impl<'a> SortRowsIter<'a> {
             rows.reverse();
         }
 
-        SortRowsIter {
+        Ok(SortRowsIter {
             schema,
             sorted_rows: rows,
             cursor: 0,
-        }
+        })
     }
 }
 impl<'a> Iterator for SortRowsIter<'a> {

@@ -1,9 +1,6 @@
 use std::num::{ParseFloatError, ParseIntError};
 
-use crate::{
-    storage::{Row, Schema},
-    DbType, DbValue,
-};
+use crate::{DbType, DbValue};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
 
@@ -199,7 +196,7 @@ impl<'a> Parser<'a> {
             TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(
                 token.contents().parse::<f32>()?,
             ))),
-            _ => panic!("This should never happen"),
+            _ => Err(ParsingError::UnexpectedTokenType),
         }
     }
 
@@ -454,17 +451,8 @@ pub struct OrderByClause {
     desc: bool,
 }
 impl OrderByClause {
-    pub fn sort_key(&self) -> impl Fn(&Row, &Schema) -> Vec<DbValue> {
-        let sort_col = self.sort_column.to_string();
-        move |r: &Row, schema: &Schema| {
-            // TODO: Handle bad column name here
-            let pos = schema.column_position(&sort_col).unwrap();
-            let mut key = Vec::new();
-            if let Some(v) = r.data.get(pos) {
-                key.push(v.clone());
-            }
-            key
-        }
+    pub fn sort_column(&self) -> &str {
+        &self.sort_column
     }
 
     pub fn desc(&self) -> bool {
