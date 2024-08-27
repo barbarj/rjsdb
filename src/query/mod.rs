@@ -34,7 +34,7 @@ pub fn execute<'strg>(
     storage: &'strg mut StorageLayer,
 ) -> Result<QueryResult<'strg>> {
     let tokenizer = Tokenizer::new(command);
-    let plan = Parser::new(tokenizer).parse()?;
+    let plan = Parser::build(tokenizer)?.parse()?;
     let executable_plan = ExecutablePlan::new(plan);
     let res = executable_plan.execute(storage)?;
     Ok(res)

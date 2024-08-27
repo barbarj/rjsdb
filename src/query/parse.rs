@@ -2,7 +2,7 @@ use std::num::{ParseFloatError, ParseIntError};
 
 use crate::{DbType, DbValue};
 
-use super::tokenize::{Token, TokenKind, Tokenizer, Tokens};
+use super::tokenize::{Token, TokenKind, Tokenizer, TokenizerError, Tokens};
 
 #[derive(Debug)]
 pub enum ParsingError {
@@ -10,6 +10,7 @@ pub enum ParsingError {
     UnexpectedTokenType,
     ParseFloatError(ParseFloatError),
     ParseIntError(ParseIntError),
+    TokenizerError(TokenizerError),
 }
 impl From<ParseFloatError> for ParsingError {
     fn from(value: ParseFloatError) -> Self {
@@ -21,6 +22,11 @@ impl From<ParseIntError> for ParsingError {
         ParsingError::ParseIntError(value)
     }
 }
+impl From<TokenizerError> for ParsingError {
+    fn from(value: TokenizerError) -> Self {
+        ParsingError::TokenizerError(value)
+    }
+}
 
 type Result<T> = std::result::Result<T, ParsingError>;
 
@@ -29,10 +35,10 @@ pub struct Parser<'a> {
     lookahead: Option<Token<'a>>,
 }
 impl<'a> Parser<'a> {
-    pub fn new(tokenizer: Tokenizer<'a>) -> Self {
-        let mut tokens = tokenizer.iter();
-        let lookahead = tokens.next();
-        Parser { tokens, lookahead }
+    pub fn build(tokenizer: Tokenizer<'a>) -> Result<Self> {
+        let mut tokens = tokenizer.tokens();
+        let lookahead = tokens.next_token()?;
+        Ok(Parser { tokens, lookahead })
     }
 
     fn done_parsing(&self) -> bool {
@@ -43,7 +49,7 @@ impl<'a> Parser<'a> {
         let token = self.lookahead.take();
         match token {
             Some(t) if t.kind() == tk => {
-                self.lookahead = self.tokens.next();
+                self.lookahead = self.tokens.next_token()?;
                 Ok(t)
             }
             Some(_) => Err(ParsingError::UnexpectedTokenType),
@@ -60,7 +66,7 @@ impl<'a> Parser<'a> {
             token.kind(),
             TokenKind::TypeString | TokenKind::TypeInteger | TokenKind::TypeFloat
         ) {
-            self.lookahead = self.tokens.next();
+            self.lookahead = self.tokens.next_token()?;
             return Ok(token);
         }
         Err(ParsingError::UnexpectedTokenType)
@@ -75,7 +81,7 @@ impl<'a> Parser<'a> {
             token.kind(),
             TokenKind::String | TokenKind::Integer | TokenKind::Float
         ) {
-            self.lookahead = self.tokens.next();
+            self.lookahead = self.tokens.next_token()?;
             return Ok(token);
         }
         Err(ParsingError::UnexpectedTokenType)
@@ -468,7 +474,7 @@ mod parser_tests {
     fn consume() {
         let stmt = "'that' this";
         let tokens = Tokenizer::new(stmt);
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::build(tokens).unwrap();
 
         assert_eq!(
             parser.consume(TokenKind::String).unwrap(),
@@ -484,7 +490,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -504,7 +510,7 @@ mod parser_tests {
         let stmt = "select a as b, bar, c as d from the_data;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::new(String::from("a"), String::from("b")),
@@ -525,7 +531,7 @@ mod parser_tests {
         let stmt = "select * from the_data;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::All,
             table: String::from("the_data"),
@@ -542,7 +548,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data where that = 'this';";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -566,7 +572,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data where 1 < 2;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -590,7 +596,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data where 1 > 2;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -614,7 +620,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data order by baz;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -637,7 +643,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data order by baz desc;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -660,7 +666,7 @@ mod parser_tests {
         let stmt = "select * from the_data limit 42;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::All,
             table: String::from("the_data"),
@@ -677,7 +683,7 @@ mod parser_tests {
         let stmt = "select foo, bar from the_data where 'this' = that order by baz desc limit 5;";
 
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
             columns: SelectColumns::Only(vec![
                 ColumnProjection::no_projection(String::from("foo")),
@@ -703,7 +709,7 @@ mod parser_tests {
     fn basic_create() {
         let stmt = "create table the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
             table: String::from("the_data"),
             if_not_exists: false,
@@ -720,7 +726,7 @@ mod parser_tests {
     fn create_if_not_exists() {
         let stmt = "create table if not exists the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
             table: String::from("the_data"),
             if_not_exists: true,
@@ -737,7 +743,7 @@ mod parser_tests {
     fn create_table_all_types() {
         let stmt = "create table the_data (foo string, bar integer, baz float);";
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Create(CreateExpression {
             table: String::from("the_data"),
             if_not_exists: false,
@@ -758,7 +764,7 @@ mod parser_tests {
     fn insert_into() {
         let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25);";
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Insert(InsertExpression {
             table: String::from("the_data"),
             columns: vec![
@@ -780,7 +786,7 @@ mod parser_tests {
     fn destroy() {
         let stmt = "destroy table the_data;";
         let tokens = Tokenizer::new(stmt);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Expression::Destroy(DestroyExpression {
             table: String::from("the_data"),
         })];
@@ -792,7 +798,7 @@ mod parser_tests {
     fn multiple_statements() {
         let input = "create table if not exists the_data (foo string, bar integer); select * from the_data;";
         let tokens = Tokenizer::new(input);
-        let actual = Parser::new(tokens).parse().unwrap();
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![
             Expression::Create(CreateExpression {
                 table: String::from("the_data"),

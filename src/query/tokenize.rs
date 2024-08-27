@@ -1,5 +1,12 @@
 use regex::Regex;
 
+#[derive(Debug)]
+pub enum TokenizerError {
+    UntokenizableInput,
+}
+
+type Result<T> = std::result::Result<T, TokenizerError>;
+
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum TokenKind {
     // for things like whitespace, etc.
@@ -135,9 +142,9 @@ impl<'a> Tokenizer<'a> {
         ]
     }
 
-    fn next_token(&mut self) -> Option<Token<'a>> {
+    fn next_token(&mut self) -> Result<Option<Token<'a>>> {
         if self.cursor >= self.input.len() {
-            return None;
+            return Ok(None);
         }
 
         let input = &self.input[self.cursor..];
@@ -151,16 +158,17 @@ impl<'a> Tokenizer<'a> {
                 }
                 if matches!(kind, TokenKind::String) {
                     let s = &m.as_str()[1..m.len() - 1];
-                    return Some(Token::new(s, *kind));
+                    return Ok(Some(Token::new(s, *kind)));
                 }
-                return Some(Token::new(m.as_str(), *kind));
+                return Ok(Some(Token::new(m.as_str(), *kind)));
             }
         }
-        // TODO: Change this to return an error
-        panic!("Unknown token type!");
+        // This should never happen. Everything should at least match against a known
+        // symbol or the Identifier TokenKind.
+        Err(TokenizerError::UntokenizableInput)
     }
 
-    pub fn iter(self) -> Tokens<'a> {
+    pub fn tokens(self) -> Tokens<'a> {
         Tokens { tokenizer: self }
     }
 }
@@ -168,11 +176,17 @@ impl<'a> Tokenizer<'a> {
 pub struct Tokens<'a> {
     tokenizer: Tokenizer<'a>,
 }
-impl<'a> Iterator for Tokens<'a> {
-    type Item = Token<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.tokenizer.next_token()
+impl<'a> Tokens<'a> {
+    fn to_vec(&mut self) -> Result<Vec<Token<'a>>> {
+        let mut tokens = Vec::new();
+        while let Some(token) = self.next_token()? {
+            tokens.push(token);
+        }
+        Ok(tokens)
+    }
+    pub fn next_token(&mut self) -> Result<Option<Token<'a>>> {
+        let res = self.tokenizer.next_token()?;
+        Ok(res)
     }
 }
 
@@ -183,7 +197,7 @@ mod tokenizer_tests {
     #[test]
     fn whitespace_splitting() {
         let input = "a * b";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("a", TokenKind::Identifier),
             Token::new("*", TokenKind::Star),
@@ -195,7 +209,7 @@ mod tokenizer_tests {
     #[test]
     fn basic_select() {
         let input = "select * from test_table;";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),
             Token::new("*", TokenKind::Star),
@@ -211,7 +225,7 @@ mod tokenizer_tests {
     #[test]
     fn merges_whitespace() {
         let input = "a  * \t\n b";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("a", TokenKind::Identifier),
             Token::new("*", TokenKind::Star),
@@ -224,7 +238,7 @@ mod tokenizer_tests {
     #[test]
     fn trims_whitespace() {
         let input = "  a*b  ";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("a", TokenKind::Identifier),
             Token::new("*", TokenKind::Star),
@@ -233,22 +247,22 @@ mod tokenizer_tests {
         assert_eq!(res, expected);
 
         let input = "  a*b";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         assert_eq!(res, expected);
 
         let input = "a*b  ";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         assert_eq!(res, expected);
 
         let input = "a*b";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         assert_eq!(res, expected);
     }
 
     #[test]
     fn case_insensitive_on_reserved_words() {
         let input = "sElEcT * FrOm test_table;";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("sElEcT", TokenKind::Select),
             Token::new("*", TokenKind::Star),
@@ -264,7 +278,7 @@ mod tokenizer_tests {
     fn all_tokens_in_a_string() {
         let input =
             "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as;";
-        let res: Vec<Token> = Tokenizer::new(input).iter().collect();
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),
             Token::new("foo", TokenKind::Identifier),
