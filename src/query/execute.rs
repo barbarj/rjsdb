@@ -158,7 +158,7 @@ impl ExecutablePlan {
     }
 
     pub fn execute<'strg>(&self, storage: &'strg mut StorageLayer) -> Result<QueryResult<'strg>> {
-        if self.plan.len() == 0 {
+        if self.plan.is_empty() {
             return Ok(QueryResult::NothingToDo);
         }
         let last_idx = self.plan.len() - 1;
@@ -234,23 +234,31 @@ struct SelectRowsIter<'a> {
 }
 impl<'a> SelectRowsIter<'a> {
     fn new(source: RowsSource<'a>, columns: &SelectColumns) -> Self {
-        let schema = source.schema();
+        let source_schema = source.schema();
         match columns {
             SelectColumns::All => SelectRowsIter {
                 source: Box::new(source),
-                schema,
+                schema: source_schema,
                 column_project: Box::new(|r| r.clone()),
             },
             SelectColumns::Only(cols) => {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
-                let columns_with_indexes: Vec<&ColumnWithIndex> =
-                    cols.iter().filter_map(|name| schema.get(name)).collect();
-                let indices: Vec<usize> = columns_with_indexes.iter().map(|ci| ci.index).collect();
+                let columns_with_indexes: Vec<(&ColumnWithIndex, &str)> = cols
+                    .iter()
+                    .filter_map(|col| {
+                        source_schema
+                            .get(&col.in_name)
+                            .map(|c| (c, col.out_name.as_str()))
+                    })
+                    .collect();
+                let indices: Vec<usize> =
+                    columns_with_indexes.iter().map(|ci| ci.0.index).collect();
 
                 let columns = columns_with_indexes
                     .iter()
-                    .map(|ci| ci.column.clone())
+                    .map(|ci| ci.0.column.with_name(ci.1.to_string()))
                     .collect();
+
                 let new_schema = Cow::Owned(Schema::new(columns));
 
                 let projection = move |r: Cow<'a, Row>| {

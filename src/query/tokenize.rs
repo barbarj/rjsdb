@@ -28,6 +28,7 @@ pub enum TokenKind {
     Values,
     Destroy,
     Limit,
+    As,
     TypeString,
     TypeInteger,
     TypeFloat,
@@ -66,7 +67,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 34;
+const TOKEN_SPEC_LEN: usize = 35;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -113,6 +114,7 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Values, Regex::new(r"^(?i)values\b").unwrap()),
             SpecItem(TokenKind::Destroy, Regex::new(r"^(?i)destroy\b").unwrap()),
             SpecItem(TokenKind::Limit, Regex::new(r"^(?i)limit\b").unwrap()),
+            SpecItem(TokenKind::As, Regex::new(r"^(?i)as\b").unwrap()),
             SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
             SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
             SpecItem(
@@ -261,7 +263,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >=;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as;";
         let res: Vec<Token> = Tokenizer::new(input).iter().collect();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -305,6 +307,7 @@ mod tokenizer_tests {
             Token::new(">", TokenKind::RightAngleBracket),
             Token::new("<=", TokenKind::LessThanEquals),
             Token::new(">=", TokenKind::GreaterThanEquals),
+            Token::new("as", TokenKind::As),
             Token::new(";", TokenKind::Semicolon),
         ];
 

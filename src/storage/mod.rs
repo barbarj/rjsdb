@@ -215,6 +215,13 @@ impl Column {
     pub fn new(name: String, _type: DbType) -> Self {
         Column { name, _type }
     }
+
+    pub fn with_name(&self, name: String) -> Self {
+        Column {
+            name,
+            _type: self._type,
+        }
+    }
 }
 impl Display for Column {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

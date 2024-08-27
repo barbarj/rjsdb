@@ -120,18 +120,28 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn column_projection(&mut self) -> Result<ColumnProjection> {
+        let in_name = self.consume(TokenKind::Identifier)?.contents().to_string();
+        if self.peek_kind() == Some(TokenKind::As) {
+            _ = self.consume(TokenKind::As)?;
+            let out_name = self.consume(TokenKind::Identifier)?.contents().to_string();
+            Ok(ColumnProjection::new(in_name, out_name))
+        } else {
+            Ok(ColumnProjection::no_projection(in_name))
+        }
+    }
+
     fn select_columns(&mut self) -> Result<SelectColumns> {
         if self.peek_kind() == Some(TokenKind::Star) {
             _ = self.consume(TokenKind::Star)?;
             return Ok(SelectColumns::All);
         }
-        let first = self.consume(TokenKind::Identifier)?;
-        let mut cols = vec![first.contents().to_string()];
+        let first = self.column_projection()?;
+        let mut cols = vec![first];
 
         while self.peek_kind() == Some(TokenKind::Comma) {
             _ = self.consume(TokenKind::Comma)?;
-            let token = self.consume(TokenKind::Identifier)?;
-            cols.push(token.contents().to_string());
+            cols.push(self.column_projection()?);
         }
 
         Ok(SelectColumns::Only(cols))
@@ -351,9 +361,27 @@ impl<'a> Parser<'a> {
 }
 
 #[derive(PartialEq, Debug)]
+pub struct ColumnProjection {
+    pub in_name: String,
+    pub out_name: String,
+}
+impl ColumnProjection {
+    fn new(in_name: String, out_name: String) -> Self {
+        ColumnProjection { in_name, out_name }
+    }
+
+    fn no_projection(name: String) -> Self {
+        ColumnProjection {
+            in_name: name.clone(),
+            out_name: name,
+        }
+    }
+}
+
+#[derive(PartialEq, Debug)]
 pub enum SelectColumns {
     All,
-    Only(Vec<String>),
+    Only(Vec<ColumnProjection>),
 }
 
 #[derive(PartialEq, Debug)]
@@ -470,7 +498,31 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
+            table: String::from("the_data"),
+            where_clause: None,
+            order_by_clause: None,
+            limit: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_as() {
+        let stmt = "select a as b, bar, c as d from the_data;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::new(tokens).parse().unwrap();
+        let expected = vec![Expression::Select(SelectExpression {
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::new(String::from("a"), String::from("b")),
+                ColumnProjection::no_projection(String::from("bar")),
+                ColumnProjection::new(String::from("c"), String::from("d")),
+            ]),
             table: String::from("the_data"),
             where_clause: None,
             order_by_clause: None,
@@ -504,7 +556,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: Some(WhereClause {
                 left: WhereMember::Column(String::from("that")),
@@ -525,7 +580,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::Integer(1)),
@@ -546,7 +604,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::Integer(1)),
@@ -567,7 +628,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -587,7 +651,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
@@ -624,7 +691,10 @@ mod parser_tests {
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::new(tokens).parse().unwrap();
         let expected = vec![Expression::Select(SelectExpression {
-            columns: SelectColumns::Only(vec![String::from("foo"), String::from("bar")]),
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("bar")),
+            ]),
             table: String::from("the_data"),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::String(String::from("this"))),
