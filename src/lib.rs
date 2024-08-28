@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fmt::Display, hash::Hash};
+use std::{
+    collections::HashSet,
+    fmt::{Debug, Display},
+    hash::Hash,
+};
 
 use generate::Generate;
 use serde::{self, Deserialize, Serialize};
@@ -37,11 +41,52 @@ impl Generate for DbType {
     }
 }
 
+/// Gaurantees that this float is finite, which means we
+/// can enforce equality and total order on it.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
+struct PrivateDbFloat {
+    f: f32,
+}
+impl PrivateDbFloat {
+    fn new(f: f32) -> Self {
+        assert!(f.is_finite());
+        PrivateDbFloat { f }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
+pub struct DbFloat {
+    inner: PrivateDbFloat,
+}
+impl DbFloat {
+    pub fn new(f: f32) -> Self {
+        DbFloat {
+            inner: PrivateDbFloat { f },
+        }
+    }
+}
+impl Display for DbFloat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+impl Eq for DbFloat {
+    fn assert_receiver_is_total_eq(&self) {}
+}
+impl Ord for DbFloat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.inner.f.partial_cmp(&other.inner.f) {
+            Some(ord) => ord,
+            None => panic!("This should be impossible, since all DbFloats must be finite"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
 pub enum DbValue {
     String(String),
     Integer(i32),
-    Float(f32),
+    Float(DbFloat),
 }
 impl DbValue {
     pub fn db_type(&self) -> DbType {
@@ -64,6 +109,10 @@ impl Display for DbValue {
         }
     }
 }
+// impl Ord for DbValue {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//     }
+// }
 
 fn has_duplicates<I, T>(seq: T) -> bool
 where

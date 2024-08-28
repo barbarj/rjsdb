@@ -36,6 +36,13 @@ pub enum TokenKind {
     Destroy,
     Limit,
     As,
+    On,
+    Conflict,
+    Do,
+    Nothing,
+    Primary,
+    Key,
+    Rowid,
     TypeString,
     TypeInteger,
     TypeFloat,
@@ -74,7 +81,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 35;
+const TOKEN_SPEC_LEN: usize = 42;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -122,6 +129,13 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Destroy, Regex::new(r"^(?i)destroy\b").unwrap()),
             SpecItem(TokenKind::Limit, Regex::new(r"^(?i)limit\b").unwrap()),
             SpecItem(TokenKind::As, Regex::new(r"^(?i)as\b").unwrap()),
+            SpecItem(TokenKind::On, Regex::new(r"^(?i)on\b").unwrap()),
+            SpecItem(TokenKind::Conflict, Regex::new(r"^(?i)conflict\b").unwrap()),
+            SpecItem(TokenKind::Do, Regex::new(r"^(?i)do\b").unwrap()),
+            SpecItem(TokenKind::Nothing, Regex::new(r"^(?i)nothing\b").unwrap()),
+            SpecItem(TokenKind::Primary, Regex::new(r"^(?i)primary\b").unwrap()),
+            SpecItem(TokenKind::Key, Regex::new(r"^(?i)key\b").unwrap()),
+            SpecItem(TokenKind::Rowid, Regex::new(r"^(?i)Rowid\b").unwrap()),
             SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
             SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
             SpecItem(
@@ -277,7 +291,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid;";
         let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -322,6 +336,13 @@ mod tokenizer_tests {
             Token::new("<=", TokenKind::LessThanEquals),
             Token::new(">=", TokenKind::GreaterThanEquals),
             Token::new("as", TokenKind::As),
+            Token::new("on", TokenKind::On),
+            Token::new("conflict", TokenKind::Conflict),
+            Token::new("do", TokenKind::Do),
+            Token::new("nothing", TokenKind::Nothing),
+            Token::new("primary", TokenKind::Primary),
+            Token::new("key", TokenKind::Key),
+            Token::new("rowid", TokenKind::Rowid),
             Token::new(";", TokenKind::Semicolon),
         ];
 

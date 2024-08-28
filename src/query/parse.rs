@@ -1,6 +1,6 @@
 use std::num::{ParseFloatError, ParseIntError};
 
-use crate::{DbType, DbValue};
+use crate::{storage, DbType, DbValue};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, TokenizerError, Tokens};
 
@@ -11,6 +11,7 @@ pub enum ParsingError {
     ParseFloatError(ParseFloatError),
     ParseIntError(ParseIntError),
     TokenizerError(TokenizerError),
+    MultiplePrimaryKeys,
 }
 impl From<ParseFloatError> for ParsingError {
     fn from(value: ParseFloatError) -> Self {
@@ -292,6 +293,7 @@ impl<'a> Parser<'a> {
         _ = self.consume(TokenKind::LeftParen)?;
         let mut names = Vec::new();
         let mut types = Vec::new();
+        let mut primary_key_col: Option<String> = None;
         while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
             let name = self.consume(TokenKind::Identifier)?.contents().to_string();
             let this_type = match self.consume_type_token()?.kind() {
@@ -301,6 +303,16 @@ impl<'a> Parser<'a> {
                 _ => panic!("Got a non-type token!"),
             };
 
+            if self.peek_kind() == Some(TokenKind::Primary) {
+                if primary_key_col.is_none() {
+                    primary_key_col = Some(name.clone());
+                } else {
+                    return Err(ParsingError::MultiplePrimaryKeys);
+                }
+                _ = self.consume(TokenKind::Primary)?;
+                _ = self.consume(TokenKind::Key)?;
+            }
+
             names.push(name);
             types.push(this_type);
 
@@ -309,7 +321,44 @@ impl<'a> Parser<'a> {
             }
         }
         _ = self.consume(TokenKind::RightParen)?;
-        Ok(CreateColumns { names, types })
+
+        let primary_key_col = primary_key_col
+            .map(KeyColumn::Column)
+            .unwrap_or(KeyColumn::Rowid);
+        Ok(CreateColumns {
+            names,
+            types,
+            primary_key_col,
+        })
+    }
+
+    fn conflict_clause(&mut self) -> Result<ConflictClause> {
+        _ = self.consume(TokenKind::On)?;
+        _ = self.consume(TokenKind::Conflict)?;
+        _ = self.consume(TokenKind::LeftParen)?;
+        let mut target_columns = Vec::new();
+        while self.peek_kind().is_some() && self.peek_kind() != Some(TokenKind::RightParen) {
+            let name = self.consume(TokenKind::Identifier)?.contents().to_string();
+            target_columns.push(name);
+            if self.peek_kind() != Some(TokenKind::RightParen) {
+                _ = self.consume(TokenKind::Comma)?;
+            }
+        }
+        _ = self.consume(TokenKind::RightParen)?;
+
+        _ = self.consume(TokenKind::Do)?;
+        let action = match self.peek_kind() {
+            Some(TokenKind::Nothing) => {
+                _ = self.consume(TokenKind::Nothing)?;
+                ConflictAction::Nothing
+            }
+            Some(_) => return Err(ParsingError::UnexpectedTokenType),
+            _ => return Err(ParsingError::UnexpectedEndOfStatement),
+        };
+        Ok(ConflictClause {
+            target_columns,
+            action,
+        })
     }
 
     fn insert_statement(&mut self) -> Result<Statement> {
@@ -348,10 +397,17 @@ impl<'a> Parser<'a> {
         }
         _ = self.consume(TokenKind::RightParen)?;
 
+        let conflict_clause = if self.peek_kind() == Some(TokenKind::On) {
+            Some(self.conflict_clause()?)
+        } else {
+            None
+        };
+
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
             values,
+            conflict_clause,
         }))
     }
 
@@ -388,9 +444,24 @@ pub enum SelectColumns {
 }
 
 #[derive(PartialEq, Debug)]
+pub enum KeyColumn {
+    Rowid,
+    Column(String),
+}
+impl KeyColumn {
+    pub fn as_storage_key_column(&self) -> storage::KeyColumn {
+        match self {
+            Self::Rowid => storage::KeyColumn::Rowid,
+            Self::Column(name) => storage::KeyColumn::Column(name.clone()),
+        }
+    }
+}
+
+#[derive(PartialEq, Debug)]
 pub struct CreateColumns {
     pub names: Vec<String>,
     pub types: Vec<DbType>,
+    pub primary_key_col: KeyColumn,
 }
 
 #[derive(PartialEq, Debug)]
@@ -422,6 +493,7 @@ pub struct InsertStatement {
     pub table: String,
     pub columns: Vec<String>,
     pub values: Vec<DbValue>,
+    pub conflict_clause: Option<ConflictClause>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -464,6 +536,17 @@ impl OrderByClause {
     pub fn desc(&self) -> bool {
         self.desc
     }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum ConflictAction {
+    Nothing,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct ConflictClause {
+    target_columns: Vec<String>,
+    action: ConflictAction,
 }
 
 #[cfg(test)]
@@ -716,6 +799,7 @@ mod parser_tests {
             columns: CreateColumns {
                 names: vec![String::from("foo")],
                 types: vec![DbType::String],
+                primary_key_col: KeyColumn::Rowid,
             },
         })];
 
@@ -733,10 +817,40 @@ mod parser_tests {
             columns: CreateColumns {
                 names: vec![String::from("foo")],
                 types: vec![DbType::String],
+                primary_key_col: KeyColumn::Rowid,
             },
         })];
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_with_primary_key() {
+        let stmt = "create table the_data (foo string primary key, bar integer);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
+        let expected = vec![Statement::Create(CreateStatement {
+            table: String::from("the_data"),
+            if_not_exists: false,
+            columns: CreateColumns {
+                names: vec![String::from("foo"), String::from("bar")],
+                types: vec![DbType::String, DbType::Integer],
+                primary_key_col: KeyColumn::Column(String::from("foo")),
+            },
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_with_multiple_primary_keys() {
+        let stmt = "create table the_data (foo string primary key, bar integer primary key);";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::build(tokens).unwrap().parse();
+        assert!(matches!(
+            actual.unwrap_err(),
+            ParsingError::MultiplePrimaryKeys
+        ));
     }
 
     #[test]
@@ -754,6 +868,7 @@ mod parser_tests {
                     String::from("baz"),
                 ],
                 types: vec![DbType::String, DbType::Integer, DbType::Float],
+                primary_key_col: KeyColumn::Rowid,
             },
         })];
 
@@ -777,6 +892,33 @@ mod parser_tests {
                 DbValue::Integer(42),
                 DbValue::Float(5.25),
             ],
+            conflict_clause: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn insert_with_conflict_clause() {
+        let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25) on conflict (foo, bar) DO NOTHING;";
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
+        let expected = vec![Statement::Insert(InsertStatement {
+            table: String::from("the_data"),
+            columns: vec![
+                String::from("foo"),
+                String::from("bar"),
+                String::from("baz"),
+            ],
+            values: vec![
+                DbValue::String(String::from("thing")),
+                DbValue::Integer(42),
+                DbValue::Float(5.25),
+            ],
+            conflict_clause: Some(ConflictClause {
+                target_columns: vec![String::from("foo"), String::from("bar")],
+                action: ConflictAction::Nothing,
+            }),
         })];
 
         assert_eq!(actual, expected);
@@ -806,6 +948,7 @@ mod parser_tests {
                 columns: CreateColumns {
                     names: vec![String::from("foo"), String::from("bar")],
                     types: vec![DbType::String, DbType::Integer],
+                    primary_key_col: KeyColumn::Rowid,
                 },
             }),
             Statement::Select(SelectStatement {

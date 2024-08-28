@@ -90,31 +90,32 @@ impl ExecutablePlan {
 
     fn create<'strg>(
         &self,
-        create_expr: &CreateStatement,
+        create_stmt: &CreateStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        if create_expr.if_not_exists && storage.table_exists(&create_expr.table) {
+        if create_stmt.if_not_exists && storage.table_exists(&create_stmt.table) {
             return Ok(QueryResult::Ok);
         }
         let pairs = zip(
-            create_expr.columns.names.iter(),
-            create_expr.columns.types.iter(),
+            create_stmt.columns.names.iter(),
+            create_stmt.columns.types.iter(),
         );
         let cols = pairs
             .map(|(name, _type)| Column::new(name.to_string(), *_type))
             .collect();
+        let primary_key_col = create_stmt.columns.primary_key_col.as_storage_key_column();
 
-        storage.create_table(&create_expr.table, &Schema::new(cols))?;
+        storage.create_table(&create_stmt.table, &Schema::new(cols), primary_key_col)?;
         Ok(QueryResult::Ok)
     }
 
     fn insert<'strg>(
         &self,
-        insert_expr: &InsertStatement,
+        insert_stmt: &InsertStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        let schema = storage.table_schema(&insert_expr.table)?;
-        let order: Result<Vec<usize>> = insert_expr
+        let schema = storage.table_schema(&insert_stmt.table)?;
+        let order: Result<Vec<usize>> = insert_stmt
             .columns
             .iter()
             .map(|name| match schema.column_position(name) {
@@ -125,31 +126,31 @@ impl ExecutablePlan {
         let order = order?;
 
         let mut unordered_vals: Vec<(usize, &DbValue)> =
-            zip(order, insert_expr.values.iter()).collect();
+            zip(order, insert_stmt.values.iter()).collect();
         unordered_vals.sort_by_key(|p| p.0);
 
         let vals = unordered_vals.iter().map(|r| r.1.clone()).collect();
         let rows = vec![Row::new(vals)];
 
-        storage.insert_rows(&insert_expr.table, rows)?;
+        storage.insert_rows(&insert_stmt.table, rows)?;
         Ok(QueryResult::Ok)
     }
 
     fn destroy<'strg>(
         &self,
-        destroy_expr: &DestroyStatement,
+        destroy_stmt: &DestroyStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        storage.destroy_table(&destroy_expr.table)?;
+        storage.destroy_table(&destroy_stmt.table)?;
         Ok(QueryResult::Ok)
     }
 
-    fn execute_expression<'strg>(
+    fn execute_stmt<'strg>(
         &self,
-        expr: &Statement,
+        stmt: &Statement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        match expr {
+        match stmt {
             Statement::Select(s) => self.select(s, storage),
             Statement::Create(c) => self.create(c, storage),
             Statement::Insert(i) => self.insert(i, storage),
@@ -167,9 +168,9 @@ impl ExecutablePlan {
             .get(last_idx)
             .expect("There should be an expression here");
         for expr in self.plan[0..last_idx].iter() {
-            _ = self.execute_expression(expr, storage)?;
+            _ = self.execute_stmt(expr, storage)?;
         }
-        self.execute_expression(last_expr, storage)
+        self.execute_stmt(last_expr, storage)
     }
 }
 

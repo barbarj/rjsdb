@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fmt::{Display, Write as FmtWrite},
     fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
@@ -31,6 +31,7 @@ pub enum StorageError {
     EmptyTableName,
     EmptySchemaProvided,
     SchemaDoesntMatch,
+    UniquenessConstraintViolated,
 }
 impl Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,6 +43,9 @@ impl Display for StorageError {
             Self::EmptyTableName => f.write_str("An empty table name was provided"),
             Self::EmptySchemaProvided => f.write_str("Empty schema provided"),
             Self::SchemaDoesntMatch => f.write_str("Non-matching schema provided"),
+            Self::UniquenessConstraintViolated => {
+                f.write_str("A uniqueness constraint was violated")
+            }
         }
     }
 }
@@ -127,7 +131,12 @@ impl StorageLayer {
         self.tables.iter().any(|t| t.header.table_name == name)
     }
 
-    pub fn create_table(&mut self, name: &str, schema: &Schema) -> Result<()> {
+    pub fn create_table(
+        &mut self,
+        name: &str,
+        schema: &Schema,
+        primary_key_col: KeyColumn,
+    ) -> Result<()> {
         if self.table_exists(name) {
             return Err(StorageError::TableAlreadyExists);
         }
@@ -140,7 +149,7 @@ impl StorageLayer {
         if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
         }
-        let table = Table::new(name.to_string(), schema.clone());
+        let table = Table::new(name.to_string(), schema.clone(), primary_key_col);
         self.tables.push(table);
         Ok(())
     }
@@ -396,17 +405,50 @@ impl<'a> Iterator for SchemaColumns<'a> {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub enum KeyColumn {
+    Rowid,
+    Column(String),
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
+struct FloatWrapper {
+    val: f32,
+}
+impl Eq for FloatWrapper {
+    fn assert_receiver_is_total_eq(&self) {}
+}
+impl Ord for FloatWrapper {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.partial_cmp(other) {
+            None => std::cmp::Ordering::Equal,
+            Some(ord) => ord,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum KeySet {
+    Strings(BTreeSet<String>),
+    Integers(BTreeSet<i32>),
+    Floats(BTreeSet<FloatWrapper>),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Table {
     header: TableHeader,
     rows: Vec<Row>,
     next_id: usize,
+    primary_keys_used: BTreeSet<DbValue>,
+    primary_key_col: KeyColumn,
 }
 impl Table {
-    pub fn new(table_name: String, schema: Schema) -> Self {
+    pub fn new(table_name: String, schema: Schema, primary_key_col: KeyColumn) -> Self {
         Table {
             header: TableHeader::new(table_name, schema),
             rows: Vec::new(),
             next_id: 0,
+            primary_keys_used: BTreeSet::new(),
+            primary_key_col,
         }
     }
 
@@ -419,11 +461,33 @@ impl Table {
         )
     }
 
+    fn primary_key_constraint_passes(&self, row: &Row) -> bool {
+        match self.primary_key_col {
+            KeyColumn::Rowid => true,
+            KeyColumn::Column(pk) => {
+                let val = self
+                    .header
+                    .schema
+                    .column_position(&pk)
+                    .map(|pos| row.data.get(pos))
+                    .flatten();
+                match val {
+                    None => false,
+                    Some(v) => self.primary_keys_used.contains(v),
+                }
+            }
+        }
+    }
+
     fn insert_rows(&mut self, rows: Vec<Row>) -> Result<()> {
         for mut row in rows {
             if !self.header.schema.matches(&row) {
                 return Err(StorageError::SchemaDoesntMatch);
             }
+            if !self.primary_key_constraint_passes(&row) {
+                return Err(StorageError::UniquenessConstraintViolated);
+            }
+
             row.id = self.next_id;
             self.next_id += 1;
             self.rows.push(row);
