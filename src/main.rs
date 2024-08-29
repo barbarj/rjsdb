@@ -8,7 +8,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - left, right arrows interaction in repl
 // - unsigned type (for ids, etc)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
