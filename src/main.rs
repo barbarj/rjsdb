@@ -1,15 +1,13 @@
 use std::path::Path;
 
 use rjsdb::{
-    generate::{Generate, RNG},
+    generate::RNG,
     query::execute,
     repl::Repl,
-    storage::{self, Row, Schema, StorageLayer},
-    DbFloat, DbType, DbValue,
+    storage::{self, StorageLayer},
 };
 
 // TODO:
-// - schema fn to fetch row column val
 // - left, right arrows interaction in repl
 // - unsigned type (for ids, etc)
 // - missing stuff to support my RSS feed
@@ -28,19 +26,6 @@ use rjsdb::{
 //     need something like tokio to manage threads/requests
 // - Do type coercion based on schema if allowed (i.e. int->float)
 
-fn gen_row(schema: &Schema, rng: &mut RNG) -> Row {
-    let mut data = Vec::new();
-    for col in schema.columns() {
-        let v = match col._type {
-            DbType::Float => DbValue::Float(DbFloat::new(f32::generate(rng))),
-            DbType::Integer => DbValue::Integer(i32::generate(rng)),
-            DbType::String => DbValue::String(String::generate(rng)),
-        };
-        data.push(v);
-    }
-    Row::new(data)
-}
-
 fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {
     let mut str = String::from("(");
     for item in input {
@@ -56,7 +41,7 @@ fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {
 
 fn gen_rows(count: usize, table_name: &str, storage: &mut StorageLayer, rng: &mut RNG) {
     let schema = storage.table_schema(table_name).unwrap().clone();
-    for row in (0..count).map(|_| gen_row(&schema, rng)) {
+    for row in (0..count).map(|_| schema.gen_row(rng)) {
         let columns_str = wrapped_join(schema.columns().map(|c| c.name.as_str()));
         let values: Vec<String> = row.data.iter().map(|v| v.as_insertable_sql_str()).collect();
         let values_str = wrapped_join(values.iter().map(|s| s.as_str()));

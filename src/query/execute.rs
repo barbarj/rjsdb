@@ -125,21 +125,21 @@ impl ExecutablePlan {
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         let schema = storage.table_schema(&insert_stmt.table)?;
-        let order: Result<Vec<usize>> = insert_stmt
-            .columns
-            .iter()
-            .map(|name| match schema.column_position(name) {
-                Some(pos) => Ok(pos),
-                None => Err(ExecutionError::UnknownColumnNameProvided),
-            })
+
+        let indexed_vals: Result<Vec<(usize, &DbValue)>> =
+            zip(insert_stmt.columns.iter(), insert_stmt.values.iter())
+                .map(|(name, val)| match schema.column_position(name) {
+                    Some(pos) => Ok((pos, val)),
+                    None => Err(ExecutionError::UnknownColumnNameProvided),
+                })
+                .collect();
+        let mut indexed_vals = indexed_vals?;
+        indexed_vals.sort_by_key(|x| x.0);
+        let vals: Vec<DbValue> = indexed_vals
+            .into_iter()
+            .map(|(_, val)| val.clone())
             .collect();
-        let order = order?;
 
-        let mut unordered_vals: Vec<(usize, &DbValue)> =
-            zip(order, insert_stmt.values.iter()).collect();
-        unordered_vals.sort_by_key(|p| p.0);
-
-        let vals = unordered_vals.iter().map(|r| r.1.clone()).collect();
         let rows = vec![Row::new(vals)];
 
         storage.insert_rows(&insert_stmt.table, rows)?;
@@ -335,46 +335,38 @@ enum FilterType {
         cmp: WhereCmp,
     },
     ColumnValue {
-        col_pos: usize,
+        col_name: String,
         val: DbValue,
         cmp: WhereCmp,
+        schema: Schema,
     },
     ColumnColumn {
-        col1_pos: usize,
-        col2_pos: usize,
+        col1_name: String,
+        col2_name: String,
         cmp: WhereCmp,
+        schema: Schema,
     },
 }
 impl FilterType {
     fn build(where_clause: &WhereClause, schema: &Schema) -> Result<Self> {
         match (&where_clause.left, &where_clause.right) {
             (WhereMember::Value(val), WhereMember::Column(name)) => match schema.column(name) {
-                Some(col) if col._type == val.db_type() => {
-                    let col_pos = match schema.column_position(&col.name) {
-                        Some(pos) => pos,
-                        None => return Err(ExecutionError::UnknownColumnNameProvided),
-                    };
-                    Ok(Self::ColumnValue {
-                        col_pos,
-                        val: val.clone(),
-                        cmp: where_clause.cmp,
-                    })
-                }
+                Some(col) if col._type == val.db_type() => Ok(Self::ColumnValue {
+                    col_name: name.clone(),
+                    val: val.clone(),
+                    cmp: where_clause.cmp,
+                    schema: schema.clone(),
+                }),
                 Some(_) => Err(ExecutionError::MismatchedTypeComparision),
                 None => Err(ExecutionError::UnknownColumnNameProvided),
             },
             (WhereMember::Column(name), WhereMember::Value(val)) => match schema.column(name) {
-                Some(col) if col._type == val.db_type() => {
-                    let col_pos = match schema.column_position(&col.name) {
-                        Some(pos) => pos,
-                        None => return Err(ExecutionError::UnknownColumnNameProvided),
-                    };
-                    Ok(FilterType::ColumnValue {
-                        col_pos,
-                        val: val.clone(),
-                        cmp: where_clause.cmp,
-                    })
-                }
+                Some(col) if col._type == val.db_type() => Ok(FilterType::ColumnValue {
+                    col_name: name.clone(),
+                    val: val.clone(),
+                    cmp: where_clause.cmp,
+                    schema: schema.clone(),
+                }),
                 Some(_) => Err(ExecutionError::MismatchedTypeComparision),
                 None => Err(ExecutionError::UnknownColumnNameProvided),
             },
@@ -396,21 +388,12 @@ impl FilterType {
                     (Some(col1), Some(col2)) if col1._type != col2._type => {
                         Err(ExecutionError::MismatchedTypeComparision)
                     }
-                    _ => {
-                        let left_pos = match schema.column_position(name1) {
-                            Some(pos) => pos,
-                            None => return Err(ExecutionError::UnknownColumnNameProvided),
-                        };
-                        let right_pos = match schema.column_position(name2) {
-                            Some(pos) => pos,
-                            None => return Err(ExecutionError::UnknownColumnNameProvided),
-                        };
-                        Ok(FilterType::ColumnColumn {
-                            col1_pos: left_pos,
-                            col2_pos: right_pos,
-                            cmp: where_clause.cmp,
-                        })
-                    }
+                    _ => Ok(FilterType::ColumnColumn {
+                        col1_name: name1.clone(),
+                        col2_name: name2.clone(),
+                        cmp: where_clause.cmp,
+                        schema: schema.clone(),
+                    }),
                 }
             }
         }
@@ -419,24 +402,27 @@ impl FilterType {
     fn row_predicate(&self, row: &Row) -> bool {
         let (left, right, cmp) = match self {
             Self::ColumnColumn {
-                col1_pos,
-                col2_pos,
+                col1_name,
+                col2_name,
                 cmp,
+                schema,
             } => {
-                let left = row
-                    .data
-                    .get(*col1_pos)
+                let left = schema
+                    .column_value(col1_name, row)
                     .expect("Should always have a value here");
-                let right = row
-                    .data
-                    .get(*col2_pos)
+                let right = schema
+                    .column_value(col2_name, row)
                     .expect("Should always have a value here");
                 (left, right, cmp)
             }
-            Self::ColumnValue { col_pos, val, cmp } => {
-                let left = row
-                    .data
-                    .get(*col_pos)
+            Self::ColumnValue {
+                col_name,
+                val,
+                cmp,
+                schema,
+            } => {
+                let left = schema
+                    .column_value(col_name, row)
                     .expect("Should always have a value here");
                 (left, val, cmp)
             }

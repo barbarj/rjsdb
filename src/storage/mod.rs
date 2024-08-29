@@ -33,6 +33,7 @@ pub enum StorageError {
     SchemaDoesntMatch,
     UniquenessConstraintViolated,
     UnkownPrimaryKeyColumn,
+    UnknownColumnNameProvided,
 }
 impl Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,6 +49,7 @@ impl Display for StorageError {
                 f.write_str("A uniqueness constraint was violated")
             }
             Self::UnkownPrimaryKeyColumn => f.write_str("Unknown primary key column provided"),
+            Self::UnknownColumnNameProvided => f.write_str("Unknown column name provided"),
         }
     }
 }
@@ -351,6 +353,18 @@ impl Schema {
         }
         Row::new(data)
     }
+
+    pub fn column_value<'a>(&self, name: &str, row: &'a Row) -> Result<&'a DbValue> {
+        let pos = match self.column_position(name) {
+            Some(p) => p,
+            None => return Err(StorageError::UnknownColumnNameProvided),
+        };
+        let val = match row.data.get(pos) {
+            Some(v) => v,
+            None => return Err(StorageError::SchemaDoesntMatch),
+        };
+        Ok(val)
+    }
 }
 impl Display for Schema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -428,11 +442,11 @@ impl KeySet {
         }
     }
 
-    pub fn insert(&mut self, v: &DbValue) {
+    pub fn insert(&mut self, v: DbValue) {
         match (self, v) {
-            (Self::Strings(set), DbValue::String(v)) => set.insert(v.clone()),
-            (Self::Integers(set), DbValue::Integer(v)) => set.insert(*v),
-            (Self::Floats(set), DbValue::Float(v)) => set.insert(v.clone()),
+            (Self::Strings(set), DbValue::String(v)) => set.insert(v),
+            (Self::Integers(set), DbValue::Integer(v)) => set.insert(v),
+            (Self::Floats(set), DbValue::Float(v)) => set.insert(v),
             _ => panic!("This assumes matching types"),
         };
     }
@@ -472,19 +486,12 @@ impl Table {
         )
     }
 
-    fn primary_key_constraint_passes(&self, row: &Row) -> bool {
+    fn primary_key_constraint_passes(&self, row: &Row) -> Result<bool> {
         match &self.primary_key {
-            PrimaryKey::Rowid => true,
+            PrimaryKey::Rowid => Ok(true),
             PrimaryKey::Column { col, keyset } => {
-                let val = self
-                    .header
-                    .schema
-                    .column_position(&col.name)
-                    .and_then(|pos| row.data.get(pos));
-                match val {
-                    None => false,
-                    Some(v) => !keyset.contains(v),
-                }
+                let val = self.header.schema.column_value(&col.name, row)?;
+                Ok(!keyset.contains(val))
             }
         }
     }
@@ -494,7 +501,7 @@ impl Table {
             if !self.header.schema.matches(&row) {
                 return Err(StorageError::SchemaDoesntMatch);
             }
-            if !self.primary_key_constraint_passes(&row) {
+            if !self.primary_key_constraint_passes(&row)? {
                 return Err(StorageError::UniquenessConstraintViolated);
             }
             row.id = self.next_id;
@@ -502,15 +509,8 @@ impl Table {
             match &mut self.primary_key {
                 PrimaryKey::Rowid => (),
                 PrimaryKey::Column { col, keyset } => {
-                    let pos = match self.header.schema.column_position(&col.name) {
-                        Some(p) => p,
-                        None => return Err(StorageError::UnkownPrimaryKeyColumn),
-                    };
-                    let v = row
-                        .data
-                        .get(pos)
-                        .expect("This should always exist when the schema is valid");
-                    keyset.insert(v);
+                    let v = self.header.schema.column_value(&col.name, &row)?;
+                    keyset.insert(v.clone());
                 }
             }
 
