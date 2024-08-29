@@ -9,14 +9,10 @@ use rjsdb::{
 };
 
 // TODO:
+// - schema fn to fetch row column val
+// - left, right arrows interaction in repl
+// - unsigned type (for ids, etc)
 // - missing stuff to support my RSS feed
-//   - PRIMARY KEY
-//      - allowed once per table create, need to mark as such in the table.
-//      - during insertion, check for uniqueness of this column
-//          - that means I need an index for this value
-//          - For now I'll just use a BTreeSet to check the uniqueness constraint.
-//            Building an actual index will require some substantial reworking of the storage engine
-//   - left, right arrows interaction in repl
 //   - upsert (ON CONFLICT)
 //   - "parallel" access (probably just put the db being a mutex)
 //   - DELETE

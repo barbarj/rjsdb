@@ -427,6 +427,15 @@ impl KeySet {
             _ => panic!("This assumes matching types"),
         }
     }
+
+    pub fn insert(&mut self, v: &DbValue) {
+        match (self, v) {
+            (Self::Strings(set), DbValue::String(v)) => set.insert(v.clone()),
+            (Self::Integers(set), DbValue::Integer(v)) => set.insert(*v),
+            (Self::Floats(set), DbValue::Float(v)) => set.insert(v.clone()),
+            _ => panic!("This assumes matching types"),
+        };
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -488,9 +497,23 @@ impl Table {
             if !self.primary_key_constraint_passes(&row) {
                 return Err(StorageError::UniquenessConstraintViolated);
             }
-
             row.id = self.next_id;
             self.next_id += 1;
+            match &mut self.primary_key {
+                PrimaryKey::Rowid => (),
+                PrimaryKey::Column { col, keyset } => {
+                    let pos = match self.header.schema.column_position(&col.name) {
+                        Some(p) => p,
+                        None => return Err(StorageError::UnkownPrimaryKeyColumn),
+                    };
+                    let v = row
+                        .data
+                        .get(pos)
+                        .expect("This should always exist when the schema is valid");
+                    keyset.insert(v);
+                }
+            }
+
             self.rows.push(row);
         }
         Ok(())
