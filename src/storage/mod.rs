@@ -34,6 +34,7 @@ pub enum StorageError {
     UniquenessConstraintViolated,
     UnkownPrimaryKeyColumn,
     UnknownColumnNameProvided,
+    NonIndexedConflictColumn,
 }
 impl Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,6 +51,9 @@ impl Display for StorageError {
             }
             Self::UnkownPrimaryKeyColumn => f.write_str("Unknown primary key column provided"),
             Self::UnknownColumnNameProvided => f.write_str("Unknown column name provided"),
+            Self::NonIndexedConflictColumn => {
+                f.write_str("A non-indexed column name was provided as part of a conlict rule")
+            }
         }
     }
 }
@@ -188,12 +192,17 @@ impl StorageLayer {
             .find(|t| t.header.table_name == table_name)
     }
 
-    pub fn insert_rows(&mut self, table_name: &str, rows: Vec<Row>) -> Result<()> {
+    pub fn insert_rows(
+        &mut self,
+        table_name: &str,
+        rows: Vec<Row>,
+        conflict_rule: Option<ConflictRule>,
+    ) -> Result<()> {
         let table = match self.table_mut(table_name) {
             Some(table) => table,
             None => return Err(StorageError::TableDoesNotExist),
         };
-        table.insert_rows(rows)
+        table.insert_rows(rows, conflict_rule)
     }
 
     pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<()> {
@@ -496,13 +505,29 @@ impl Table {
         }
     }
 
-    fn insert_rows(&mut self, rows: Vec<Row>) -> Result<()> {
+    fn insert_rows(&mut self, rows: Vec<Row>, conflict_rule: Option<ConflictRule>) -> Result<()> {
+        match (&conflict_rule, &self.primary_key) {
+            (Some(rule), PrimaryKey::Column { col, keyset: _ }) if rule.column != col.name => {
+                return Err(StorageError::NonIndexedConflictColumn);
+            }
+            _ => (),
+        };
+        let conflict_action = conflict_rule
+            .map(|r| r.action)
+            .unwrap_or(ConflictAction::Abort);
+
         for mut row in rows {
             if !self.header.schema.matches(&row) {
                 return Err(StorageError::SchemaDoesntMatch);
             }
+            // verify constraint based on conflict rule
             if !self.primary_key_constraint_passes(&row)? {
-                return Err(StorageError::UniquenessConstraintViolated);
+                match conflict_action {
+                    ConflictAction::Nothing => continue,
+                    ConflictAction::Abort => {
+                        return Err(StorageError::UniquenessConstraintViolated)
+                    }
+                }
             }
             row.id = self.next_id;
             self.next_id += 1;
@@ -611,4 +636,14 @@ impl From<Utf8Error> for SerdeError {
     fn from(value: Utf8Error) -> Self {
         Self::Utf8ParsingError(value)
     }
+}
+
+pub enum ConflictAction {
+    Nothing,
+    Abort,
+}
+
+pub struct ConflictRule {
+    pub column: String,
+    pub action: ConflictAction,
 }

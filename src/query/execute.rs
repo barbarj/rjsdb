@@ -142,7 +142,11 @@ impl ExecutablePlan {
 
         let rows = vec![Row::new(vals)];
 
-        storage.insert_rows(&insert_stmt.table, rows)?;
+        let conflict_rule = insert_stmt
+            .conflict_clause
+            .as_ref()
+            .map(|c| c.as_conflict_rule());
+        storage.insert_rows(&insert_stmt.table, rows, conflict_rule)?;
         Ok(QueryResult::Ok)
     }
 

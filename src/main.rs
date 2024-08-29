@@ -8,7 +8,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - unsigned type (for ids, etc)
 // - missing stuff to support my RSS feed
 //   - upsert (ON CONFLICT)
 //   - "parallel" access (probably just put the db being a mutex)
@@ -23,6 +22,7 @@ use rjsdb::{
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests
+// - unsigned type (for ids, etc) (will require some schema-aware type coercion)
 // - Do type coercion based on schema if allowed (i.e. int->float)
 
 fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {

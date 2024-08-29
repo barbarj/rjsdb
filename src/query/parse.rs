@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    storage::{self, KeySet, Schema},
+    storage::{self, ConflictRule, KeySet, Schema},
     DbFloat, DbType, DbValue,
 };
 
@@ -560,11 +560,28 @@ impl OrderByClause {
 pub enum ConflictAction {
     Nothing,
 }
+impl ConflictAction {
+    pub fn as_storage_conflict_action(&self) -> storage::ConflictAction {
+        match self {
+            Self::Nothing => storage::ConflictAction::Nothing,
+        }
+    }
+}
 
 #[derive(PartialEq, Debug)]
 pub struct ConflictClause {
     target_columns: Vec<String>,
     action: ConflictAction,
+}
+impl ConflictClause {
+    pub fn as_conflict_rule(&self) -> ConflictRule {
+        // TODO: Eventually make this possible handle more than one column
+        let col = self.target_columns.first().unwrap().clone();
+        ConflictRule {
+            column: col,
+            action: self.action.as_storage_conflict_action(),
+        }
+    }
 }
 
 #[cfg(test)]
