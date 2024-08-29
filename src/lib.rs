@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    fmt::{Debug, Display},
-    hash::Hash,
-};
+use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 use generate::Generate;
 use serde::{self, Deserialize, Serialize};
@@ -22,7 +18,7 @@ pub enum DbType {
 impl DbType {
     pub fn generate_val(&self, rng: &mut generate::RNG) -> DbValue {
         match self {
-            Self::Float => DbValue::Float(f32::generate(rng)),
+            Self::Float => DbValue::Float(DbFloat::generate(rng)),
             Self::Integer => DbValue::Integer(i32::generate(rng)),
             Self::String => DbValue::String(String::generate(rng)),
         }
@@ -54,35 +50,41 @@ impl PrivateDbFloat {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct DbFloat {
     inner: PrivateDbFloat,
 }
 impl DbFloat {
     pub fn new(f: f32) -> Self {
         DbFloat {
-            inner: PrivateDbFloat { f },
+            inner: PrivateDbFloat::new(f),
         }
     }
 }
 impl Display for DbFloat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.inner.fmt(f)
+        self.inner.f.fmt(f)
     }
 }
 impl Eq for DbFloat {
     fn assert_receiver_is_total_eq(&self) {}
 }
+#[allow(clippy::non_canonical_partial_ord_impl)]
+impl PartialOrd for DbFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.inner.f.partial_cmp(&other.inner.f)
+    }
+}
 impl Ord for DbFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.inner.f.partial_cmp(&other.inner.f) {
+        match self.partial_cmp(other) {
             Some(ord) => ord,
             None => panic!("This should be impossible, since all DbFloats must be finite"),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd, Eq, Ord)]
 pub enum DbValue {
     String(String),
     Integer(i32),
@@ -94,6 +96,14 @@ impl DbValue {
             Self::Float(_) => DbType::Float,
             Self::Integer(_) => DbType::Integer,
             Self::String(_) => DbType::String,
+        }
+    }
+
+    pub fn as_insertable_sql_str(&self) -> String {
+        match self {
+            Self::Float(v) => format!("{v:.1}"),
+            Self::Integer(v) => format!("{v}"),
+            Self::String(v) => format!("'{v}'"),
         }
     }
 }

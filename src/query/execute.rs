@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, iter::zip};
+use std::{borrow::Cow, iter::zip};
 
 use crate::{
     storage::{Column, ColumnWithIndex, Row, Rows, Schema, StorageError, StorageLayer},
@@ -6,12 +6,13 @@ use crate::{
 };
 
 use super::parse::{
-    CreateStatement, DestroyStatement, InsertStatement, OrderByClause, SelectColumns,
+    CreateStatement, DestroyStatement, InsertStatement, OrderByClause, ParsingError, SelectColumns,
     SelectStatement, Statement, WhereClause, WhereCmp, WhereMember,
 };
 
 #[derive(Debug)]
 pub enum ExecutionError {
+    ParsingError(ParsingError),
     StorageError(StorageError),
     UnknownColumnNameProvided,
     MismatchedTypeComparision,
@@ -19,6 +20,11 @@ pub enum ExecutionError {
 impl From<StorageError> for ExecutionError {
     fn from(value: StorageError) -> Self {
         Self::StorageError(value)
+    }
+}
+impl From<ParsingError> for ExecutionError {
+    fn from(value: ParsingError) -> Self {
+        Self::ParsingError(value)
     }
 }
 
@@ -61,25 +67,25 @@ impl ExecutablePlan {
 
     fn select<'strg>(
         &self,
-        select_expr: &SelectStatement,
+        select_stmt: &SelectStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        let rows = storage.table_scan(&select_expr.table)?;
+        let rows = storage.table_scan(&select_stmt.table)?;
         let source = RowsSource::Table(TableRowsIter::new(rows));
-        let source = if let Some(where_clause) = &select_expr.where_clause {
+        let source = if let Some(where_clause) = &select_stmt.where_clause {
             let filter = FilterRowsIter::build(source, where_clause)?;
             println!("{:?}", filter.predicate);
             RowsSource::Filter(filter)
         } else {
             source
         };
-        let source = if let Some(order_by_clause) = &select_expr.order_by_clause {
+        let source = if let Some(order_by_clause) = &select_stmt.order_by_clause {
             RowsSource::Sort(SortRowsIter::build(source, order_by_clause)?)
         } else {
             source
         };
-        let source = RowsSource::Select(SelectRowsIter::new(source, &select_expr.columns));
-        let source = if let Some(limit) = &select_expr.limit {
+        let source = RowsSource::Select(SelectRowsIter::new(source, &select_stmt.columns));
+        let source = if let Some(limit) = &select_stmt.limit {
             RowsSource::Limit(LimitRowsIter::new(source, limit))
         } else {
             source
@@ -103,9 +109,13 @@ impl ExecutablePlan {
         let cols = pairs
             .map(|(name, _type)| Column::new(name.to_string(), *_type))
             .collect();
-        let primary_key_col = create_stmt.columns.primary_key_col.as_storage_key_column();
+        let schema = Schema::new(cols);
+        let primary_key_col = create_stmt
+            .columns
+            .primary_key_col
+            .as_storage_key_column(&schema)?;
 
-        storage.create_table(&create_stmt.table, &Schema::new(cols), primary_key_col)?;
+        storage.create_table(create_stmt.table.clone(), schema, primary_key_col)?;
         Ok(QueryResult::Ok)
     }
 
@@ -167,8 +177,8 @@ impl ExecutablePlan {
             .plan
             .get(last_idx)
             .expect("There should be an expression here");
-        for expr in self.plan[0..last_idx].iter() {
-            _ = self.execute_stmt(expr, storage)?;
+        for stmt in self.plan[0..last_idx].iter() {
+            _ = self.execute_stmt(stmt, storage)?;
         }
         self.execute_stmt(last_expr, storage)
     }
@@ -501,33 +511,7 @@ impl<'a> SortRowsIter<'a> {
         }
 
         let key_fn = sort_key_fn(sort_clause, &schema)?;
-        rows.sort_by(|a, b| {
-            let a_key = key_fn(a);
-            let b_key = key_fn(b);
-            for (a, b) in zip(a_key, b_key) {
-                let res = match (a, b) {
-                    (DbValue::String(a), DbValue::String(b)) => a.cmp(&b),
-                    (DbValue::Float(a), DbValue::Float(b)) => {
-                        if a > b {
-                            Ordering::Greater
-                        } else if a < b {
-                            Ordering::Less
-                        } else {
-                            Ordering::Equal
-                        }
-                    }
-                    (DbValue::Integer(a), DbValue::Integer(b)) => a.cmp(&b),
-                    // we're comparing the same columns, so the types of two values in the same position should always match
-                    _ => panic!("Mis-matched type comparisons should be impossible"),
-                };
-                match res {
-                    Ordering::Equal => (),
-                    Ordering::Greater => return Ordering::Greater,
-                    Ordering::Less => return Ordering::Less,
-                }
-            }
-            Ordering::Equal
-        });
+        rows.sort_by_cached_key(|row| key_fn(row));
         if sort_clause.desc() {
             rows.reverse();
         }

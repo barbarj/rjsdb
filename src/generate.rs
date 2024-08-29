@@ -3,6 +3,8 @@ use rand_chacha::{
     ChaCha8Rng,
 };
 
+use crate::DbFloat;
+
 pub struct RNG {
     rng: ChaCha8Rng,
 }
@@ -53,6 +55,15 @@ impl Generate for usize {
         usize::from_le_bytes(bytes)
     }
 }
+impl Generate for DbFloat {
+    fn generate(rng: &mut RNG) -> Self {
+        let mut f = f32::generate(rng);
+        while !f.is_finite() {
+            f = f32::generate(rng);
+        }
+        DbFloat::new(f)
+    }
+}
 
 const STRING_GEN_LENGTH_MAX: u32 = 100;
 impl Generate for String {
@@ -86,7 +97,7 @@ impl Generate for char {
             .expect("Failed a u32->char conversion that should have already been proven to work.")
     }
 }
-const DISSALOWED_CHARS: [char; 8] = ['*', ',', ';', '=', '(', ')', '<', '>'];
+const DISSALOWED_CHARS: [char; 9] = ['*', ',', ';', '=', '(', ')', '<', '>', '\''];
 fn to_useful_char(n: u32) -> Option<char> {
     let ch = char::from_u32(n)?;
     if ch.is_control() || DISSALOWED_CHARS.contains(&ch) {

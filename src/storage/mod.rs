@@ -13,7 +13,7 @@ use serde::{de, ser, Deserialize, Serialize};
 
 use crate::{
     generate::{Generate, RNG},
-    has_duplicates, DbType, DbValue,
+    has_duplicates, DbFloat, DbType, DbValue,
 };
 
 pub mod read;
@@ -32,6 +32,7 @@ pub enum StorageError {
     EmptySchemaProvided,
     SchemaDoesntMatch,
     UniquenessConstraintViolated,
+    UnkownPrimaryKeyColumn,
 }
 impl Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,6 +47,7 @@ impl Display for StorageError {
             Self::UniquenessConstraintViolated => {
                 f.write_str("A uniqueness constraint was violated")
             }
+            Self::UnkownPrimaryKeyColumn => f.write_str("Unknown primary key column provided"),
         }
     }
 }
@@ -133,11 +135,11 @@ impl StorageLayer {
 
     pub fn create_table(
         &mut self,
-        name: &str,
-        schema: &Schema,
-        primary_key_col: KeyColumn,
+        name: String,
+        schema: Schema,
+        primary_key_col: PrimaryKey,
     ) -> Result<()> {
-        if self.table_exists(name) {
+        if self.table_exists(&name) {
             return Err(StorageError::TableAlreadyExists);
         }
         if name.is_empty() {
@@ -149,7 +151,7 @@ impl StorageLayer {
         if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
         }
-        let table = Table::new(name.to_string(), schema.clone(), primary_key_col);
+        let table = Table::build(name, schema, primary_key_col)?;
         self.tables.push(table);
         Ok(())
     }
@@ -405,32 +407,26 @@ impl<'a> Iterator for SchemaColumns<'a> {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum KeyColumn {
+pub enum PrimaryKey {
     Rowid,
-    Column(String),
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, PartialOrd)]
-struct FloatWrapper {
-    val: f32,
-}
-impl Eq for FloatWrapper {
-    fn assert_receiver_is_total_eq(&self) {}
-}
-impl Ord for FloatWrapper {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.partial_cmp(other) {
-            None => std::cmp::Ordering::Equal,
-            Some(ord) => ord,
-        }
-    }
+    Column { col: Column, keyset: KeySet },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KeySet {
     Strings(BTreeSet<String>),
     Integers(BTreeSet<i32>),
-    Floats(BTreeSet<FloatWrapper>),
+    Floats(BTreeSet<DbFloat>),
+}
+impl KeySet {
+    pub fn contains(&self, v: &DbValue) -> bool {
+        match (self, v) {
+            (Self::Strings(set), DbValue::String(v)) => set.contains(v.as_str()),
+            (Self::Integers(set), DbValue::Integer(v)) => set.contains(v),
+            (Self::Floats(set), DbValue::Float(v)) => set.contains(v),
+            _ => panic!("This assumes matching types"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -438,18 +434,24 @@ pub struct Table {
     header: TableHeader,
     rows: Vec<Row>,
     next_id: usize,
-    primary_keys_used: BTreeSet<DbValue>,
-    primary_key_col: KeyColumn,
+    primary_key: PrimaryKey,
 }
 impl Table {
-    pub fn new(table_name: String, schema: Schema, primary_key_col: KeyColumn) -> Self {
-        Table {
+    pub fn build(table_name: String, schema: Schema, primary_key: PrimaryKey) -> Result<Self> {
+        match &primary_key {
+            PrimaryKey::Rowid => (),
+            PrimaryKey::Column { col, keyset: _ } => {
+                if schema.column(&col.name).is_none() {
+                    return Err(StorageError::UnkownPrimaryKeyColumn);
+                }
+            }
+        }
+        Ok(Table {
             header: TableHeader::new(table_name, schema),
             rows: Vec::new(),
             next_id: 0,
-            primary_keys_used: BTreeSet::new(),
-            primary_key_col,
-        }
+            primary_key,
+        })
     }
 
     pub fn info(&self) -> String {
@@ -462,18 +464,17 @@ impl Table {
     }
 
     fn primary_key_constraint_passes(&self, row: &Row) -> bool {
-        match self.primary_key_col {
-            KeyColumn::Rowid => true,
-            KeyColumn::Column(pk) => {
+        match &self.primary_key {
+            PrimaryKey::Rowid => true,
+            PrimaryKey::Column { col, keyset } => {
                 let val = self
                     .header
                     .schema
-                    .column_position(&pk)
-                    .map(|pos| row.data.get(pos))
-                    .flatten();
+                    .column_position(&col.name)
+                    .and_then(|pos| row.data.get(pos));
                 match val {
                     None => false,
-                    Some(v) => self.primary_keys_used.contains(v),
+                    Some(v) => !keyset.contains(v),
                 }
             }
         }

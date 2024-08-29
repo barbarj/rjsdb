@@ -1,6 +1,12 @@
-use std::num::{ParseFloatError, ParseIntError};
+use std::{
+    collections::BTreeSet,
+    num::{ParseFloatError, ParseIntError},
+};
 
-use crate::{storage, DbType, DbValue};
+use crate::{
+    storage::{self, KeySet, Schema},
+    DbFloat, DbType, DbValue,
+};
 
 use super::tokenize::{Token, TokenKind, Tokenizer, TokenizerError, Tokens};
 
@@ -12,6 +18,7 @@ pub enum ParsingError {
     ParseIntError(ParseIntError),
     TokenizerError(TokenizerError),
     MultiplePrimaryKeys,
+    UnknownPrimaryKeyProvided,
 }
 impl From<ParseFloatError> for ParsingError {
     fn from(value: ParseFloatError) -> Self {
@@ -200,9 +207,9 @@ impl<'a> Parser<'a> {
             TokenKind::Integer => Ok(WhereMember::Value(DbValue::Integer(
                 token.contents().parse::<i32>()?,
             ))),
-            TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(
+            TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(DbFloat::new(
                 token.contents().parse::<f32>()?,
-            ))),
+            )))),
             _ => Err(ParsingError::UnexpectedTokenType),
         }
     }
@@ -385,7 +392,7 @@ impl<'a> Parser<'a> {
             let token = self.consume_value_token()?;
             let val = match token.kind() {
                 TokenKind::String => DbValue::String(token.contents().to_string()),
-                TokenKind::Float => DbValue::Float(token.contents().parse::<f32>()?),
+                TokenKind::Float => DbValue::Float(DbFloat::new(token.contents().parse::<f32>()?)),
                 TokenKind::Integer => DbValue::Integer(token.contents().parse::<i32>()?),
                 _ => panic!("Should not happen!"),
             };
@@ -449,10 +456,21 @@ pub enum KeyColumn {
     Column(String),
 }
 impl KeyColumn {
-    pub fn as_storage_key_column(&self) -> storage::KeyColumn {
+    pub fn as_storage_key_column(&self, schema: &Schema) -> Result<storage::PrimaryKey> {
         match self {
-            Self::Rowid => storage::KeyColumn::Rowid,
-            Self::Column(name) => storage::KeyColumn::Column(name.clone()),
+            Self::Rowid => Ok(storage::PrimaryKey::Rowid),
+            Self::Column(name) => {
+                let col = match schema.column(name) {
+                    Some(col) => col.clone(),
+                    None => return Err(ParsingError::UnknownPrimaryKeyProvided),
+                };
+                let keyset = match col._type {
+                    DbType::Float => KeySet::Floats(BTreeSet::new()),
+                    DbType::Integer => KeySet::Integers(BTreeSet::new()),
+                    DbType::String => KeySet::Strings(BTreeSet::new()),
+                };
+                Ok(storage::PrimaryKey::Column { col, keyset })
+            }
         }
     }
 }
@@ -890,7 +908,7 @@ mod parser_tests {
             values: vec![
                 DbValue::String(String::from("thing")),
                 DbValue::Integer(42),
-                DbValue::Float(5.25),
+                DbValue::Float(DbFloat::new(5.25)),
             ],
             conflict_clause: None,
         })];
@@ -913,7 +931,7 @@ mod parser_tests {
             values: vec![
                 DbValue::String(String::from("thing")),
                 DbValue::Integer(42),
-                DbValue::Float(5.25),
+                DbValue::Float(DbFloat::new(5.25)),
             ],
             conflict_clause: Some(ConflictClause {
                 target_columns: vec![String::from("foo"), String::from("bar")],
