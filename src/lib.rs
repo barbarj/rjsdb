@@ -1,7 +1,15 @@
-use std::{collections::HashSet, fmt::Display, hash::Hash};
+use std::{
+    collections::HashSet,
+    fmt::Display,
+    hash::Hash,
+    path::Path,
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 
 use generate::Generate;
+use query::{QueryError, QueryResult};
 use serde::{self, Deserialize, Serialize};
+use storage::{Row, StorageError, StorageLayer};
 
 pub mod generate;
 pub mod query;
@@ -137,4 +145,67 @@ where
         seen.insert(i);
     }
     false
+}
+
+pub enum DatabaseError {
+    StorageError(StorageError),
+    QueryError(QueryError),
+    MutexError,
+}
+impl From<StorageError> for DatabaseError {
+    fn from(value: StorageError) -> Self {
+        Self::StorageError(value)
+    }
+}
+impl From<QueryError> for DatabaseError {
+    fn from(value: QueryError) -> Self {
+        Self::QueryError(value)
+    }
+}
+impl From<PoisonError<MutexGuard<'_, StorageLayer>>> for DatabaseError {
+    fn from(_: PoisonError<MutexGuard<'_, StorageLayer>>) -> Self {
+        Self::MutexError
+    }
+}
+
+type Result<T> = std::result::Result<T, DatabaseError>;
+
+struct Database {
+    storage: Mutex<StorageLayer>,
+}
+impl Database {
+    pub fn new(db_file: &Path) -> Result<Self> {
+        let storage = StorageLayer::init(db_file)?;
+        Ok(Database {
+            storage: Mutex::new(storage),
+        })
+    }
+
+    pub fn prepare<'stmt>(&'stmt mut self, stmt: &'stmt str) -> Result<Statement<'stmt>> {
+        Ok(Statement {
+            storage: self.storage.lock()?,
+            statement: stmt,
+        })
+    }
+
+    pub fn execute(&mut self, command: &str) -> Result<()> {
+        _ = self.prepare(command)?.execute()?;
+        Ok(())
+    }
+}
+
+struct Statement<'stmt> {
+    storage: MutexGuard<'stmt, StorageLayer>,
+    statement: &'stmt str,
+}
+impl<'stmt> Statement<'stmt> {
+    pub fn execute(&mut self) -> Result<Vec<Row>> {
+        let query_res = query::execute(self.statement, &mut self.storage)?;
+        let res = match query_res {
+            QueryResult::NothingToDo => Vec::new(),
+            QueryResult::Ok => Vec::new(),
+            QueryResult::Rows(rows) => rows.map(|x| x.into_owned()).collect(),
+        };
+        Ok(res)
+    }
 }

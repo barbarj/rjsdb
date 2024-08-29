@@ -9,16 +9,15 @@ use rjsdb::{
 
 // TODO:
 // - missing stuff to support my RSS feed
-//   - upsert (ON CONFLICT)
-//   - "parallel" access (probably just put the db being a mutex)
 //   - DELETE
 //      - will require subqueries
-//   - db wrapper
 //   - "transactions"
 //   - wrapper 'library'
 //      - prepared statements
 // - add tests for parser, execution
 // - missing options for trawler testing
+// - better data structure for representing schema/primary key/etc, to allow:
+//    - showing which col is the pk in repl
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests
