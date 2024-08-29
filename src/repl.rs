@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     cmp::max,
     io::{Error as IoError, Write},
     iter::zip,
@@ -8,20 +7,17 @@ use std::{
 
 use console::{Key, Term};
 
-use crate::{
-    query::{execute, QueryResult, ResultRows},
-    storage::{Row, StorageError, StorageLayer},
-};
+use crate::{storage::Row, Database, DatabaseError, DatabaseResult, ReturnedRows};
 
 #[derive(Debug)]
 pub enum ReplError {
-    StorageError(StorageError),
+    DatabaseError(DatabaseError),
     IoError(IoError),
     FromUtf8Error(FromUtf8Error),
 }
-impl From<StorageError> for ReplError {
-    fn from(value: StorageError) -> Self {
-        Self::StorageError(value)
+impl From<DatabaseError> for ReplError {
+    fn from(value: DatabaseError) -> Self {
+        Self::DatabaseError(value)
     }
 }
 impl From<IoError> for ReplError {
@@ -119,17 +115,20 @@ impl DisplayState {
     }
 }
 
-pub struct Repl<'strg> {
-    storage: &'strg mut StorageLayer,
+pub struct Repl {
     history: Vec<String>,
     history_cursor: usize,
     term: Term,
     display: DisplayState,
 }
-impl<'strg> Repl<'strg> {
-    pub fn new(storage: &'strg mut StorageLayer) -> Self {
+impl Default for Repl {
+    fn default() -> Self {
+        Repl::new()
+    }
+}
+impl Repl {
+    pub fn new() -> Self {
         Repl {
-            storage,
             history: Vec::new(),
             history_cursor: 0,
             term: Term::buffered_stdout(),
@@ -243,20 +242,21 @@ impl<'strg> Repl<'strg> {
         Ok(self.display.display_line.clone())
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    pub fn run(&mut self, db: &mut Database) -> Result<()> {
+        let mut tx = db.transaction()?;
         loop {
             let line = self.get_user_input()?;
             if line.trim() == "exit;" {
                 break;
             }
-            match execute(line.trim(), self.storage) {
+            match tx.prepare(&line)?.execute() {
                 Err(err) => println!("{err:?}"),
-                Ok(QueryResult::Ok) => println!("ok"),
-                Ok(QueryResult::NothingToDo) => (),
-                Ok(QueryResult::Rows(rows)) => Repl::display_rows(rows),
+                Ok(DatabaseResult::Ok) => println!("ok"),
+                Ok(DatabaseResult::NothingToDo) => (),
+                Ok(DatabaseResult::Rows(rows)) => Repl::display_rows(rows),
             }
         }
-        self.storage.flush()?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -273,13 +273,9 @@ impl<'strg> Repl<'strg> {
         row_width + 1 // last dividider;
     }
 
-    fn display_rows(rows: ResultRows) {
-        // limit to 20 rows, mainly to not dump a crazy amount of
-        // data on the user.
-        let schema = rows.schema();
-        let all_rows: Vec<Cow<Row>> = rows.take(20).collect();
-        let name_widths: Vec<usize> = schema.columns().map(|c| c.name.len()).collect();
-        let col_widths = all_rows.iter().fold(name_widths, |widths, row| {
+    fn display_rows(rows: ReturnedRows) {
+        let name_widths: Vec<usize> = rows.schema.columns().map(|c| c.name.len()).collect();
+        let col_widths = rows.rows.iter().fold(name_widths, |widths, row| {
             let row_widths = row.data.iter().map(|x| format!("{x}").len());
             zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
         });
@@ -288,14 +284,14 @@ impl<'strg> Repl<'strg> {
 
         // header
         println!("{}", divider);
-        for (col, width) in zip(schema.columns(), col_widths.iter()) {
+        for (col, width) in zip(rows.schema.columns(), col_widths.iter()) {
             print!("| {:<width$} ", col.name);
         }
         println!("|");
         println!("{}", divider);
 
         // body
-        for row in all_rows {
+        for row in rows.rows {
             Repl::print_row(&col_widths, &row);
         }
 

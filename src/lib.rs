@@ -7,9 +7,9 @@ use std::{
 };
 
 use generate::Generate;
-use query::{QueryError, QueryResult};
+use query::{QueryError, QueryResult, ResultRows};
 use serde::{self, Deserialize, Serialize};
-use storage::{Row, StorageError, StorageLayer};
+use storage::{Row, Schema, StorageError, StorageLayer};
 
 pub mod generate;
 pub mod query;
@@ -147,6 +147,7 @@ where
     false
 }
 
+#[derive(Debug)]
 pub enum DatabaseError {
     StorageError(StorageError),
     QueryError(QueryError),
@@ -170,42 +171,125 @@ impl From<PoisonError<MutexGuard<'_, StorageLayer>>> for DatabaseError {
 
 type Result<T> = std::result::Result<T, DatabaseError>;
 
-struct Database {
+pub trait TableKnowledge {
+    fn table_exists(&self, name: &str) -> bool;
+    fn table_schema(&self, name: &str) -> Result<Schema>;
+}
+
+pub struct Database {
     storage: Mutex<StorageLayer>,
 }
 impl Database {
-    pub fn new(db_file: &Path) -> Result<Self> {
+    pub fn init(db_file: &Path) -> Result<Self> {
         let storage = StorageLayer::init(db_file)?;
         Ok(Database {
             storage: Mutex::new(storage),
         })
     }
 
-    pub fn prepare<'stmt>(&'stmt mut self, stmt: &'stmt str) -> Result<Statement<'stmt>> {
-        Ok(Statement {
+    pub fn execute(&mut self, command: &str) -> Result<()> {
+        let mut tx = self.transaction()?;
+        tx.prepare(command)?.execute()?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn transaction(&mut self) -> Result<Transaction> {
+        Ok(Transaction {
             storage: self.storage.lock()?,
+        })
+    }
+}
+impl TableKnowledge for Database {
+    fn table_exists(&self, name: &str) -> bool {
+        self.storage.lock().unwrap().table_exists(name)
+    }
+
+    fn table_schema(&self, name: &str) -> Result<Schema> {
+        let schema = self.storage.lock().unwrap().table_schema(name)?.clone();
+        Ok(schema)
+    }
+}
+
+pub struct Transaction<'tx> {
+    storage: MutexGuard<'tx, StorageLayer>,
+}
+impl<'tx> Transaction<'tx> {
+    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> Result<Statement<'a>> {
+        Ok(Statement {
+            storage: &mut self.storage,
             statement: stmt,
         })
     }
 
-    pub fn execute(&mut self, command: &str) -> Result<()> {
-        _ = self.prepare(command)?.execute()?;
+    pub fn commit(mut self) -> Result<()> {
+        self.storage.flush()?;
+        Ok(())
+    }
+
+    pub fn execute<'a>(&'a mut self, command: &'a str) -> Result<()> {
+        self.prepare(command)?.execute()?;
         Ok(())
     }
 }
+impl<'tx> TableKnowledge for Transaction<'tx> {
+    fn table_exists(&self, name: &str) -> bool {
+        self.storage.table_exists(name)
+    }
 
-struct Statement<'stmt> {
-    storage: MutexGuard<'stmt, StorageLayer>,
+    fn table_schema(&self, name: &str) -> Result<Schema> {
+        let schema = self.storage.table_schema(name)?;
+        Ok(schema.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct ReturnedRows {
+    rows: Vec<Row>,
+    schema: Schema,
+}
+impl From<ResultRows<'_>> for ReturnedRows {
+    fn from(value: ResultRows) -> Self {
+        let schema = value.schema().into_owned();
+        let rows = value.map(|r| r.into_owned()).collect();
+        ReturnedRows { rows, schema }
+    }
+}
+
+#[derive(Debug)]
+pub enum DatabaseResult {
+    NothingToDo,
+    Ok,
+    Rows(ReturnedRows),
+}
+
+pub struct Statement<'stmt> {
+    storage: &'stmt mut StorageLayer,
     statement: &'stmt str,
 }
 impl<'stmt> Statement<'stmt> {
-    pub fn execute(&mut self) -> Result<Vec<Row>> {
-        let query_res = query::execute(self.statement, &mut self.storage)?;
+    pub fn execute(&mut self) -> Result<DatabaseResult> {
+        let query_res = query::execute(self.statement, self.storage)?;
         let res = match query_res {
-            QueryResult::NothingToDo => Vec::new(),
-            QueryResult::Ok => Vec::new(),
-            QueryResult::Rows(rows) => rows.map(|x| x.into_owned()).collect(),
+            QueryResult::NothingToDo => DatabaseResult::NothingToDo,
+            QueryResult::Ok => DatabaseResult::Ok,
+            QueryResult::Rows(rows) => DatabaseResult::Rows(ReturnedRows::from(rows)),
         };
         Ok(res)
+    }
+
+    pub fn commit(&mut self) -> Result<()> {
+        self.storage.flush()?;
+        Ok(())
+    }
+}
+impl<'stmt> TableKnowledge for Statement<'stmt> {
+    fn table_exists(&self, name: &str) -> bool {
+        self.storage.table_exists(name)
+    }
+
+    fn table_schema(&self, name: &str) -> Result<Schema> {
+        let schema = self.storage.table_schema(name)?;
+        Ok(schema.clone())
     }
 }

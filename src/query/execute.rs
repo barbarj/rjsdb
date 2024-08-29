@@ -74,7 +74,6 @@ impl ExecutablePlan {
         let source = RowsSource::Table(TableRowsIter::new(rows));
         let source = if let Some(where_clause) = &select_stmt.where_clause {
             let filter = FilterRowsIter::build(source, where_clause)?;
-            println!("{:?}", filter.predicate);
             RowsSource::Filter(filter)
         } else {
             source

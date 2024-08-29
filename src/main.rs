@@ -1,17 +1,11 @@
 use std::path::Path;
 
-use rjsdb::{
-    generate::RNG,
-    query::execute,
-    repl::Repl,
-    storage::{self, StorageLayer},
-};
+use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
 
 // TODO:
 // - missing stuff to support my RSS feed
 //   - DELETE
 //      - will require subqueries
-//   - "transactions"
 //   - wrapper 'library'
 //      - prepared statements
 // - add tests for parser, execution
@@ -37,8 +31,8 @@ fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {
     str
 }
 
-fn gen_rows(count: usize, table_name: &str, storage: &mut StorageLayer, rng: &mut RNG) {
-    let schema = storage.table_schema(table_name).unwrap().clone();
+fn gen_rows(count: usize, table_name: &str, tx: &mut Transaction, rng: &mut RNG) {
+    let schema = tx.table_schema(table_name).unwrap().clone();
     for row in (0..count).map(|_| schema.gen_row(rng)) {
         let columns_str = wrapped_join(schema.columns().map(|c| c.name.as_str()));
         let values: Vec<String> = row.data.iter().map(|v| v.as_insertable_sql_str()).collect();
@@ -48,23 +42,24 @@ fn gen_rows(count: usize, table_name: &str, storage: &mut StorageLayer, rng: &mu
             columns_str, values_str
         );
         println!("{stmt}");
-        execute(&stmt, storage).unwrap();
+        tx.execute(&stmt).unwrap();
     }
 }
 
 fn main() {
     let path = Path::new("db.db");
-    let mut storage = storage::StorageLayer::init(path).unwrap();
+    let mut db = Database::init(path).unwrap();
 
-    if !storage.table_exists("the_mf_table") {
+    if !db.table_exists("the_mf_table") {
         let create_table =
             "CREATE TABLE IF NOT EXISTS the_mf_table (id integer primary key, foo string, bar integer, baz float);";
-        _ = execute(create_table, &mut storage).unwrap();
-        storage.flush().unwrap();
+        db.execute(create_table).unwrap();
         let mut rng = RNG::new();
-        gen_rows(30, "the_mf_table", &mut storage, &mut rng);
-        storage.flush().unwrap();
+        let mut tx = db.transaction().unwrap();
+        gen_rows(30, "the_mf_table", &mut tx, &mut rng);
+        tx.commit().unwrap();
     }
-    let mut repl = Repl::new(&mut storage);
-    repl.run().unwrap();
+
+    let mut repl = Repl::new();
+    repl.run(&mut db).unwrap();
 }
