@@ -5,7 +5,6 @@ use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
 // TODO:
 // - missing stuff to support my RSS feed
 //   - DELETE
-//      - will require subqueries
 //   - wrapper 'library'
 //      - prepared statements
 // - add tests for parser, execution

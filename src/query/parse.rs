@@ -116,10 +116,10 @@ impl<'a> Parser<'a> {
     fn statement(&mut self) -> Result<Statement> {
         let expr = match self.peek_kind() {
             None => return Err(ParsingError::UnexpectedEndOfStatement),
-            Some(TokenKind::Select) => self.select_statement()?,
-            Some(TokenKind::Create) => self.create_statement()?,
-            Some(TokenKind::Insert) => self.insert_statement()?,
-            Some(TokenKind::Destroy) => self.destroy_statement()?,
+            Some(TokenKind::Select) => Statement::Select(self.select_statement()?),
+            Some(TokenKind::Create) => Statement::Create(self.create_statement()?),
+            Some(TokenKind::Insert) => Statement::Insert(self.insert_statement()?),
+            Some(TokenKind::Destroy) => Statement::Destroy(self.destroy_statement()?),
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
         };
         self.end_of_statement()?;
@@ -158,13 +158,28 @@ impl<'a> Parser<'a> {
         Ok(SelectColumns::Only(cols))
     }
 
-    fn select_statement(&mut self) -> Result<Statement> {
+    fn nested_select_statement(&mut self) -> Result<SelectStatement> {
+        _ = self.consume(TokenKind::LeftParen)?;
+        let statement = self.select_statement()?;
+        _ = self.consume(TokenKind::RightParen)?;
+        Ok(statement)
+    }
+
+    fn select_statement(&mut self) -> Result<SelectStatement> {
         _ = self.consume(TokenKind::Select)?;
 
         let columns = self.select_columns()?;
 
         _ = self.consume(TokenKind::From)?;
-        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
+        let source = match self.peek_kind() {
+            Some(TokenKind::Identifier) => {
+                let table = self.consume(TokenKind::Identifier)?.contents().to_string();
+                SelectSource::Table(table)
+            }
+            Some(TokenKind::LeftParen) => SelectSource::Expression(self.nested_select_statement()?),
+            Some(_) => return Err(ParsingError::UnexpectedEndOfStatement),
+            None => return Err(ParsingError::UnexpectedTokenType),
+        };
 
         let where_clause = if self.peek_kind() == Some(TokenKind::Where) {
             Some(self.where_clause()?)
@@ -182,13 +197,13 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(Statement::Select(SelectStatement {
+        Ok(SelectStatement {
             columns,
-            table,
+            source: Box::new(source),
             where_clause,
             order_by_clause,
             limit,
-        }))
+        })
     }
 
     fn is_where_clause_member_kind(tk: TokenKind) -> bool {
@@ -277,7 +292,7 @@ impl<'a> Parser<'a> {
         Ok(limit)
     }
 
-    fn create_statement(&mut self) -> Result<Statement> {
+    fn create_statement(&mut self) -> Result<CreateStatement> {
         _ = self.consume(TokenKind::Create)?;
         _ = self.consume(TokenKind::Table)?;
         let if_not_exists = self.peek_kind().filter(|k| *k == TokenKind::If).is_some();
@@ -289,11 +304,11 @@ impl<'a> Parser<'a> {
         let table = self.consume(TokenKind::Identifier)?.contents().to_string();
         let columns = self.create_columns()?;
 
-        Ok(Statement::Create(CreateStatement {
+        Ok(CreateStatement {
             table,
             if_not_exists,
             columns,
-        }))
+        })
     }
 
     fn create_columns(&mut self) -> Result<CreateColumns> {
@@ -368,7 +383,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn insert_statement(&mut self) -> Result<Statement> {
+    fn insert_statement(&mut self) -> Result<InsertStatement> {
         _ = self.consume(TokenKind::Insert)?;
         _ = self.consume(TokenKind::Into)?;
 
@@ -410,19 +425,19 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(Statement::Insert(InsertStatement {
+        Ok(InsertStatement {
             table,
             columns,
             values,
             conflict_clause,
-        }))
+        })
     }
 
-    fn destroy_statement(&mut self) -> Result<Statement> {
+    fn destroy_statement(&mut self) -> Result<DestroyStatement> {
         _ = self.consume(TokenKind::Destroy)?;
         _ = self.consume(TokenKind::Table)?;
         let table = self.consume(TokenKind::Identifier)?.contents().to_string();
-        Ok(Statement::Destroy(DestroyStatement { table }))
+        Ok(DestroyStatement { table })
     }
 }
 
@@ -491,9 +506,15 @@ pub enum Statement {
 }
 
 #[derive(PartialEq, Debug)]
+pub enum SelectSource {
+    Table(String),
+    Expression(SelectStatement),
+}
+
+#[derive(PartialEq, Debug)]
 pub struct SelectStatement {
     pub columns: SelectColumns,
-    pub table: String,
+    pub source: Box<SelectSource>,
     pub where_clause: Option<WhereClause>,
     pub order_by_clause: Option<OrderByClause>,
     pub limit: Option<usize>,
@@ -614,7 +635,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: None,
             limit: None,
@@ -635,7 +656,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("bar")),
                 ColumnProjection::new(String::from("c"), String::from("d")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: None,
             limit: None,
@@ -652,7 +673,7 @@ mod parser_tests {
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::All,
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: None,
             limit: None,
@@ -672,7 +693,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: Some(WhereClause {
                 left: WhereMember::Column(String::from("that")),
                 cmp: WhereCmp::Eq,
@@ -696,7 +717,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::Integer(1)),
                 cmp: WhereCmp::LessThan,
@@ -720,7 +741,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::Integer(1)),
                 cmp: WhereCmp::GreaterThan,
@@ -744,7 +765,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
                 sort_column: String::from("baz"),
@@ -767,7 +788,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: Some(OrderByClause {
                 sort_column: String::from("baz"),
@@ -787,7 +808,7 @@ mod parser_tests {
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Statement::Select(SelectStatement {
             columns: SelectColumns::All,
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: None,
             order_by_clause: None,
             limit: Some(42),
@@ -807,7 +828,7 @@ mod parser_tests {
                 ColumnProjection::no_projection(String::from("foo")),
                 ColumnProjection::no_projection(String::from("bar")),
             ]),
-            table: String::from("the_data"),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
             where_clause: Some(WhereClause {
                 left: WhereMember::Value(DbValue::String(String::from("this"))),
                 cmp: WhereCmp::Eq,
@@ -988,7 +1009,7 @@ mod parser_tests {
             }),
             Statement::Select(SelectStatement {
                 columns: SelectColumns::All,
-                table: String::from("the_data"),
+                source: Box::new(SelectSource::Table(String::from("the_data"))),
                 where_clause: None,
                 order_by_clause: None,
                 limit: None,

@@ -7,7 +7,7 @@ use crate::{
 
 use super::parse::{
     CreateStatement, DestroyStatement, InsertStatement, OrderByClause, ParsingError, SelectColumns,
-    SelectStatement, Statement, WhereClause, WhereCmp, WhereMember,
+    SelectSource, SelectStatement, Statement, WhereClause, WhereCmp, WhereMember,
 };
 
 #[derive(Debug)]
@@ -65,13 +65,27 @@ impl ExecutablePlan {
         ExecutablePlan { plan }
     }
 
-    fn select<'strg>(
+    fn build_select_source_rows<'strg>(
+        &self,
+        select_source: &SelectSource,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<RowsSource<'strg>> {
+        let source = match select_source {
+            SelectSource::Table(name) => {
+                let rows = storage.table_scan(name)?;
+                RowsSource::Table(TableRowsIter::new(rows))
+            }
+            SelectSource::Expression(inner_stmt) => self.compose_select(inner_stmt, storage)?,
+        };
+        Ok(source)
+    }
+
+    fn compose_select<'strg>(
         &self,
         select_stmt: &SelectStatement,
         storage: &'strg mut StorageLayer,
-    ) -> Result<QueryResult<'strg>> {
-        let rows = storage.table_scan(&select_stmt.table)?;
-        let source = RowsSource::Table(TableRowsIter::new(rows));
+    ) -> Result<RowsSource<'strg>> {
+        let source = self.build_select_source_rows(&select_stmt.source, storage)?;
         let source = if let Some(where_clause) = &select_stmt.where_clause {
             let filter = FilterRowsIter::build(source, where_clause)?;
             RowsSource::Filter(filter)
@@ -89,6 +103,15 @@ impl ExecutablePlan {
         } else {
             source
         };
+        Ok(source)
+    }
+
+    fn select<'strg>(
+        &self,
+        select_stmt: &SelectStatement,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        let source = self.compose_select(select_stmt, storage)?;
 
         Ok(QueryResult::Rows(ResultRows::new(source)))
     }
