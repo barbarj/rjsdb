@@ -42,7 +42,7 @@ pub enum TokenKind {
     Nothing,
     Primary,
     Key,
-    Rowid,
+    Delete,
     TypeString,
     TypeInteger,
     TypeFloat,
@@ -135,7 +135,7 @@ impl<'a> Tokenizer<'a> {
             SpecItem(TokenKind::Nothing, Regex::new(r"^(?i)nothing\b").unwrap()),
             SpecItem(TokenKind::Primary, Regex::new(r"^(?i)primary\b").unwrap()),
             SpecItem(TokenKind::Key, Regex::new(r"^(?i)key\b").unwrap()),
-            SpecItem(TokenKind::Rowid, Regex::new(r"^(?i)Rowid\b").unwrap()),
+            SpecItem(TokenKind::Delete, Regex::new(r"^(?i)delete\b").unwrap()),
             SpecItem(TokenKind::TypeString, Regex::new(r"^(?i)string\b").unwrap()),
             SpecItem(TokenKind::TypeFloat, Regex::new(r"^(?i)float\b").unwrap()),
             SpecItem(
@@ -291,7 +291,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid delete;";
         let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -342,7 +342,8 @@ mod tokenizer_tests {
             Token::new("nothing", TokenKind::Nothing),
             Token::new("primary", TokenKind::Primary),
             Token::new("key", TokenKind::Key),
-            Token::new("rowid", TokenKind::Rowid),
+            Token::new("rowid", TokenKind::Identifier),
+            Token::new("delete", TokenKind::Delete),
             Token::new(";", TokenKind::Semicolon),
         ];
 

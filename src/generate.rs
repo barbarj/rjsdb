@@ -49,10 +49,15 @@ impl Generate for f32 {
 }
 impl Generate for usize {
     fn generate(rng: &mut RNG) -> Self {
+        u64::generate(rng) as usize
+    }
+}
+impl Generate for u64 {
+    fn generate(rng: &mut RNG) -> Self {
         let mut bytes = [0u8; 8];
         bytes[0..4].copy_from_slice(rng.next_value().to_le_bytes().as_slice());
         bytes[4..8].copy_from_slice(rng.next_value().to_le_bytes().as_slice());
-        usize::from_le_bytes(bytes)
+        u64::from_le_bytes(bytes)
     }
 }
 impl Generate for DbFloat {

@@ -120,6 +120,7 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Create) => Statement::Create(self.create_statement()?),
             Some(TokenKind::Insert) => Statement::Insert(self.insert_statement()?),
             Some(TokenKind::Destroy) => Statement::Destroy(self.destroy_statement()?),
+            Some(TokenKind::Delete) => Statement::Delete(self.delete_statement()?),
             Some(_) => return Err(ParsingError::UnexpectedTokenType),
         };
         self.end_of_statement()?;
@@ -131,8 +132,13 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn column_name(&mut self) -> Result<String> {
+        let name = self.consume(TokenKind::Identifier)?.contents().to_string();
+        Ok(name)
+    }
+
     fn column_projection(&mut self) -> Result<ColumnProjection> {
-        let in_name = self.consume(TokenKind::Identifier)?.contents().to_string();
+        let in_name = self.column_name()?;
         if self.peek_kind() == Some(TokenKind::As) {
             _ = self.consume(TokenKind::As)?;
             let out_name = self.consume(TokenKind::Identifier)?.contents().to_string();
@@ -277,7 +283,7 @@ impl<'a> Parser<'a> {
     fn order_by_clause(&mut self) -> Result<OrderByClause> {
         _ = self.consume(TokenKind::Order)?;
         _ = self.consume(TokenKind::By)?;
-        let sort_column = self.consume(TokenKind::Identifier)?.contents().to_string();
+        let sort_column = self.column_name()?;
         let desc = self.peek_kind().filter(|k| *k == TokenKind::Desc).is_some();
         if desc {
             _ = self.consume(TokenKind::Desc)?;
@@ -439,6 +445,17 @@ impl<'a> Parser<'a> {
         let table = self.consume(TokenKind::Identifier)?.contents().to_string();
         Ok(DestroyStatement { table })
     }
+
+    fn delete_statement(&mut self) -> Result<DeleteStatement> {
+        _ = self.consume(TokenKind::Delete)?;
+        _ = self.consume(TokenKind::From)?;
+        let table = self.consume(TokenKind::Identifier)?.contents().to_string();
+        let where_clause = self.where_clause()?;
+        Ok(DeleteStatement {
+            table,
+            where_clause,
+        })
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -483,6 +500,7 @@ impl KeyColumn {
                     DbType::Float => KeySet::Floats(BTreeSet::new()),
                     DbType::Integer => KeySet::Integers(BTreeSet::new()),
                     DbType::String => KeySet::Strings(BTreeSet::new()),
+                    DbType::UnsignedInt => KeySet::UnsignedInts(BTreeSet::new()),
                 };
                 Ok(storage::PrimaryKey::Column { col, keyset })
             }
@@ -503,6 +521,7 @@ pub enum Statement {
     Create(CreateStatement),
     Insert(InsertStatement),
     Destroy(DestroyStatement),
+    Delete(DeleteStatement),
 }
 
 #[derive(PartialEq, Debug)]
@@ -518,6 +537,41 @@ pub struct SelectStatement {
     pub where_clause: Option<WhereClause>,
     pub order_by_clause: Option<OrderByClause>,
     pub limit: Option<usize>,
+}
+impl SelectStatement {
+    pub fn uses_row_id(&self) -> bool {
+        if let SelectColumns::Only(cols) = &self.columns {
+            if cols.iter().any(|p| p.in_name == "rowid") {
+                return true;
+            }
+        }
+        if let Some(WhereClause {
+            left: WhereMember::Column(col),
+            cmp: _,
+            right: _,
+        }) = &self.where_clause
+        {
+            if col == "rowid" {
+                return true;
+            };
+        }
+        if let Some(WhereClause {
+            left: _,
+            cmp: _,
+            right: WhereMember::Column(col),
+        }) = &self.where_clause
+        {
+            if col == "rowid" {
+                return true;
+            };
+        }
+        if let Some(clause) = &self.order_by_clause {
+            if clause.sort_column() == "rowid" {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -553,6 +607,17 @@ pub enum WhereCmp {
     GreaterThan,
     LessThanEquals,
     GreaterThanEquals,
+}
+impl WhereCmp {
+    pub fn inverted(&self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::LessThan => Self::GreaterThan,
+            Self::GreaterThan => Self::LessThan,
+            Self::GreaterThanEquals => Self::LessThanEquals,
+            Self::LessThanEquals => Self::GreaterThanEquals,
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -603,6 +668,12 @@ impl ConflictClause {
             action: self.action.as_storage_conflict_action(),
         }
     }
+}
+
+#[derive(PartialEq, Debug)]
+pub struct DeleteStatement {
+    table: String,
+    where_clause: WhereClause,
 }
 
 #[cfg(test)]
@@ -845,6 +916,46 @@ mod parser_tests {
     }
 
     #[test]
+    fn select_with_row_id() {
+        let stmt = "select foo, rowid from the_data;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
+        let expected = vec![Statement::Select(SelectStatement {
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::no_projection(String::from("rowid")),
+            ]),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
+            where_clause: None,
+            order_by_clause: None,
+            limit: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn select_with_row_id_projection() {
+        let stmt = "select foo, rowid as bar from the_data;";
+
+        let tokens = Tokenizer::new(stmt);
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
+        let expected = vec![Statement::Select(SelectStatement {
+            columns: SelectColumns::Only(vec![
+                ColumnProjection::no_projection(String::from("foo")),
+                ColumnProjection::new(String::from("rowid"), String::from("bar")),
+            ]),
+            source: Box::new(SelectSource::Table(String::from("the_data"))),
+            where_clause: None,
+            order_by_clause: None,
+            limit: None,
+        })];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn basic_create() {
         let stmt = "create table the_data (foo string);";
         let tokens = Tokenizer::new(stmt);
@@ -1015,6 +1126,23 @@ mod parser_tests {
                 limit: None,
             }),
         ];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn delete() {
+        let input = "delete from the_data where a = 'thing';";
+        let tokens = Tokenizer::new(input);
+        let actual = Parser::build(tokens).unwrap().parse().unwrap();
+        let expected = vec![Statement::Delete(DeleteStatement {
+            table: String::from("the_data"),
+            where_clause: WhereClause {
+                left: WhereMember::Column(String::from("a")),
+                cmp: WhereCmp::Eq,
+                right: WhereMember::Value(DbValue::String(String::from("thing"))),
+            },
+        })];
 
         assert_eq!(actual, expected);
     }

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     fmt::{Display, Write as FmtWrite},
     fs::{File, OpenOptions},
@@ -195,7 +196,7 @@ impl StorageLayer {
     pub fn insert_rows(
         &mut self,
         table_name: &str,
-        rows: Vec<Row>,
+        rows: &[Row],
         conflict_rule: Option<ConflictRule>,
     ) -> Result<()> {
         let table = match self.table_mut(table_name) {
@@ -213,12 +214,12 @@ impl StorageLayer {
         table.delete_rows(ids)
     }
 
-    pub fn table_scan(&self, table_name: &str) -> Result<Rows> {
+    pub fn table_scan(&self, table_name: &str, with_row_id: bool) -> Result<Rows> {
         let table = match self.table(table_name) {
             Some(table) => table,
             None => return Err(StorageError::TableDoesNotExist),
         };
-        Ok(table.rows())
+        Ok(table.rows(with_row_id))
     }
 
     pub fn table_schema(&self, table_name: &str) -> Result<&Schema> {
@@ -440,6 +441,7 @@ pub enum KeySet {
     Strings(BTreeSet<String>),
     Integers(BTreeSet<i32>),
     Floats(BTreeSet<DbFloat>),
+    UnsignedInts(BTreeSet<u64>),
 }
 impl KeySet {
     pub fn contains(&self, v: &DbValue) -> bool {
@@ -447,6 +449,7 @@ impl KeySet {
             (Self::Strings(set), DbValue::String(v)) => set.contains(v.as_str()),
             (Self::Integers(set), DbValue::Integer(v)) => set.contains(v),
             (Self::Floats(set), DbValue::Float(v)) => set.contains(v),
+            (Self::UnsignedInts(set), DbValue::UnsignedInt(v)) => set.contains(v),
             _ => panic!("This assumes matching types"),
         }
     }
@@ -456,6 +459,7 @@ impl KeySet {
             (Self::Strings(set), DbValue::String(v)) => set.insert(v),
             (Self::Integers(set), DbValue::Integer(v)) => set.insert(v),
             (Self::Floats(set), DbValue::Float(v)) => set.insert(v),
+            (Self::UnsignedInts(set), DbValue::UnsignedInt(v)) => set.insert(v),
             _ => panic!("This assumes matching types"),
         };
     }
@@ -464,7 +468,7 @@ impl KeySet {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Table {
     header: TableHeader,
-    rows: Vec<Row>,
+    rows: Vec<StorageRow>,
     next_id: usize,
     primary_key: PrimaryKey,
 }
@@ -505,7 +509,7 @@ impl Table {
         }
     }
 
-    fn insert_rows(&mut self, rows: Vec<Row>, conflict_rule: Option<ConflictRule>) -> Result<()> {
+    fn insert_rows(&mut self, rows: &[Row], conflict_rule: Option<ConflictRule>) -> Result<()> {
         match (&conflict_rule, &self.primary_key) {
             (Some(rule), PrimaryKey::Column { col, keyset: _ }) if rule.column != col.name => {
                 return Err(StorageError::NonIndexedConflictColumn);
@@ -516,12 +520,12 @@ impl Table {
             .map(|r| r.action)
             .unwrap_or(ConflictAction::Abort);
 
-        for mut row in rows {
-            if !self.header.schema.matches(&row) {
+        for row in rows {
+            if !self.header.schema.matches(row) {
                 return Err(StorageError::SchemaDoesntMatch);
             }
             // verify constraint based on conflict rule
-            if !self.primary_key_constraint_passes(&row)? {
+            if !self.primary_key_constraint_passes(row)? {
                 match conflict_action {
                     ConflictAction::Nothing => continue,
                     ConflictAction::Abort => {
@@ -529,17 +533,20 @@ impl Table {
                     }
                 }
             }
-            row.id = self.next_id;
+            let storage_row = StorageRow {
+                row: row.clone(),
+                id: self.next_id,
+            };
             self.next_id += 1;
             match &mut self.primary_key {
                 PrimaryKey::Rowid => (),
                 PrimaryKey::Column { col, keyset } => {
-                    let v = self.header.schema.column_value(&col.name, &row)?;
+                    let v = self.header.schema.column_value(&col.name, row)?;
                     keyset.insert(v.clone());
                 }
             }
 
-            self.rows.push(row);
+            self.rows.push(storage_row);
         }
         Ok(())
     }
@@ -549,23 +556,26 @@ impl Table {
         Ok(())
     }
 
-    pub fn rows(&self) -> Rows {
-        Rows {
-            rows: &self.rows,
-            schema: self.header.schema.clone(),
-        }
+    pub fn rows(&self, with_rowid: bool) -> Rows {
+        Rows::new(&self.rows, with_rowid, &self.header.schema)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+struct StorageRow {
+    row: Row,
+    id: usize,
 }
 
 // TODO: Add reference to column list, and a way to get a specific columns value
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct Row {
-    id: usize,
+    // id: usize,
     pub data: Vec<DbValue>,
 }
 impl Row {
     pub fn new(data: Vec<DbValue>) -> Self {
-        Row { id: 0, data }
+        Row { data }
     }
 
     pub fn schema(&self) -> Vec<DbType> {
@@ -585,8 +595,53 @@ impl Display for Row {
 }
 
 pub struct Rows<'a> {
-    pub rows: &'a [Row],
-    pub schema: Schema,
+    rows: &'a [StorageRow],
+    with_id: bool,
+    cursor: usize,
+    pub schema: Cow<'a, Schema>,
+}
+impl<'a> Rows<'a> {
+    fn new(rows: &'a [StorageRow], with_id: bool, schema: &'a Schema) -> Self {
+        let schema = if with_id {
+            let mut schema = schema.clone();
+            schema.schema.insert(
+                String::from("rowid"),
+                ColumnWithIndex {
+                    column: Column::new(String::from("rowid"), DbType::UnsignedInt),
+                    index: schema.schema.len(),
+                },
+            );
+            Cow::Owned(schema)
+        } else {
+            Cow::Borrowed(schema)
+        };
+        Rows {
+            rows,
+            with_id,
+            cursor: 0,
+            schema,
+        }
+    }
+}
+impl<'a> Iterator for Rows<'a> {
+    type Item = Cow<'a, Row>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.rows.len() {
+            return None;
+        }
+        let row = self.rows.get(self.cursor).map(|r| {
+            if self.with_id {
+                let mut row = r.row.clone();
+                row.data.push(DbValue::UnsignedInt(r.id as u64));
+                Cow::Owned(row)
+            } else {
+                Cow::Borrowed(&r.row)
+            }
+        });
+        self.cursor += 1;
+        row
+    }
 }
 
 #[derive(Debug)]

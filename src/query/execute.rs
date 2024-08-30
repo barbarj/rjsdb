@@ -2,12 +2,13 @@ use std::{borrow::Cow, iter::zip};
 
 use crate::{
     storage::{Column, ColumnWithIndex, Row, Rows, Schema, StorageError, StorageLayer},
-    DbValue,
+    DbType, DbValue,
 };
 
 use super::parse::{
-    CreateStatement, DestroyStatement, InsertStatement, OrderByClause, ParsingError, SelectColumns,
-    SelectSource, SelectStatement, Statement, WhereClause, WhereCmp, WhereMember,
+    CreateStatement, DeleteStatement, DestroyStatement, InsertStatement, OrderByClause,
+    ParsingError, SelectColumns, SelectSource, SelectStatement, Statement, WhereClause, WhereCmp,
+    WhereMember,
 };
 
 #[derive(Debug)]
@@ -69,11 +70,12 @@ impl ExecutablePlan {
         &self,
         select_source: &SelectSource,
         storage: &'strg mut StorageLayer,
+        uses_rowid: bool,
     ) -> Result<RowsSource<'strg>> {
         let source = match select_source {
             SelectSource::Table(name) => {
-                let rows = storage.table_scan(name)?;
-                RowsSource::Table(TableRowsIter::new(rows))
+                let rows = storage.table_scan(name, uses_rowid)?;
+                RowsSource::Table(rows)
             }
             SelectSource::Expression(inner_stmt) => self.compose_select(inner_stmt, storage)?,
         };
@@ -85,7 +87,8 @@ impl ExecutablePlan {
         select_stmt: &SelectStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<RowsSource<'strg>> {
-        let source = self.build_select_source_rows(&select_stmt.source, storage)?;
+        let source =
+            self.build_select_source_rows(&select_stmt.source, storage, select_stmt.uses_row_id())?;
         let source = if let Some(where_clause) = &select_stmt.where_clause {
             let filter = FilterRowsIter::build(source, where_clause)?;
             RowsSource::Filter(filter)
@@ -168,7 +171,7 @@ impl ExecutablePlan {
             .conflict_clause
             .as_ref()
             .map(|c| c.as_conflict_rule());
-        storage.insert_rows(&insert_stmt.table, rows, conflict_rule)?;
+        storage.insert_rows(&insert_stmt.table, &rows, conflict_rule)?;
         Ok(QueryResult::Ok)
     }
 
@@ -178,6 +181,18 @@ impl ExecutablePlan {
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         storage.destroy_table(&destroy_stmt.table)?;
+        Ok(QueryResult::Ok)
+    }
+
+    fn delete<'strg>(
+        &self,
+        delete_stmt: &DeleteStatement,
+        storage: &'strg mut StorageLayer,
+    ) -> Result<QueryResult<'strg>> {
+        // TODO: fill this in
+        //compose select with where clause,
+        //get row ids that way,
+        //then call storage.delete
         Ok(QueryResult::Ok)
     }
 
@@ -191,6 +206,7 @@ impl ExecutablePlan {
             Statement::Create(c) => self.create(c, storage),
             Statement::Insert(i) => self.insert(i, storage),
             Statement::Destroy(d) => self.destroy(d, storage),
+            Statement::Delete(d) => self.delete(d, storage),
         }
     }
 
@@ -211,7 +227,7 @@ impl ExecutablePlan {
 }
 
 enum RowsSource<'a> {
-    Table(TableRowsIter<'a>),
+    Table(Rows<'a>),
     Select(SelectRowsIter<'a>),
     Filter(FilterRowsIter<'a>),
     Sort(SortRowsIter<'a>),
@@ -220,7 +236,7 @@ enum RowsSource<'a> {
 impl<'a> RowsSource<'a> {
     fn schema(&self) -> Cow<'a, Schema> {
         match self {
-            Self::Table(t) => Cow::Owned(t.rows.schema.clone()),
+            Self::Table(t) => t.schema.clone(),
             Self::Select(s) => s.schema.clone(),
             Self::Filter(f) => f.schema.clone(),
             Self::Sort(s) => s.schema.clone(),
@@ -242,28 +258,6 @@ impl<'a> Iterator for RowsSource<'a> {
     }
 }
 
-struct TableRowsIter<'a> {
-    rows: Rows<'a>,
-    cursor: usize,
-}
-impl<'a> TableRowsIter<'a> {
-    fn new(rows: Rows<'a>) -> Self {
-        TableRowsIter { rows, cursor: 0 }
-    }
-}
-impl<'a> Iterator for TableRowsIter<'a> {
-    type Item = Cow<'a, Row>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor >= self.rows.rows.len() {
-            return None;
-        }
-        let row = self.rows.rows.get(self.cursor);
-        self.cursor += 1;
-        row.map(Cow::Borrowed)
-    }
-}
-
 struct SelectRowsIter<'a> {
     source: Box<RowsSource<'a>>,
     schema: Cow<'a, Schema>,
@@ -280,6 +274,7 @@ impl<'a> SelectRowsIter<'a> {
             },
             SelectColumns::Only(cols) => {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
+
                 let columns_with_indexes: Vec<(&ColumnWithIndex, &str)> = cols
                     .iter()
                     .filter_map(|col| {
@@ -361,41 +356,55 @@ enum FilterType {
         cmp: WhereCmp,
     },
     ColumnValue {
-        col_name: String,
+        col: String,
         val: DbValue,
         cmp: WhereCmp,
         schema: Schema,
     },
     ColumnColumn {
-        col1_name: String,
-        col2_name: String,
+        col1: String,
+        col2: String,
         cmp: WhereCmp,
         schema: Schema,
     },
 }
 impl FilterType {
+    fn validated_column_against(col: &str, schema: &Schema, against: DbType) -> Result<String> {
+        match schema.column(col) {
+            Some(c) if c._type == against => Ok(col.to_string()),
+            Some(_) => Err(ExecutionError::MismatchedTypeComparision),
+            None => Err(ExecutionError::UnknownColumnNameProvided),
+        }
+    }
+
+    fn validated_column_column(
+        col1: &str,
+        col2: &str,
+        schema: &Schema,
+    ) -> Result<(String, String)> {
+        match (schema.column(col1), schema.column(col2)) {
+            (Some(c1), Some(c2)) if c1._type == c2._type => {
+                Ok((col1.to_string(), col2.to_string()))
+            }
+            (Some(_), Some(_)) => Err(ExecutionError::MismatchedTypeComparision),
+            _ => Err(ExecutionError::UnknownColumnNameProvided),
+        }
+    }
+
     fn build(where_clause: &WhereClause, schema: &Schema) -> Result<Self> {
         match (&where_clause.left, &where_clause.right) {
-            (WhereMember::Value(val), WhereMember::Column(name)) => match schema.column(name) {
-                Some(col) if col._type == val.db_type() => Ok(Self::ColumnValue {
-                    col_name: name.clone(),
-                    val: val.clone(),
-                    cmp: where_clause.cmp,
-                    schema: schema.clone(),
-                }),
-                Some(_) => Err(ExecutionError::MismatchedTypeComparision),
-                None => Err(ExecutionError::UnknownColumnNameProvided),
-            },
-            (WhereMember::Column(name), WhereMember::Value(val)) => match schema.column(name) {
-                Some(col) if col._type == val.db_type() => Ok(FilterType::ColumnValue {
-                    col_name: name.clone(),
-                    val: val.clone(),
-                    cmp: where_clause.cmp,
-                    schema: schema.clone(),
-                }),
-                Some(_) => Err(ExecutionError::MismatchedTypeComparision),
-                None => Err(ExecutionError::UnknownColumnNameProvided),
-            },
+            (WhereMember::Value(val), WhereMember::Column(col)) => Ok(Self::ColumnValue {
+                col: FilterType::validated_column_against(col, schema, val.db_type())?,
+                val: val.clone(),
+                cmp: where_clause.cmp.inverted(), // predicates assume value was always on the right, so we need to invert the comparison type
+                schema: schema.clone(),
+            }),
+            (WhereMember::Column(col), WhereMember::Value(val)) => Ok(Self::ColumnValue {
+                col: FilterType::validated_column_against(col, schema, val.db_type())?,
+                val: val.clone(),
+                cmp: where_clause.cmp,
+                schema: schema.clone(),
+            }),
             (WhereMember::Value(val1), WhereMember::Value(val2)) => {
                 if val1.db_type() != val2.db_type() {
                     Err(ExecutionError::MismatchedTypeComparision)
@@ -407,20 +416,14 @@ impl FilterType {
                     })
                 }
             }
-            (WhereMember::Column(name1), WhereMember::Column(name2)) => {
-                match (schema.column(name1), schema.column(name2)) {
-                    (None, _) => Err(ExecutionError::UnknownColumnNameProvided),
-                    (_, None) => Err(ExecutionError::UnknownColumnNameProvided),
-                    (Some(col1), Some(col2)) if col1._type != col2._type => {
-                        Err(ExecutionError::MismatchedTypeComparision)
-                    }
-                    _ => Ok(FilterType::ColumnColumn {
-                        col1_name: name1.clone(),
-                        col2_name: name2.clone(),
-                        cmp: where_clause.cmp,
-                        schema: schema.clone(),
-                    }),
-                }
+            (WhereMember::Column(col1), WhereMember::Column(col2)) => {
+                let (col1, col2) = FilterType::validated_column_column(col1, col2, schema)?;
+                Ok(Self::ColumnColumn {
+                    col1,
+                    col2,
+                    cmp: where_clause.cmp,
+                    schema: schema.clone(),
+                })
             }
         }
     }
@@ -428,31 +431,34 @@ impl FilterType {
     fn row_predicate(&self, row: &Row) -> bool {
         let (left, right, cmp) = match self {
             Self::ColumnColumn {
-                col1_name,
-                col2_name,
+                col1,
+                col2,
                 cmp,
                 schema,
             } => {
                 let left = schema
-                    .column_value(col1_name, row)
-                    .expect("Should always have a value here");
+                    .column_value(col1, row)
+                    .expect("Should always have a value")
+                    .clone();
                 let right = schema
-                    .column_value(col2_name, row)
-                    .expect("Should always have a value here");
+                    .column_value(col2, row)
+                    .expect("Should always have a value")
+                    .clone();
                 (left, right, cmp)
             }
             Self::ColumnValue {
-                col_name,
+                col,
                 val,
                 cmp,
                 schema,
             } => {
                 let left = schema
-                    .column_value(col_name, row)
-                    .expect("Should always have a value here");
-                (left, val, cmp)
+                    .column_value(col, row)
+                    .expect("Should always have a value")
+                    .clone();
+                (left, val.clone(), cmp)
             }
-            Self::ValueValue { left, right, cmp } => (left, right, cmp),
+            Self::ValueValue { left, right, cmp } => (left.clone(), right.clone(), cmp),
         };
         match cmp {
             WhereCmp::Eq => left == right,
@@ -492,18 +498,17 @@ impl<'a> Iterator for FilterRowsIter<'a> {
 }
 
 fn sort_key_fn(clause: &OrderByClause, schema: &Schema) -> Result<impl Fn(&Row) -> Vec<DbValue>> {
-    let sort_col = clause.sort_column().to_string();
-    let pos = match schema.column_position(&sort_col) {
+    let pos = match schema.column_position(clause.sort_column()) {
         Some(pos) => pos,
         None => return Err(ExecutionError::UnknownColumnNameProvided),
     };
     let key_fn = move |r: &Row| {
-        let mut key = Vec::new();
         let v = r
             .data
             .get(pos)
-            .expect("We've already verified this will exist");
-        key.push(v.clone());
+            .expect("We've already verified this will exist")
+            .clone();
+        let key = vec![v];
         key
     };
     Ok(key_fn)

@@ -16,12 +16,13 @@ pub mod query;
 pub mod repl;
 pub mod storage;
 
-const DB_TYPE_COUNT: u32 = 3;
+const DB_TYPE_COUNT: u32 = 4;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Copy, Clone)]
 pub enum DbType {
     String,
     Integer,
     Float,
+    UnsignedInt,
 }
 impl DbType {
     pub fn generate_val(&self, rng: &mut generate::RNG) -> DbValue {
@@ -29,17 +30,19 @@ impl DbType {
             Self::Float => DbValue::Float(DbFloat::generate(rng)),
             Self::Integer => DbValue::Integer(i32::generate(rng)),
             Self::String => DbValue::String(String::generate(rng)),
+            Self::UnsignedInt => DbValue::UnsignedInt(u64::generate(rng)),
         }
     }
 }
 impl Generate for DbType {
     fn generate(rng: &mut generate::RNG) -> Self {
-        assert_eq!(DB_TYPE_COUNT, 3);
+        assert_eq!(DB_TYPE_COUNT, 4);
         let choice = rng.next_value() % DB_TYPE_COUNT;
         match choice {
             0 => Self::String,
             1 => Self::Integer,
             2 => Self::Float,
+            3 => Self::UnsignedInt,
             _ => panic!("Somehow got a number out of range!"),
         }
     }
@@ -97,6 +100,7 @@ pub enum DbValue {
     String(String),
     Integer(i32),
     Float(DbFloat),
+    UnsignedInt(u64),
 }
 impl DbValue {
     pub fn db_type(&self) -> DbType {
@@ -104,6 +108,7 @@ impl DbValue {
             Self::Float(_) => DbType::Float,
             Self::Integer(_) => DbType::Integer,
             Self::String(_) => DbType::String,
+            Self::UnsignedInt(_) => DbType::UnsignedInt,
         }
     }
 
@@ -112,6 +117,7 @@ impl DbValue {
             Self::Float(v) => format!("{v:.1}"),
             Self::Integer(v) => format!("{v}"),
             Self::String(v) => format!("'{v}'"),
+            Self::UnsignedInt(v) => format!("{v}"),
         }
     }
 }
@@ -124,6 +130,7 @@ impl Display for DbValue {
                 let str = format!("\"{v}\"");
                 str.fmt(f)
             }
+            Self::UnsignedInt(v) => v.fmt(f),
         }
     }
 }
