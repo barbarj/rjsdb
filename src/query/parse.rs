@@ -72,7 +72,10 @@ impl<'a> Parser<'a> {
         };
         if matches!(
             token.kind(),
-            TokenKind::TypeString | TokenKind::TypeInteger | TokenKind::TypeFloat
+            TokenKind::TypeString
+                | TokenKind::TypeInteger
+                | TokenKind::TypeFloat
+                | TokenKind::TypeUnsignedInt
         ) {
             self.lookahead = self.tokens.next_token()?;
             return Ok(token);
@@ -328,6 +331,7 @@ impl<'a> Parser<'a> {
                 TokenKind::TypeString => DbType::String,
                 TokenKind::TypeInteger => DbType::Integer,
                 TokenKind::TypeFloat => DbType::Float,
+                TokenKind::TypeUnsignedInt => DbType::UnsignedInt,
                 _ => panic!("Got a non-type token!"),
             };
 

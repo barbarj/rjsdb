@@ -46,6 +46,7 @@ pub enum TokenKind {
     TypeString,
     TypeInteger,
     TypeFloat,
+    TypeUnsignedInt,
 
     // known symbols
     Star,
@@ -81,7 +82,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 42;
+const TOKEN_SPEC_LEN: usize = 43;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -141,6 +142,10 @@ impl<'a> Tokenizer<'a> {
             SpecItem(
                 TokenKind::TypeInteger,
                 Regex::new(r"^(?i)integer\b").unwrap(),
+            ),
+            SpecItem(
+                TokenKind::TypeUnsignedInt,
+                Regex::new(r"^(?i)unsigned int\b").unwrap(),
             ),
             // composites
             SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
@@ -291,7 +296,7 @@ mod tokenizer_tests {
     #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid delete;";
+            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid delete unsigned int;";
         let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),
@@ -344,6 +349,7 @@ mod tokenizer_tests {
             Token::new("key", TokenKind::Key),
             Token::new("rowid", TokenKind::Identifier),
             Token::new("delete", TokenKind::Delete),
+            Token::new("unsigned int", TokenKind::TypeUnsignedInt),
             Token::new(";", TokenKind::Semicolon),
         ];
 
