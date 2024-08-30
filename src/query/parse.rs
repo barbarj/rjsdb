@@ -226,10 +226,10 @@ impl<'a> Parser<'a> {
                 token.contents().to_string(),
             ))),
             TokenKind::Integer => Ok(WhereMember::Value(DbValue::Integer(
-                token.contents().parse::<i32>()?,
+                token.contents().parse::<i64>()?,
             ))),
             TokenKind::Float => Ok(WhereMember::Value(DbValue::Float(DbFloat::new(
-                token.contents().parse::<f32>()?,
+                token.contents().parse::<f64>()?,
             )))),
             _ => Err(ParsingError::UnexpectedTokenType),
         }
@@ -413,8 +413,8 @@ impl<'a> Parser<'a> {
             let token = self.consume_value_token()?;
             let val = match token.kind() {
                 TokenKind::String => DbValue::String(token.contents().to_string()),
-                TokenKind::Float => DbValue::Float(DbFloat::new(token.contents().parse::<f32>()?)),
-                TokenKind::Integer => DbValue::Integer(token.contents().parse::<i32>()?),
+                TokenKind::Float => DbValue::Float(DbFloat::new(token.contents().parse::<f64>()?)),
+                TokenKind::Integer => DbValue::Integer(token.contents().parse::<i64>()?),
                 _ => panic!("Should not happen!"),
             };
 

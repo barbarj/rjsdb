@@ -47,6 +47,12 @@ impl Generate for f32 {
         f32::from_bits(num)
     }
 }
+impl Generate for f64 {
+    fn generate(rng: &mut RNG) -> Self {
+        let num = u64::generate(rng);
+        f64::from_bits(num)
+    }
+}
 impl Generate for usize {
     fn generate(rng: &mut RNG) -> Self {
         u64::generate(rng) as usize
@@ -60,11 +66,17 @@ impl Generate for u64 {
         u64::from_le_bytes(bytes)
     }
 }
+impl Generate for i64 {
+    fn generate(rng: &mut RNG) -> Self {
+        u64::generate(rng) as i64
+    }
+}
+
 impl Generate for DbFloat {
     fn generate(rng: &mut RNG) -> Self {
-        let mut f = f32::generate(rng);
+        let mut f = f64::generate(rng);
         while !f.is_finite() {
-            f = f32::generate(rng);
+            f = f64::generate(rng);
         }
         DbFloat::new(f)
     }

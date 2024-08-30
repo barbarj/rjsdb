@@ -28,7 +28,7 @@ impl DbType {
     pub fn generate_val(&self, rng: &mut generate::RNG) -> DbValue {
         match self {
             Self::Float => DbValue::Float(DbFloat::generate(rng)),
-            Self::Integer => DbValue::Integer(i32::generate(rng)),
+            Self::Integer => DbValue::Integer(i64::generate(rng)),
             Self::String => DbValue::String(String::generate(rng)),
             Self::UnsignedInt => DbValue::UnsignedInt(u64::generate(rng)),
         }
@@ -52,10 +52,10 @@ impl Generate for DbType {
 /// can enforce equality and total order on it.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd)]
 struct PrivateDbFloat {
-    f: f32,
+    f: f64,
 }
 impl PrivateDbFloat {
-    fn new(f: f32) -> Self {
+    fn new(f: f64) -> Self {
         assert!(f.is_finite());
         PrivateDbFloat { f }
     }
@@ -66,7 +66,7 @@ pub struct DbFloat {
     inner: PrivateDbFloat,
 }
 impl DbFloat {
-    pub fn new(f: f32) -> Self {
+    pub fn new(f: f64) -> Self {
         DbFloat {
             inner: PrivateDbFloat::new(f),
         }
@@ -98,7 +98,7 @@ impl Ord for DbFloat {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, PartialOrd, Eq, Ord)]
 pub enum DbValue {
     String(String),
-    Integer(i32),
+    Integer(i64),
     Float(DbFloat),
     UnsignedInt(u64),
 }

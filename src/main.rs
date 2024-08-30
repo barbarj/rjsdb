@@ -5,10 +5,8 @@ use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
 // TODO:
 // - missing stuff to support my RSS feed
 //   - DELETE
-//   - Rowid support
-//      - allow in queries (enum on column required)
-//      - unsigned int type support
-//      - down-casting unsignedInt to integer if called for
+//     - Rowid support
+//       - type-casting for comparisons/inserts if allowed and necessary
 //   - wrapper 'library'
 //      - prepared statements
 // - add tests for parser, execution

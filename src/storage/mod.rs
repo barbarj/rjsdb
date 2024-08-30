@@ -439,7 +439,7 @@ pub enum PrimaryKey {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KeySet {
     Strings(BTreeSet<String>),
-    Integers(BTreeSet<i32>),
+    Integers(BTreeSet<i64>),
     Floats(BTreeSet<DbFloat>),
     UnsignedInts(BTreeSet<u64>),
 }
