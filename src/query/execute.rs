@@ -364,6 +364,7 @@ enum FilterType {
     ColumnColumn {
         col1: String,
         col2: String,
+        _type: DbType,
         cmp: WhereCmp,
         schema: Schema,
     },
@@ -371,7 +372,7 @@ enum FilterType {
 impl FilterType {
     fn validated_column_against(col: &str, schema: &Schema, against: DbType) -> Result<String> {
         match schema.column(col) {
-            Some(c) if c._type == against => Ok(col.to_string()),
+            Some(c) if c._type.coerceable_to(&against) => Ok(col.to_string()),
             Some(_) => Err(ExecutionError::MismatchedTypeComparision),
             None => Err(ExecutionError::UnknownColumnNameProvided),
         }
@@ -381,13 +382,24 @@ impl FilterType {
         col1: &str,
         col2: &str,
         schema: &Schema,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, DbType)> {
         match (schema.column(col1), schema.column(col2)) {
-            (Some(c1), Some(c2)) if c1._type == c2._type => {
-                Ok((col1.to_string(), col2.to_string()))
+            (Some(c1), Some(c2)) if c1._type.coerceable_to(&c2._type) => {
+                Ok((col1.to_string(), col2.to_string(), c1._type))
             }
             (Some(_), Some(_)) => Err(ExecutionError::MismatchedTypeComparision),
             _ => Err(ExecutionError::UnknownColumnNameProvided),
+        }
+    }
+
+    fn val_to_col_type(val: &DbValue, col: &str, schema: &Schema) -> Result<DbValue> {
+        let _type = match schema.column(col) {
+            Some(c) => c._type,
+            None => return Err(ExecutionError::UnknownColumnNameProvided),
+        };
+        match val.coerced_to(_type) {
+            Some(v) => Ok(v),
+            None => Err(ExecutionError::MismatchedTypeComparision),
         }
     }
 
@@ -395,32 +407,33 @@ impl FilterType {
         match (&where_clause.left, &where_clause.right) {
             (WhereMember::Value(val), WhereMember::Column(col)) => Ok(Self::ColumnValue {
                 col: FilterType::validated_column_against(col, schema, val.db_type())?,
-                val: val.clone(),
+                val: FilterType::val_to_col_type(val, col, schema)?,
                 cmp: where_clause.cmp.inverted(), // predicates assume value was always on the right, so we need to invert the comparison type
                 schema: schema.clone(),
             }),
             (WhereMember::Column(col), WhereMember::Value(val)) => Ok(Self::ColumnValue {
                 col: FilterType::validated_column_against(col, schema, val.db_type())?,
-                val: val.clone(),
+                val: FilterType::val_to_col_type(val, col, schema)?,
                 cmp: where_clause.cmp,
                 schema: schema.clone(),
             }),
             (WhereMember::Value(val1), WhereMember::Value(val2)) => {
-                if val1.db_type() != val2.db_type() {
-                    Err(ExecutionError::MismatchedTypeComparision)
-                } else {
-                    Ok(FilterType::ValueValue {
+                let val2 = val2.coerced_to(val1.db_type());
+                match val2 {
+                    Some(val2) => Ok(FilterType::ValueValue {
                         left: val1.clone(),
-                        right: val2.clone(),
+                        right: val2,
                         cmp: where_clause.cmp,
-                    })
+                    }),
+                    None => Err(ExecutionError::MismatchedTypeComparision),
                 }
             }
             (WhereMember::Column(col1), WhereMember::Column(col2)) => {
-                let (col1, col2) = FilterType::validated_column_column(col1, col2, schema)?;
+                let (col1, col2, _type) = FilterType::validated_column_column(col1, col2, schema)?;
                 Ok(Self::ColumnColumn {
                     col1,
                     col2,
+                    _type,
                     cmp: where_clause.cmp,
                     schema: schema.clone(),
                 })
@@ -433,17 +446,20 @@ impl FilterType {
             Self::ColumnColumn {
                 col1,
                 col2,
+                _type,
                 cmp,
                 schema,
             } => {
                 let left = schema
                     .column_value(col1, row)
                     .expect("Should always have a value")
-                    .clone();
+                    .coerced_to(*_type)
+                    .expect("Already validated this conversion works");
                 let right = schema
                     .column_value(col2, row)
                     .expect("Should always have a value")
-                    .clone();
+                    .coerced_to(*_type)
+                    .expect("Already validated this conversion works");
                 (left, right, cmp)
             }
             Self::ColumnValue {

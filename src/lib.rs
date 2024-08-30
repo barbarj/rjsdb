@@ -33,6 +33,22 @@ impl DbType {
             Self::UnsignedInt => DbValue::UnsignedInt(u64::generate(rng)),
         }
     }
+
+    pub fn coerceable_to(&self, other: &DbType) -> bool {
+        matches!(
+            (self, other),
+            (DbType::Float, DbType::Float)
+                | (DbType::Float, DbType::Integer)
+                | (DbType::Float, DbType::UnsignedInt)
+                | (DbType::Integer, DbType::Float)
+                | (DbType::Integer, DbType::Integer)
+                | (DbType::Integer, DbType::UnsignedInt)
+                | (DbType::UnsignedInt, DbType::Float)
+                | (DbType::UnsignedInt, DbType::Integer)
+                | (DbType::UnsignedInt, DbType::UnsignedInt)
+                | (DbType::String, DbType::String)
+        )
+    }
 }
 impl Generate for DbType {
     fn generate(rng: &mut generate::RNG) -> Self {
@@ -123,6 +139,29 @@ impl DbValue {
             Self::Integer(v) => format!("{v}"),
             Self::String(v) => format!("'{v}'"),
             Self::UnsignedInt(v) => format!("{v}"),
+        }
+    }
+
+    /// Returns Some(_) if the coercion is possible,
+    /// otherwise returns None. This coercion may be lossy.
+    /// Does not coerce non-strings to strings
+    fn coerced_to(&self, t: DbType) -> Option<Self> {
+        match (t, self) {
+            (DbType::Float, DbValue::Float(_)) => Some(self.clone()),
+            (DbType::Float, DbValue::Integer(i)) => Some(DbValue::Float(DbFloat::new(*i as f64))),
+            (DbType::Float, DbValue::UnsignedInt(i)) => {
+                Some(DbValue::Float(DbFloat::new(*i as f64)))
+            }
+            (DbType::Integer, DbValue::Float(f)) => Some(DbValue::Integer(f.inner.f as i64)),
+            (DbType::Integer, DbValue::Integer(_)) => Some(self.clone()),
+            (DbType::Integer, DbValue::UnsignedInt(i)) => Some(DbValue::Integer(*i as i64)),
+            (DbType::UnsignedInt, DbValue::Float(f)) => {
+                Some(DbValue::UnsignedInt(f.inner.f as u64))
+            }
+            (DbType::UnsignedInt, DbValue::Integer(i)) => Some(DbValue::UnsignedInt(*i as u64)),
+            (DbType::UnsignedInt, DbValue::UnsignedInt(_)) => Some(self.clone()),
+            (DbType::String, DbValue::String(_)) => Some(self.clone()),
+            _ => None,
         }
     }
 }

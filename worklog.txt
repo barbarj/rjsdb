@@ -2,3 +2,5 @@
 - Rowid support
   - by optionally adding rowid as a column in the storage layer when returning rows, allowing the query layer to just treat it as another column
 - fixed a inverted comparision
+- switch all db value number types to be 64-bit
+- Make repl use scientific notation to display floats

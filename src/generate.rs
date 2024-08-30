@@ -68,7 +68,8 @@ impl Generate for u64 {
 }
 impl Generate for i64 {
     fn generate(rng: &mut RNG) -> Self {
-        u64::generate(rng) as i64
+        let bytes = u64::generate(rng).to_le_bytes();
+        i64::from_le_bytes(bytes)
     }
 }
 
