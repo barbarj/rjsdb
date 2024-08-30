@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    fmt::Display,
+    fmt,
     hash::Hash,
     path::Path,
     sync::{Mutex, MutexGuard, PoisonError},
@@ -72,7 +72,7 @@ impl DbFloat {
         }
     }
 }
-impl Display for DbFloat {
+impl fmt::Display for DbFloat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.inner.f.fmt(f)
     }
@@ -92,6 +92,11 @@ impl Ord for DbFloat {
             Some(ord) => ord,
             None => panic!("This should be impossible, since all DbFloats must be finite"),
         }
+    }
+}
+impl fmt::LowerExp for DbFloat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.f.fmt(formatter)
     }
 }
 
@@ -114,14 +119,14 @@ impl DbValue {
 
     pub fn as_insertable_sql_str(&self) -> String {
         match self {
-            Self::Float(v) => format!("{v:.1}"),
+            Self::Float(v) => format!("{v:}"),
             Self::Integer(v) => format!("{v}"),
             Self::String(v) => format!("'{v}'"),
             Self::UnsignedInt(v) => format!("{v}"),
         }
     }
 }
-impl Display for DbValue {
+impl fmt::Display for DbValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Float(v) => v.fmt(f),

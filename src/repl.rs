@@ -7,7 +7,7 @@ use std::{
 
 use console::{Key, Term};
 
-use crate::{storage::Row, Database, DatabaseError, DatabaseResult, ReturnedRows};
+use crate::{storage::Row, Database, DatabaseError, DatabaseResult, DbValue, ReturnedRows};
 
 #[derive(Debug)]
 pub enum ReplError {
@@ -260,9 +260,23 @@ impl Repl {
         Ok(())
     }
 
+    fn value_len(val: &DbValue) -> usize {
+        match val {
+            DbValue::Float(f) => format!("| {:+<e} ", f).len(),
+            _ => format!("| {} ", val).len(),
+        }
+    }
+
+    fn value_format(val: &DbValue, width: usize) -> String {
+        match val {
+            DbValue::Float(f) => format!("| {:<width$e} ", f),
+            _ => format!("| {:<width$} ", val),
+        }
+    }
+
     fn print_row(col_widths: &[usize], row: &Row) {
         for (val, width) in zip(row.data.iter(), col_widths) {
-            print!("| {:<width$} ", val);
+            print!("{}", Repl::value_format(val, *width));
         }
         println!("|");
     }
@@ -274,9 +288,13 @@ impl Repl {
     }
 
     fn display_rows(rows: ReturnedRows) {
-        let name_widths: Vec<usize> = rows.schema.columns().map(|c| c.name.len()).collect();
+        let name_widths: Vec<usize> = rows
+            .schema
+            .columns()
+            .map(|c: &crate::storage::Column| c.name.len())
+            .collect();
         let col_widths = rows.rows.iter().fold(name_widths, |widths, row| {
-            let row_widths = row.data.iter().map(|x| format!("{x}").len());
+            let row_widths = row.data.iter().map(Repl::value_len);
             zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
         });
 
