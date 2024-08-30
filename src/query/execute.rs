@@ -193,10 +193,21 @@ impl ExecutablePlan {
         delete_stmt: &DeleteStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
-        // TODO: fill this in
         //compose select with where clause,
-        //get row ids that way,
-        //then call storage.delete
+        let select_stmt = delete_stmt.generated_select_statement();
+        let ids: Vec<usize> = if let QueryResult::Rows(rows) = self.select(&select_stmt, storage)? {
+            rows.map(|r| {
+                let v = r.data.first().expect("Should always have a row id here");
+                match v {
+                    DbValue::UnsignedInt(id) => *id as usize,
+                    _ => panic!("Should never have a row id of another kind"),
+                }
+            })
+            .collect()
+        } else {
+            panic!("this should never happen");
+        };
+        storage.delete_rows(&delete_stmt.table, &ids)?;
         Ok(QueryResult::Ok)
     }
 
@@ -271,11 +282,27 @@ impl<'a> SelectRowsIter<'a> {
     fn new(source: RowsSource<'a>, columns: &SelectColumns) -> Self {
         let source_schema = source.schema();
         match columns {
-            SelectColumns::All => SelectRowsIter {
-                source: Box::new(source),
-                schema: source_schema,
-                column_project: Box::new(|r| r.clone()),
-            },
+            SelectColumns::All => {
+                let mut schema = source_schema.into_owned();
+                if let Some(removed_pos) = schema.column_position("rowid") {
+                    schema.remove("rowid");
+                    SelectRowsIter {
+                        source: Box::new(source),
+                        schema: Cow::Owned(schema),
+                        column_project: Box::new(move |r| {
+                            let mut r = r.into_owned();
+                            r.data.remove(removed_pos);
+                            Cow::Owned(r)
+                        }),
+                    }
+                } else {
+                    SelectRowsIter {
+                        source: Box::new(source),
+                        schema: Cow::Owned(schema),
+                        column_project: Box::new(|r| r.clone()),
+                    }
+                }
+            }
             SelectColumns::Only(cols) => {
                 // TODO: Handle situations where column name that doesn't exist in schema is provided
 

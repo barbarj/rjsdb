@@ -7,6 +7,7 @@ use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
 //   - DELETE
 //   - wrapper 'library'
 //      - prepared statements
+// - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
 // - missing options for trawler testing
 // - better data structure for representing schema/primary key/etc, to allow:

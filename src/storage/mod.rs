@@ -375,6 +375,22 @@ impl Schema {
         };
         Ok(val)
     }
+
+    pub fn remove(&mut self, name: &str) {
+        let removed = self.schema.remove(name);
+        match removed {
+            None => (),
+            Some(ci) => self
+                .schema
+                .iter_mut()
+                .map(|(_, col_index)| {
+                    if col_index.index > ci.index {
+                        col_index.index -= 1;
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 impl Display for Schema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

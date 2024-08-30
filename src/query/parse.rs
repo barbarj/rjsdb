@@ -633,7 +633,7 @@ impl WhereCmp {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct WhereClause {
     pub left: WhereMember,
     pub cmp: WhereCmp,
@@ -685,8 +685,21 @@ impl ConflictClause {
 
 #[derive(PartialEq, Debug)]
 pub struct DeleteStatement {
-    table: String,
-    where_clause: WhereClause,
+    pub table: String,
+    pub where_clause: WhereClause,
+}
+impl DeleteStatement {
+    pub fn generated_select_statement(&self) -> SelectStatement {
+        SelectStatement {
+            columns: SelectColumns::Only(vec![ColumnProjection::no_projection(String::from(
+                "rowid",
+            ))]),
+            source: Box::new(SelectSource::Table(self.table.clone())),
+            where_clause: Some(self.where_clause.clone()),
+            order_by_clause: None,
+            limit: None,
+        }
+    }
 }
 
 #[cfg(test)]
