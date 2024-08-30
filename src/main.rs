@@ -4,9 +4,11 @@ use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
 
 // TODO:
 // - missing stuff to support my RSS feed
-//   - DELETE
 //   - wrapper 'library'
-//      - prepared statements
+//      - prepared statements (with replacement tags)
+//      - better 'swizzling' (basically, have some fromSQL trait to convert from DbValue to inferred destitnation type),
+//        wrap that in row.extract_val or something
+//      - try and make ReturnedRows still an iterable somehow.
 // - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
 // - missing options for trawler testing
