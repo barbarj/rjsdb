@@ -17,6 +17,7 @@ pub enum TokenKind {
     String,
     Integer,
     Float,
+    UnsignedInt,
 
     // reserved words
     Select,

@@ -90,7 +90,7 @@ impl<'a> Parser<'a> {
         };
         if matches!(
             token.kind(),
-            TokenKind::String | TokenKind::Integer | TokenKind::Float
+            TokenKind::String | TokenKind::Integer | TokenKind::Float | TokenKind::UnsignedInt
         ) {
             self.lookahead = self.tokens.next_token()?;
             return Ok(token);
@@ -418,7 +418,16 @@ impl<'a> Parser<'a> {
             let val = match token.kind() {
                 TokenKind::String => DbValue::String(token.contents().to_string()),
                 TokenKind::Float => DbValue::Float(DbFloat::new(token.contents().parse::<f64>()?)),
-                TokenKind::Integer => DbValue::Integer(token.contents().parse::<i64>()?),
+                TokenKind::UnsignedInt => DbValue::UnsignedInt(token.contents().parse::<u64>()?),
+                TokenKind::Integer => {
+                    // need to try parsing as both signed and unsigned because all integers will
+                    // be picked up by the tokenizer as Integer, even if they should be UnsignedInt
+                    token
+                        .contents()
+                        .parse::<i64>()
+                        .map(DbValue::Integer)
+                        .or_else(|_| token.contents().parse::<u64>().map(DbValue::UnsignedInt))?
+                }
                 _ => panic!("Should not happen!"),
             };
 

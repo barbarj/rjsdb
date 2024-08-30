@@ -17,6 +17,7 @@ pub enum ExecutionError {
     StorageError(StorageError),
     UnknownColumnNameProvided,
     MismatchedTypeComparision,
+    UncoercableValueProvided,
 }
 impl From<StorageError> for ExecutionError {
     fn from(value: StorageError) -> Self {
@@ -151,10 +152,13 @@ impl ExecutablePlan {
     ) -> Result<QueryResult<'strg>> {
         let schema = storage.table_schema(&insert_stmt.table)?;
 
-        let indexed_vals: Result<Vec<(usize, &DbValue)>> =
+        let indexed_vals: Result<Vec<(usize, DbType, &DbValue)>> =
             zip(insert_stmt.columns.iter(), insert_stmt.values.iter())
-                .map(|(name, val)| match schema.column_position(name) {
-                    Some(pos) => Ok((pos, val)),
+                .map(|(name, val)| match schema.get(name) {
+                    Some(ci) if val.db_type().coerceable_to(&ci.column._type) => {
+                        Ok((ci.index, ci.column._type, val))
+                    }
+                    Some(_) => Err(ExecutionError::UncoercableValueProvided),
                     None => Err(ExecutionError::UnknownColumnNameProvided),
                 })
                 .collect();
@@ -162,7 +166,7 @@ impl ExecutablePlan {
         indexed_vals.sort_by_key(|x| x.0);
         let vals: Vec<DbValue> = indexed_vals
             .into_iter()
-            .map(|(_, val)| val.clone())
+            .filter_map(|(_, _type, val)| val.coerced_to(_type))
             .collect();
 
         let rows = vec![Row::new(vals)];
