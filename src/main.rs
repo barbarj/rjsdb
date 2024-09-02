@@ -7,9 +7,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - missing stuff to support my RSS feed
-//   - wrapper 'library'
-//      - try and make ReturnedRows still an iterable somehow.
 // - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
 // - missing options for trawler testing
@@ -107,8 +104,7 @@ fn main() {
     for row in results.unwrap() {
         println!("{:?}", row);
     }
-    drop(tx);
-    // tx.abort(); TODO: add this
+    tx.abort().unwrap();
 
     let mut repl = Repl::new();
     repl.run(&mut db).unwrap();

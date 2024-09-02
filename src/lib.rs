@@ -1,9 +1,7 @@
 use std::{
-    borrow::Cow,
     collections::HashSet,
     fmt,
     hash::Hash,
-    ops::Deref,
     path::Path,
     sync::{Mutex, MutexGuard, PoisonError},
 };
@@ -283,6 +281,11 @@ impl<'tx> Transaction<'tx> {
         Ok(())
     }
 
+    pub fn abort(mut self) -> Result<()> {
+        self.storage.reload()?;
+        Ok(())
+    }
+
     pub fn execute<'a>(&'a mut self, command: &'a str) -> Result<()> {
         self.prepare(command)?.execute([])?;
         Ok(())
@@ -299,24 +302,10 @@ impl<'tx> TableKnowledge for Transaction<'tx> {
     }
 }
 
-#[derive(Debug)]
-pub struct ReturnedRows {
-    rows: Vec<Row>,
-    schema: Schema,
-}
-impl From<ResultRows<'_>> for ReturnedRows {
-    fn from(value: ResultRows) -> Self {
-        let schema = value.schema().into_owned();
-        let rows = value.map(|r| r.into_owned()).collect();
-        ReturnedRows { rows, schema }
-    }
-}
-
-#[derive(Debug)]
-pub enum DatabaseResult {
+pub enum DatabaseResult<'a> {
     NothingToDo,
     Ok,
-    Rows(ReturnedRows),
+    Rows(ResultRows<'a>),
 }
 
 pub struct MappedResults<'a, T, F>
@@ -355,7 +344,7 @@ impl<'stmt> PreparedStatement<'stmt> {
         match query::execute(&bound_statement, self.storage)? {
             QueryResult::NothingToDo => Ok(DatabaseResult::NothingToDo),
             QueryResult::Ok => Ok(DatabaseResult::Ok),
-            QueryResult::Rows(rows) => Ok(DatabaseResult::Rows(ReturnedRows::from(rows))),
+            QueryResult::Rows(rows) => Ok(DatabaseResult::Rows(rows)),
         }
     }
 
@@ -373,6 +362,11 @@ impl<'stmt> PreparedStatement<'stmt> {
 
     pub fn commit(&mut self) -> Result<()> {
         self.storage.flush()?;
+        Ok(())
+    }
+
+    pub fn abort(&mut self) -> Result<()> {
+        self.storage.reload()?;
         Ok(())
     }
 }

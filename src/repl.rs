@@ -7,7 +7,7 @@ use std::{
 
 use console::{Key, Term};
 
-use crate::{storage::Row, Database, DatabaseError, DatabaseResult, DbValue, ReturnedRows};
+use crate::{query::ResultRows, storage::Row, Database, DatabaseError, DatabaseResult, DbValue};
 
 #[derive(Debug)]
 pub enum ReplError {
@@ -249,7 +249,9 @@ impl Repl {
             if line.trim() == "exit;" {
                 break;
             }
-            match tx.prepare(&line)?.execute([]) {
+            let mut prepped = tx.prepare(&line)?;
+            let res = prepped.execute([]);
+            match res {
                 Err(err) => println!("{err:?}"),
                 Ok(DatabaseResult::Ok) => println!("ok"),
                 Ok(DatabaseResult::NothingToDo) => (),
@@ -287,13 +289,14 @@ impl Repl {
         row_width + 1 // last dividider;
     }
 
-    fn display_rows(rows: ReturnedRows) {
-        let name_widths: Vec<usize> = rows
-            .schema
+    fn display_rows(rows: ResultRows) {
+        let schema = rows.schema();
+        let name_widths: Vec<usize> = schema
             .columns()
             .map(|c: &crate::storage::Column| c.name.len())
             .collect();
-        let col_widths = rows.rows.iter().fold(name_widths, |widths, row| {
+        let all_rows: Vec<Row> = rows.map(|r| r.into_owned()).collect();
+        let col_widths = all_rows.iter().fold(name_widths, |widths, row| {
             let row_widths = row.data.iter().map(Repl::value_len);
             zip(widths, row_widths).map(|(a, b)| max(a, b)).collect()
         });
@@ -302,14 +305,14 @@ impl Repl {
 
         // header
         println!("{}", divider);
-        for (col, width) in zip(rows.schema.columns(), col_widths.iter()) {
+        for (col, width) in zip(schema.columns(), col_widths.iter()) {
             print!("| {:<width$} ", col.name);
         }
         println!("|");
         println!("{}", divider);
 
         // body
-        for row in rows.rows {
+        for row in all_rows {
             Repl::print_row(&col_widths, &row);
         }
 

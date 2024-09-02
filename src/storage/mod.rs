@@ -136,6 +136,16 @@ impl StorageLayer {
         Ok(())
     }
 
+    pub fn reload(&mut self) -> Result<()> {
+        let mut buff = Vec::new();
+        self.file.rewind()?;
+        self.file.read_to_end(&mut buff)?;
+        let ser_db: DeserializableStorageLayer = read::from_bytes(&buff)?;
+        self.db_header = ser_db.db_header;
+        self.tables = ser_db.tables;
+        Ok(())
+    }
+
     pub fn table_exists(&self, name: &str) -> bool {
         self.tables.iter().any(|t| t.header.table_name == name)
     }
