@@ -15,3 +15,5 @@
 - finished necessary support for Rss reader
 - transaction abortion
 - rows affected returned by execute
+- ability to 'prepare' from outside of transaction
+- mirror the query result + mapped api of the rusqlite library

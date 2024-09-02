@@ -7,7 +7,7 @@ use std::{
 
 use console::{Key, Term};
 
-use crate::{query::ResultRows, storage::Row, Database, DatabaseError, DatabaseResult, DbValue};
+use crate::{query::ResultRows, storage::Row, Database, DatabaseError, DbValue, RowContents, Rows};
 
 #[derive(Debug)]
 pub enum ReplError {
@@ -249,17 +249,15 @@ impl Repl {
             if line.trim() == "exit;" {
                 break;
             }
-            let mut prepped = tx.prepare(&line)?;
-            let res = prepped.execute([]);
-            match res {
+            match tx.prepare(&line).query() {
                 Err(err) => println!("{err:?}"),
-                Ok(DatabaseResult::Ok(affected)) => match affected {
-                    1 => println!("1 row affected"),
-                    _ => println!("{affected} rows affected"),
-                },
-                Ok(DatabaseResult::NothingToDo) => (),
-                Ok(DatabaseResult::Rows(rows)) => Repl::display_rows(rows),
-            }
+                Ok(Rows {
+                    rows: RowContents::Empty,
+                }) => println!("ok"),
+                Ok(Rows {
+                    rows: RowContents::Filled(res_rows),
+                }) => Repl::display_rows(res_rows),
+            };
         }
         tx.commit()?;
         Ok(())

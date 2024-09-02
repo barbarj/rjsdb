@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fmt,
     hash::Hash,
@@ -241,16 +242,30 @@ impl Database {
         })
     }
 
-    pub fn execute(&mut self, command: &str) -> Result<()> {
-        let mut tx = self.transaction()?;
-        tx.prepare(command)?.execute([])?;
-        tx.commit()?;
-        Ok(())
+    pub fn execute(&mut self, command: &str) -> Result<usize> {
+        let affected = self.prepare(command)?.execute([])?;
+        Ok(affected)
     }
 
     pub fn transaction(&mut self) -> Result<Transaction> {
-        Ok(Transaction {
-            storage: self.storage.lock()?,
+        let lock = self.storage.lock()?;
+        Ok(Transaction { storage: lock })
+    }
+
+    pub fn commit(&mut self) -> Result<()> {
+        self.storage.lock()?.flush()?;
+        Ok(())
+    }
+
+    pub fn abort(&mut self) -> Result<()> {
+        self.storage.lock()?.reload()?;
+        Ok(())
+    }
+
+    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> Result<PreparedStatement<'a>> {
+        Ok(PreparedStatement {
+            storage: MaybeLockedStorage::HoldingLock(self.storage.lock()?),
+            statement: stmt,
         })
     }
 }
@@ -269,11 +284,11 @@ pub struct Transaction<'tx> {
     storage: MutexGuard<'tx, StorageLayer>,
 }
 impl<'tx> Transaction<'tx> {
-    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> Result<PreparedStatement<'a>> {
-        Ok(PreparedStatement {
-            storage: &mut self.storage,
+    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> PreparedStatement<'a> {
+        PreparedStatement {
+            storage: MaybeLockedStorage::NotHoldingLock(&mut self.storage),
             statement: stmt,
-        })
+        }
     }
 
     pub fn commit(mut self) -> Result<()> {
@@ -286,12 +301,12 @@ impl<'tx> Transaction<'tx> {
         Ok(())
     }
 
-    pub fn execute<'a>(&'a mut self, command: &'a str) -> Result<()> {
-        self.prepare(command)?.execute([])?;
-        Ok(())
+    pub fn execute(&mut self, command: &str) -> Result<usize> {
+        let affected = self.prepare(command).execute([])?;
+        Ok(affected)
     }
 }
-impl<'tx> TableKnowledge for Transaction<'tx> {
+impl TableKnowledge for Transaction<'_> {
     fn table_exists(&self, name: &str) -> bool {
         self.storage.table_exists(name)
     }
@@ -302,81 +317,114 @@ impl<'tx> TableKnowledge for Transaction<'tx> {
     }
 }
 
-pub enum DatabaseResult<'a> {
-    NothingToDo,
-    Ok(usize),
-    Rows(ResultRows<'a>),
+enum RowContents<'a> {
+    Filled(ResultRows<'a>),
+    Empty,
 }
 
-pub struct MappedResults<'a, T, F>
-where
-    F: Fn(&Row) -> Result<T>,
-{
-    rows: ResultRows<'a>,
+pub struct Rows<'a> {
+    rows: RowContents<'a>,
+}
+impl<'a> Rows<'a> {
+    fn new(rows: RowContents<'a>) -> Self {
+        Rows { rows }
+    }
+
+    pub fn mapped<F>(self, map_fn: F) -> MappedResults<'a, F> {
+        MappedResults::new(self.rows, map_fn)
+    }
+}
+impl<'a> Iterator for Rows<'a> {
+    type Item = Cow<'a, Row>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.rows {
+            RowContents::Empty => None,
+            RowContents::Filled(rows) => rows.next(),
+        }
+    }
+}
+
+pub struct MappedResults<'a, F> {
+    rows: RowContents<'a>,
     map_fn: F,
 }
-impl<'a, T, F> MappedResults<'a, T, F>
-where
-    F: Fn(&Row) -> Result<T>,
-{
-    fn new(rows: ResultRows<'a>, map_fn: F) -> Self {
+impl<'a, F> MappedResults<'a, F> {
+    fn new(rows: RowContents<'a>, map_fn: F) -> Self {
         MappedResults { rows, map_fn }
     }
 }
-impl<'a, T, F> Iterator for MappedResults<'a, T, F>
+impl<T, F> Iterator for MappedResults<'_, F>
 where
     F: Fn(&Row) -> Result<T>,
 {
     type Item = Result<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.rows.next().map(|r| (self.map_fn)(&r))
+        match &mut self.rows {
+            RowContents::Empty => None,
+            RowContents::Filled(rows) => rows.next().map(|r| (self.map_fn)(&r)),
+        }
     }
+}
+
+enum MaybeLockedStorage<'stmt> {
+    HoldingLock(MutexGuard<'stmt, StorageLayer>),
+    NotHoldingLock(&'stmt mut StorageLayer),
 }
 
 pub struct PreparedStatement<'stmt> {
-    storage: &'stmt mut StorageLayer,
+    storage: MaybeLockedStorage<'stmt>,
     statement: &'stmt str,
 }
-impl<'stmt> PreparedStatement<'stmt> {
-    pub fn execute<P: Params>(&mut self, params: P) -> Result<DatabaseResult> {
+impl PreparedStatement<'_> {
+    pub fn execute<P: Params>(&mut self, params: P) -> Result<usize> {
         let bound_statement = params.bind_to(self.statement);
-        match query::execute(&bound_statement, self.storage)? {
-            QueryResult::NothingToDo => Ok(DatabaseResult::NothingToDo),
-            QueryResult::Ok(affected) => Ok(DatabaseResult::Ok(affected)),
-            QueryResult::Rows(rows) => Ok(DatabaseResult::Rows(rows)),
+        match &mut self.storage {
+            MaybeLockedStorage::HoldingLock(lock) => {
+                let res = match query::execute(&bound_statement, lock)? {
+                    QueryResult::NothingToDo => 0,
+                    QueryResult::Ok(affected) => affected,
+                    QueryResult::Rows(_) => 0,
+                };
+                lock.flush()?;
+                Ok(res)
+            }
+            MaybeLockedStorage::NotHoldingLock(storage) => {
+                match query::execute(&bound_statement, storage)? {
+                    QueryResult::NothingToDo => Ok(0),
+                    QueryResult::Ok(affected) => Ok(affected),
+                    QueryResult::Rows(_) => Ok(0),
+                }
+            }
         }
     }
 
-    pub fn mapped_query<T, F>(&'stmt mut self, map_fn: F) -> Result<MappedResults<'stmt, T, F>>
-    where
-        F: Fn(&Row) -> Result<T>,
-    {
-        let res = query::execute(self.statement, self.storage)?;
-        let rows = match res {
-            QueryResult::Rows(rows) => rows,
-            _ => return Err(DatabaseError::QueryDidNotReturnRows),
+    pub fn query(&mut self) -> Result<Rows<'_>> {
+        let res = match &mut self.storage {
+            MaybeLockedStorage::HoldingLock(lock) => query::execute(self.statement, lock)?,
+            MaybeLockedStorage::NotHoldingLock(storage) => query::execute(self.statement, storage)?,
         };
-        Ok(MappedResults::new(rows, map_fn))
-    }
-
-    pub fn commit(&mut self) -> Result<()> {
-        self.storage.flush()?;
-        Ok(())
-    }
-
-    pub fn abort(&mut self) -> Result<()> {
-        self.storage.reload()?;
-        Ok(())
+        match res {
+            QueryResult::NothingToDo => Ok(Rows::new(RowContents::Empty)),
+            QueryResult::Ok(_) => Ok(Rows::new(RowContents::Empty)),
+            QueryResult::Rows(rows) => Ok(Rows::new(RowContents::Filled(rows))),
+        }
     }
 }
-impl<'stmt> TableKnowledge for PreparedStatement<'stmt> {
+impl TableKnowledge for PreparedStatement<'_> {
     fn table_exists(&self, name: &str) -> bool {
-        self.storage.table_exists(name)
+        match &self.storage {
+            MaybeLockedStorage::HoldingLock(lock) => lock.table_exists(name),
+            MaybeLockedStorage::NotHoldingLock(storage) => storage.table_exists(name),
+        }
     }
 
     fn table_schema(&self, name: &str) -> Result<Schema> {
-        let schema = self.storage.table_schema(name)?;
+        let schema = match &self.storage {
+            MaybeLockedStorage::HoldingLock(lock) => lock.table_schema(name)?,
+            MaybeLockedStorage::NotHoldingLock(storage) => storage.table_schema(name)?,
+        };
         Ok(schema.clone())
     }
 }

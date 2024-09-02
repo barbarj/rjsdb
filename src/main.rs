@@ -3,24 +3,23 @@ use std::path::Path;
 use rjsdb::{
     generate::{Generate, RNG},
     repl::Repl,
+    storage::Row,
     DataAccess, Database, DatabaseError, TableKnowledge, Transaction,
 };
 
 // TODO:
 // - get working in rss reader
-//   - ability to 'prepare' from outside of transaction
-//   - mirror the query result + mapped api of the rusqlite library
 // - transactions in repl
 // - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
 // - missing options for trawler testing
+// - "stackable"/"traversable" errors when in dev build
 // - better data structure for representing schema/primary key/etc, to allow:
 //    - showing which col is the pk in repl
 // - Figure out how to manage database connections and accept requests
 //   - This'll be a client/server model, and the server probably will
 //     need something like tokio to manage threads/requests
 // - unsigned type (for ids, etc) (will require some schema-aware type coercion)
-// - Do type coercion based on schema if allowed (i.e. int->float)
 
 fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {
     let mut str = String::from("(");
@@ -60,7 +59,6 @@ fn test_prepare_gen_rows(count: usize, tx: &mut Transaction, rng: &mut RNG) {
         //     (":baz", f64::generate(rng)),
         // ];
         tx.prepare(stmt)
-            .unwrap()
             .execute((
                 (":id", i64::generate(rng)),
                 (":foo", String::generate(rng)),
@@ -91,10 +89,11 @@ fn main() {
     println!("added");
 
     let mut tx = db.transaction().unwrap();
-    let results: Result<Vec<(String, i64, usize)>, DatabaseError> = tx
-        .prepare("select foo, bar, rowid from the_mf_table;")
+    let mut prepped = tx.prepare("select foo, bar, rowid from the_mf_table;");
+    let results: Result<Vec<(String, i64, usize)>, DatabaseError> = prepped
+        .query()
         .unwrap()
-        .mapped_query(|r| {
+        .mapped(|r: &Row| {
             let foo = r.get(0);
             println!("foo: {:?}", foo);
             let bar = r.get(1);
@@ -103,11 +102,11 @@ fn main() {
             println!("id: {:?}", id);
             Ok((foo?, bar?, id?))
         })
-        .unwrap()
         .collect();
     for row in results.unwrap() {
         println!("{:?}", row);
     }
+    drop(prepped);
     tx.abort().unwrap();
 
     let mut repl = Repl::new();
