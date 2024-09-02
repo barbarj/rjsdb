@@ -191,6 +191,13 @@ impl StorageLayer {
         println!("------------");
     }
 
+    pub fn table_row_count(&self, table_name: &str) -> Result<usize> {
+        match self.table(table_name) {
+            None => Err(StorageError::TableDoesNotExist),
+            Some(table) => Ok(table.rows.len()),
+        }
+    }
+
     fn table_mut(&mut self, table_name: &str) -> Option<&mut Table> {
         self.tables
             .iter_mut()
@@ -216,7 +223,7 @@ impl StorageLayer {
         table.insert_rows(rows, conflict_rule)
     }
 
-    pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<()> {
+    pub fn delete_rows(&mut self, table_name: &str, ids: &[usize]) -> Result<usize> {
         let table = match self.table_mut(table_name) {
             Some(table) => table,
             None => return Err(StorageError::TableDoesNotExist),
@@ -577,9 +584,11 @@ impl Table {
         Ok(())
     }
 
-    fn delete_rows(&mut self, ids: &[usize]) -> Result<()> {
+    fn delete_rows(&mut self, ids: &[usize]) -> Result<usize> {
+        let initial_len = self.rows.len();
         self.rows.retain(|row| !ids.contains(&row.id));
-        Ok(())
+        let after_len = self.rows.len();
+        Ok(initial_len - after_len)
     }
 
     pub fn rows(&self, with_rowid: bool) -> Rows {

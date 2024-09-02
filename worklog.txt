@@ -14,3 +14,4 @@
 - make returned rows nicely iterable
 - finished necessary support for Rss reader
 - transaction abortion
+- rows affected returned by execute

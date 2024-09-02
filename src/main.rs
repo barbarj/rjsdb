@@ -7,6 +7,10 @@ use rjsdb::{
 };
 
 // TODO:
+// - get working in rss reader
+//   - ability to 'prepare' from outside of transaction
+//   - mirror the query result + mapped api of the rusqlite library
+// - transactions in repl
 // - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
 // - missing options for trawler testing

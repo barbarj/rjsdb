@@ -253,7 +253,10 @@ impl Repl {
             let res = prepped.execute([]);
             match res {
                 Err(err) => println!("{err:?}"),
-                Ok(DatabaseResult::Ok) => println!("ok"),
+                Ok(DatabaseResult::Ok(affected)) => match affected {
+                    1 => println!("1 row affected"),
+                    _ => println!("{affected} rows affected"),
+                },
                 Ok(DatabaseResult::NothingToDo) => (),
                 Ok(DatabaseResult::Rows(rows)) => Repl::display_rows(rows),
             }

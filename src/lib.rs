@@ -304,7 +304,7 @@ impl<'tx> TableKnowledge for Transaction<'tx> {
 
 pub enum DatabaseResult<'a> {
     NothingToDo,
-    Ok,
+    Ok(usize),
     Rows(ResultRows<'a>),
 }
 
@@ -343,7 +343,7 @@ impl<'stmt> PreparedStatement<'stmt> {
         let bound_statement = params.bind_to(self.statement);
         match query::execute(&bound_statement, self.storage)? {
             QueryResult::NothingToDo => Ok(DatabaseResult::NothingToDo),
-            QueryResult::Ok => Ok(DatabaseResult::Ok),
+            QueryResult::Ok(affected) => Ok(DatabaseResult::Ok(affected)),
             QueryResult::Rows(rows) => Ok(DatabaseResult::Rows(rows)),
         }
     }
@@ -384,6 +384,15 @@ impl<'stmt> TableKnowledge for PreparedStatement<'stmt> {
 pub trait Params {
     fn bind_to(&self, target: &str) -> String;
 }
+impl<T: ToSql> Params for &[(&str, T)] {
+    fn bind_to(&self, target: &str) -> String {
+        let mut bound = target.to_string();
+        for (target, replacement) in *self {
+            bound = bound.replace(target, replacement.to_sql().as_ref());
+        }
+        bound
+    }
+}
 impl Params for &[(&str, &dyn ToSql)] {
     fn bind_to(&self, target: &str) -> String {
         let mut bound = target.to_string();
@@ -420,6 +429,11 @@ trait ToSql {
     fn to_sql(&self) -> String;
 }
 impl ToSql for String {
+    fn to_sql(&self) -> String {
+        format!("'{}'", self)
+    }
+}
+impl ToSql for &String {
     fn to_sql(&self) -> String {
         format!("'{}'", self)
     }

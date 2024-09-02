@@ -33,7 +33,7 @@ impl From<ParsingError> for ExecutionError {
 type Result<T> = std::result::Result<T, ExecutionError>;
 
 pub enum QueryResult<'a> {
-    Ok,
+    Ok(usize),
     NothingToDo,
     Rows(ResultRows<'a>),
 }
@@ -126,7 +126,7 @@ impl ExecutablePlan {
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
         if create_stmt.if_not_exists && storage.table_exists(&create_stmt.table) {
-            return Ok(QueryResult::Ok);
+            return Ok(QueryResult::Ok(0));
         }
         let pairs = zip(
             create_stmt.columns.names.iter(),
@@ -142,7 +142,7 @@ impl ExecutablePlan {
             .as_storage_key_column(&schema)?;
 
         storage.create_table(create_stmt.table.clone(), schema, primary_key_col)?;
-        Ok(QueryResult::Ok)
+        Ok(QueryResult::Ok(0))
     }
 
     fn insert<'strg>(
@@ -176,7 +176,7 @@ impl ExecutablePlan {
             .as_ref()
             .map(|c| c.as_conflict_rule());
         storage.insert_rows(&insert_stmt.table, &rows, conflict_rule)?;
-        Ok(QueryResult::Ok)
+        Ok(QueryResult::Ok(rows.len()))
     }
 
     fn destroy<'strg>(
@@ -184,8 +184,9 @@ impl ExecutablePlan {
         destroy_stmt: &DestroyStatement,
         storage: &'strg mut StorageLayer,
     ) -> Result<QueryResult<'strg>> {
+        let row_count = storage.table_row_count(&destroy_stmt.table)?;
         storage.destroy_table(&destroy_stmt.table)?;
-        Ok(QueryResult::Ok)
+        Ok(QueryResult::Ok(row_count))
     }
 
     fn delete<'strg>(
@@ -207,8 +208,8 @@ impl ExecutablePlan {
         } else {
             panic!("this should never happen");
         };
-        storage.delete_rows(&delete_stmt.table, &ids)?;
-        Ok(QueryResult::Ok)
+        let deleted = storage.delete_rows(&delete_stmt.table, &ids)?;
+        Ok(QueryResult::Ok(deleted))
     }
 
     fn execute_stmt<'strg>(
