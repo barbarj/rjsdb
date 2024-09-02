@@ -3,14 +3,12 @@ use std::path::Path;
 use rjsdb::{
     generate::{Generate, RNG},
     repl::Repl,
-    Database, TableKnowledge, Transaction,
+    DataAccess, Database, DatabaseError, TableKnowledge, Transaction,
 };
 
 // TODO:
 // - missing stuff to support my RSS feed
 //   - wrapper 'library'
-//      - better 'swizzling' (basically, have some fromSQL trait to convert from DbValue to inferred destitnation type),
-//        wrap that in row.extract_val or something
 //      - try and make ReturnedRows still an iterable somehow.
 // - disallow use of reserved column names ("rowid")
 // - add tests for parser, execution
@@ -89,6 +87,28 @@ fn main() {
     let mut tx = db.transaction().unwrap();
     test_prepare_gen_rows(10, &mut tx, &mut rng);
     tx.commit().unwrap();
+    println!("added");
+
+    let mut tx = db.transaction().unwrap();
+    let results: Result<Vec<(String, i64, usize)>, DatabaseError> = tx
+        .prepare("select foo, bar, rowid from the_mf_table;")
+        .unwrap()
+        .mapped_query(|r| {
+            let foo = r.get(0);
+            println!("foo: {:?}", foo);
+            let bar = r.get(1);
+            println!("bar: {:?}", bar);
+            let id = r.get(2);
+            println!("id: {:?}", id);
+            Ok((foo?, bar?, id?))
+        })
+        .unwrap()
+        .collect();
+    for row in results.unwrap() {
+        println!("{:?}", row);
+    }
+    drop(tx);
+    // tx.abort(); TODO: add this
 
     let mut repl = Repl::new();
     repl.run(&mut db).unwrap();

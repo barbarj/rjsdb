@@ -10,3 +10,4 @@
 
 # 2024-09-02
 - prepared statements (with replacement tags)
+- better 'swizzling' (basically, have some fromSQL trait to convert from DbValue to inferred destitnation type)

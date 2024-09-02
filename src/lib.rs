@@ -1,7 +1,9 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fmt,
     hash::Hash,
+    ops::Deref,
     path::Path,
     sync::{Mutex, MutexGuard, PoisonError},
 };
@@ -203,6 +205,9 @@ pub enum DatabaseError {
     StorageError(StorageError),
     QueryError(QueryError),
     MutexError,
+    InvalidTypeMapping,
+    RowPositionInvalid,
+    QueryDidNotReturnRows,
 }
 impl From<StorageError> for DatabaseError {
     fn from(value: StorageError) -> Self {
@@ -314,6 +319,32 @@ pub enum DatabaseResult {
     Rows(ReturnedRows),
 }
 
+pub struct MappedResults<'a, T, F>
+where
+    F: Fn(&Row) -> Result<T>,
+{
+    rows: ResultRows<'a>,
+    map_fn: F,
+}
+impl<'a, T, F> MappedResults<'a, T, F>
+where
+    F: Fn(&Row) -> Result<T>,
+{
+    fn new(rows: ResultRows<'a>, map_fn: F) -> Self {
+        MappedResults { rows, map_fn }
+    }
+}
+impl<'a, T, F> Iterator for MappedResults<'a, T, F>
+where
+    F: Fn(&Row) -> Result<T>,
+{
+    type Item = Result<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rows.next().map(|r| (self.map_fn)(&r))
+    }
+}
+
 pub struct PreparedStatement<'stmt> {
     storage: &'stmt mut StorageLayer,
     statement: &'stmt str,
@@ -321,13 +352,23 @@ pub struct PreparedStatement<'stmt> {
 impl<'stmt> PreparedStatement<'stmt> {
     pub fn execute<P: Params>(&mut self, params: P) -> Result<DatabaseResult> {
         let bound_statement = params.bind_to(self.statement);
-        let query_res = query::execute(&bound_statement, self.storage)?;
-        let res = match query_res {
-            QueryResult::NothingToDo => DatabaseResult::NothingToDo,
-            QueryResult::Ok => DatabaseResult::Ok,
-            QueryResult::Rows(rows) => DatabaseResult::Rows(ReturnedRows::from(rows)),
+        match query::execute(&bound_statement, self.storage)? {
+            QueryResult::NothingToDo => Ok(DatabaseResult::NothingToDo),
+            QueryResult::Ok => Ok(DatabaseResult::Ok),
+            QueryResult::Rows(rows) => Ok(DatabaseResult::Rows(ReturnedRows::from(rows))),
+        }
+    }
+
+    pub fn mapped_query<T, F>(&'stmt mut self, map_fn: F) -> Result<MappedResults<'stmt, T, F>>
+    where
+        F: Fn(&Row) -> Result<T>,
+    {
+        let res = query::execute(self.statement, self.storage)?;
+        let rows = match res {
+            QueryResult::Rows(rows) => rows,
+            _ => return Err(DatabaseError::QueryDidNotReturnRows),
         };
-        Ok(res)
+        Ok(MappedResults::new(rows, map_fn))
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -412,5 +453,61 @@ impl ToSql for u64 {
 impl ToSql for usize {
     fn to_sql(&self) -> String {
         self.to_string()
+    }
+}
+
+pub trait FromSql: Sized {
+    fn from_sql(sql_val: &DbValue) -> Result<Self>;
+}
+impl FromSql for String {
+    fn from_sql(sql_val: &DbValue) -> Result<Self> {
+        match sql_val {
+            DbValue::String(s) => Ok(s.clone()),
+            _ => Err(DatabaseError::InvalidTypeMapping),
+        }
+    }
+}
+impl FromSql for f64 {
+    fn from_sql(sql_val: &DbValue) -> Result<Self> {
+        match sql_val {
+            DbValue::Float(f) => Ok(f.inner.f),
+            _ => Err(DatabaseError::InvalidTypeMapping),
+        }
+    }
+}
+impl FromSql for u64 {
+    fn from_sql(sql_val: &DbValue) -> Result<Self> {
+        match sql_val {
+            DbValue::UnsignedInt(i) => Ok(*i),
+            _ => Err(DatabaseError::InvalidTypeMapping),
+        }
+    }
+}
+impl FromSql for i64 {
+    fn from_sql(sql_val: &DbValue) -> Result<Self> {
+        match sql_val {
+            DbValue::Integer(i) => Ok(*i),
+            _ => Err(DatabaseError::InvalidTypeMapping),
+        }
+    }
+}
+impl FromSql for usize {
+    fn from_sql(sql_val: &DbValue) -> Result<Self> {
+        match sql_val {
+            DbValue::UnsignedInt(i) => Ok(usize::try_from(*i).unwrap()),
+            _ => Err(DatabaseError::InvalidTypeMapping),
+        }
+    }
+}
+
+pub trait DataAccess {
+    fn get<T: FromSql>(&self, idx: usize) -> Result<T>;
+}
+impl DataAccess for Row {
+    fn get<T: FromSql>(&self, idx: usize) -> Result<T> {
+        match self.data.get(idx) {
+            None => Err(DatabaseError::RowPositionInvalid),
+            Some(v) => T::from_sql(v),
+        }
     }
 }
