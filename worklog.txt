@@ -17,3 +17,6 @@
 - rows affected returned by execute
 - ability to 'prepare' from outside of transaction
 - mirror the query result + mapped api of the rusqlite library
+- Make fail if insert values don't match the provided columns and ultimately don't match the table schema
+- Fix string token spec (make it greedy)
+- Make strings use double-quotes instead

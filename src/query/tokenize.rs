@@ -149,7 +149,7 @@ impl<'a> Tokenizer<'a> {
                 Regex::new(r"^(?i)unsigned int\b").unwrap(),
             ),
             // composites
-            SpecItem(TokenKind::String, Regex::new(r"^'(.*)'").unwrap()),
+            SpecItem(TokenKind::String, Regex::new("^\"(.*?)\"").unwrap()),
             SpecItem(
                 TokenKind::Float,
                 Regex::new(r"^-?\d+\.\d+(e-*\d+)*").unwrap(),
@@ -295,9 +295,22 @@ mod tokenizer_tests {
     }
 
     #[test]
+    fn greedy_with_strings() {
+        let input = "\"string1\" then \"string2\"";
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
+        let expected = vec![
+            Token::new("string1", TokenKind::String),
+            Token::new("then", TokenKind::Identifier),
+            Token::new("string2", TokenKind::String),
+        ];
+
+        assert_eq!(res, expected);
+    }
+
+    #[test]
     fn all_tokens_in_a_string() {
         let input =
-            "select foo, bar, baz from test_table where bar='that thing' order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid delete unsigned int;";
+            "select foo, bar, baz from test_table where bar=\"that thing\" order by foo) desc; -12, -12.3 create table if not ( exists string integer float insert into values destroy -5.134e11 4.122e-38 limit <> <= >= as on conflict do nothing primary key rowid delete unsigned int;";
         let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
         let expected = vec![
             Token::new("select", TokenKind::Select),

@@ -380,6 +380,7 @@ pub struct PreparedStatement<'stmt> {
 impl PreparedStatement<'_> {
     pub fn execute<P: Params>(&mut self, params: P) -> Result<usize> {
         let bound_statement = params.bind_to(self.statement);
+        println!("{bound_statement}");
         match &mut self.storage {
             MaybeLockedStorage::HoldingLock(lock) => {
                 let res = match query::execute(&bound_statement, lock)? {
@@ -488,7 +489,7 @@ impl ToSql for &String {
 }
 impl ToSql for &str {
     fn to_sql(&self) -> String {
-        format!("'{}'", self)
+        format!("\"{}\"", self)
     }
 }
 impl ToSql for f64 {

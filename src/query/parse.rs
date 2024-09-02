@@ -715,7 +715,7 @@ mod parser_tests {
 
     #[test]
     fn consume() {
-        let stmt = "'that' this";
+        let stmt = "\"that\" this";
         let tokens = Tokenizer::new(stmt);
         let mut parser = Parser::build(tokens).unwrap();
 
@@ -788,7 +788,7 @@ mod parser_tests {
 
     #[test]
     fn select_with_where_only() {
-        let stmt = "select foo, bar from the_data where that = 'this';";
+        let stmt = "select foo, bar from the_data where that = \"this\";";
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
@@ -923,7 +923,7 @@ mod parser_tests {
 
     #[test]
     fn select_with_all_clauses() {
-        let stmt = "select foo, bar from the_data where 'this' = that order by baz desc limit 5;";
+        let stmt = "select foo, bar from the_data where \"this\" = that order by baz desc limit 5;";
 
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
@@ -1077,7 +1077,7 @@ mod parser_tests {
 
     #[test]
     fn insert_into() {
-        let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25);";
+        let stmt = "insert into the_data (foo, bar, baz) values (\"thing\", 42, 5.25);";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Statement::Insert(InsertStatement {
@@ -1100,7 +1100,7 @@ mod parser_tests {
 
     #[test]
     fn insert_with_conflict_clause() {
-        let stmt = "insert into the_data (foo, bar, baz) values ('thing', 42, 5.25) on conflict (foo, bar) DO NOTHING;";
+        let stmt = "insert into the_data (foo, bar, baz) values (\"thing\", 42, 5.25) on conflict (foo, bar) DO NOTHING;";
         let tokens = Tokenizer::new(stmt);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Statement::Insert(InsertStatement {
@@ -1165,7 +1165,7 @@ mod parser_tests {
 
     #[test]
     fn delete() {
-        let input = "delete from the_data where a = 'thing';";
+        let input = "delete from the_data where a = \"thing\";";
         let tokens = Tokenizer::new(input);
         let actual = Parser::build(tokens).unwrap().parse().unwrap();
         let expected = vec![Statement::Delete(DeleteStatement {
@@ -1178,6 +1178,13 @@ mod parser_tests {
         })];
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn nested_quotes_are_safe() {
+        let input = "INSERT INTO posts(link, title, date, author) VALUES(\"http://thorstenball.com/blog/2019/04/09/learn-more-programming-languages/\", \"Learn more programming languages, even if you won't use them\", \"2019-04-09T08:30:00+00:00\", \"Thorsten Ball\") ON CONFLICT(link) DO NOTHING;";
+        let tokens = Tokenizer::new(input);
+        _ = Parser::build(tokens).unwrap().parse().unwrap();
     }
 
     // TODO:
