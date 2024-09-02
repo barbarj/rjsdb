@@ -103,17 +103,17 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self) -> Result<Vec<Statement>> {
-        self.expression_list()
+        self.statement_list()
     }
 
-    fn expression_list(&mut self) -> Result<Vec<Statement>> {
-        let mut expressions = Vec::new();
+    fn statement_list(&mut self) -> Result<Vec<Statement>> {
+        let mut statements = Vec::new();
 
         while !self.done_parsing() {
-            expressions.push(self.statement()?);
+            statements.push(self.statement()?);
         }
 
-        Ok(expressions)
+        Ok(statements)
     }
 
     fn statement(&mut self) -> Result<Statement> {
@@ -420,13 +420,20 @@ impl<'a> Parser<'a> {
                 TokenKind::Float => DbValue::Float(DbFloat::new(token.contents().parse::<f64>()?)),
                 TokenKind::UnsignedInt => DbValue::UnsignedInt(token.contents().parse::<u64>()?),
                 TokenKind::Integer => {
-                    // need to try parsing as both signed and unsigned because all integers will
+                    // need to try parsing as all value types because all integers will
                     // be picked up by the tokenizer as Integer, even if they should be UnsignedInt
+                    // or are too large and should be a float
                     token
                         .contents()
                         .parse::<i64>()
                         .map(DbValue::Integer)
-                        .or_else(|_| token.contents().parse::<u64>().map(DbValue::UnsignedInt))?
+                        .or_else(|_| token.contents().parse::<u64>().map(DbValue::UnsignedInt))
+                        .or_else(|_| {
+                            token
+                                .contents()
+                                .parse::<f64>()
+                                .map(|f| DbValue::Float(DbFloat::new(f)))
+                        })?
                 }
                 _ => panic!("Should not happen!"),
             };

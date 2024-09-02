@@ -240,7 +240,7 @@ impl Database {
 
     pub fn execute(&mut self, command: &str) -> Result<()> {
         let mut tx = self.transaction()?;
-        tx.prepare(command)?.execute()?;
+        tx.prepare(command)?.execute([])?;
         tx.commit()?;
         Ok(())
     }
@@ -266,8 +266,8 @@ pub struct Transaction<'tx> {
     storage: MutexGuard<'tx, StorageLayer>,
 }
 impl<'tx> Transaction<'tx> {
-    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> Result<Statement<'a>> {
-        Ok(Statement {
+    pub fn prepare<'a>(&'a mut self, stmt: &'a str) -> Result<PreparedStatement<'a>> {
+        Ok(PreparedStatement {
             storage: &mut self.storage,
             statement: stmt,
         })
@@ -279,7 +279,7 @@ impl<'tx> Transaction<'tx> {
     }
 
     pub fn execute<'a>(&'a mut self, command: &'a str) -> Result<()> {
-        self.prepare(command)?.execute()?;
+        self.prepare(command)?.execute([])?;
         Ok(())
     }
 }
@@ -314,13 +314,14 @@ pub enum DatabaseResult {
     Rows(ReturnedRows),
 }
 
-pub struct Statement<'stmt> {
+pub struct PreparedStatement<'stmt> {
     storage: &'stmt mut StorageLayer,
     statement: &'stmt str,
 }
-impl<'stmt> Statement<'stmt> {
-    pub fn execute(&mut self) -> Result<DatabaseResult> {
-        let query_res = query::execute(self.statement, self.storage)?;
+impl<'stmt> PreparedStatement<'stmt> {
+    pub fn execute<P: Params>(&mut self, params: P) -> Result<DatabaseResult> {
+        let bound_statement = params.bind_to(self.statement);
+        let query_res = query::execute(&bound_statement, self.storage)?;
         let res = match query_res {
             QueryResult::NothingToDo => DatabaseResult::NothingToDo,
             QueryResult::Ok => DatabaseResult::Ok,
@@ -334,7 +335,7 @@ impl<'stmt> Statement<'stmt> {
         Ok(())
     }
 }
-impl<'stmt> TableKnowledge for Statement<'stmt> {
+impl<'stmt> TableKnowledge for PreparedStatement<'stmt> {
     fn table_exists(&self, name: &str) -> bool {
         self.storage.table_exists(name)
     }
@@ -342,5 +343,74 @@ impl<'stmt> TableKnowledge for Statement<'stmt> {
     fn table_schema(&self, name: &str) -> Result<Schema> {
         let schema = self.storage.table_schema(name)?;
         Ok(schema.clone())
+    }
+}
+
+pub trait Params {
+    fn bind_to(&self, target: &str) -> String;
+}
+impl Params for &[(&str, &dyn ToSql)] {
+    fn bind_to(&self, target: &str) -> String {
+        let mut bound = target.to_string();
+        for (target, replacement) in *self {
+            bound = bound.replace(target, replacement.to_sql().as_ref());
+        }
+        bound
+    }
+}
+impl Params for [&dyn ToSql; 0] {
+    fn bind_to(&self, target: &str) -> String {
+        target.to_string()
+    }
+}
+// TODO: Figure out how to write a macro to generate code for abitrary tuple sizes
+impl<T, U, V, W> Params for ((&str, T), (&str, U), (&str, V), (&str, W))
+where
+    T: ToSql,
+    U: ToSql,
+    V: ToSql,
+    W: ToSql,
+{
+    fn bind_to(&self, target: &str) -> String {
+        // TODO: Do this in a smarter way with a smarter type/function
+        let mut bound = target.replace(self.0 .0, self.0 .1.to_sql().as_ref());
+        bound = bound.replace(self.1 .0, self.1 .1.to_sql().as_ref());
+        bound = bound.replace(self.2 .0, self.2 .1.to_sql().as_ref());
+        bound = bound.replace(self.3 .0, self.3 .1.to_sql().as_ref());
+        bound
+    }
+}
+
+trait ToSql {
+    fn to_sql(&self) -> String;
+}
+impl ToSql for String {
+    fn to_sql(&self) -> String {
+        format!("'{}'", self)
+    }
+}
+impl ToSql for &str {
+    fn to_sql(&self) -> String {
+        format!("'{}'", self)
+    }
+}
+impl ToSql for f64 {
+    fn to_sql(&self) -> String {
+        format!("{:}", self)
+    }
+}
+impl ToSql for i64 {
+    fn to_sql(&self) -> String {
+        self.to_string()
+    }
+}
+impl ToSql for u64 {
+    fn to_sql(&self) -> String {
+        self.to_string()
+    }
+}
+impl ToSql for usize {
+    fn to_sql(&self) -> String {
+        self.to_string()
     }
 }

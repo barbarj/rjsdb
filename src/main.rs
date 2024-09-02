@@ -1,11 +1,14 @@
 use std::path::Path;
 
-use rjsdb::{generate::RNG, repl::Repl, Database, TableKnowledge, Transaction};
+use rjsdb::{
+    generate::{Generate, RNG},
+    repl::Repl,
+    Database, TableKnowledge, Transaction,
+};
 
 // TODO:
 // - missing stuff to support my RSS feed
 //   - wrapper 'library'
-//      - prepared statements (with replacement tags)
 //      - better 'swizzling' (basically, have some fromSQL trait to convert from DbValue to inferred destitnation type),
 //        wrap that in row.extract_val or something
 //      - try and make ReturnedRows still an iterable somehow.
@@ -48,19 +51,44 @@ fn gen_rows(count: usize, table_name: &str, tx: &mut Transaction, rng: &mut RNG)
     }
 }
 
+fn test_prepare_gen_rows(count: usize, tx: &mut Transaction, rng: &mut RNG) {
+    for _ in 0..count {
+        let stmt = "INSERT INTO the_mf_table (id, foo, bar, baz) VALUES (:id, :foo, :bar, :baz);";
+        // let params = [
+        //     (":id", i64::generate(rng)),
+        //     (":foo", String::generate(rng)),
+        //     (":bar", i64::generate(rng)),
+        //     (":baz", f64::generate(rng)),
+        // ];
+        tx.prepare(stmt)
+            .unwrap()
+            .execute((
+                (":id", i64::generate(rng)),
+                (":foo", String::generate(rng)),
+                (":bar", i64::generate(rng)),
+                (":baz", f64::generate(rng)),
+            ))
+            .unwrap();
+    }
+}
+
 fn main() {
     let path = Path::new("db.db");
     let mut db = Database::init(path).unwrap();
 
+    let mut rng = RNG::new();
     if !db.table_exists("the_mf_table") {
         let create_table =
             "CREATE TABLE IF NOT EXISTS the_mf_table (id integer primary key, foo string, bar integer, baz float);";
         db.execute(create_table).unwrap();
-        let mut rng = RNG::new();
         let mut tx = db.transaction().unwrap();
         gen_rows(30, "the_mf_table", &mut tx, &mut rng);
         tx.commit().unwrap();
     }
+    // println!("{}", db.table_schema("the_mf_table").unwrap());
+    let mut tx = db.transaction().unwrap();
+    test_prepare_gen_rows(10, &mut tx, &mut rng);
+    tx.commit().unwrap();
 
     let mut repl = Repl::new();
     repl.run(&mut db).unwrap();

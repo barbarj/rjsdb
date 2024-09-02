@@ -249,7 +249,7 @@ impl Repl {
             if line.trim() == "exit;" {
                 break;
             }
-            match tx.prepare(&line)?.execute() {
+            match tx.prepare(&line)?.execute([]) {
                 Err(err) => println!("{err:?}"),
                 Ok(DatabaseResult::Ok) => println!("ok"),
                 Ok(DatabaseResult::NothingToDo) => (),

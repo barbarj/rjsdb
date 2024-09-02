@@ -7,3 +7,6 @@
 - Make repl use scientific notation to display floats
 - numeric type coercion for select and insert statements
 - get delete statements working
+
+# 2024-09-02
+- prepared statements (with replacement tags)
