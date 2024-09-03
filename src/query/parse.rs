@@ -1187,6 +1187,21 @@ mod parser_tests {
         _ = Parser::build(tokens).unwrap().parse().unwrap();
     }
 
+    #[test]
+    fn escaped_nested_quotes_are_safe() {
+        let input = "INSERT INTO posts(link, title, date, author) VALUES(\"http://thorstenball.com/blog/2019/04/09/learn-more-programming-languages/\", \"Learn more programming languages, even if you won\\\"t use them\", \"2019-04-09T08:30:00+00:00\", \"Thorsten Ball\") ON CONFLICT(link) DO NOTHING;";
+        let tokens = Tokenizer::new(input);
+        _ = Parser::build(tokens).unwrap().parse().unwrap();
+    }
+
+    #[test]
+    fn this_should_parse() {
+        let input =
+            "insert into the_mf_table (id, foo, bar, baz) values (21, \"foo\\\"bar\", 2, 2);";
+        let tokens = Tokenizer::new(input);
+        _ = Parser::build(tokens).unwrap().parse().unwrap();
+    }
+
     // TODO:
     // - versions of missing parts returning errors
 }

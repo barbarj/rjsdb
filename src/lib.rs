@@ -478,17 +478,17 @@ trait ToSql {
 }
 impl ToSql for String {
     fn to_sql(&self) -> String {
-        format!("\"{}\"", self)
+        format!("\"{}\"", escape_str(self))
     }
 }
 impl ToSql for &String {
     fn to_sql(&self) -> String {
-        format!("\"{}\"", self)
+        format!("\"{}\"", escape_str(self))
     }
 }
 impl ToSql for &str {
     fn to_sql(&self) -> String {
-        format!("\"{}\"", self)
+        format!("\"{}\"", escape_str(self))
     }
 }
 impl ToSql for f64 {
@@ -565,5 +565,51 @@ impl DataAccess for Row {
             None => Err(DatabaseError::RowPositionInvalid),
             Some(v) => T::from_sql(v),
         }
+    }
+}
+
+fn escape_str(input: &str) -> String {
+    let mut lookbehind = '\0';
+    let mut parts = input.split(|c| {
+        let mut res = false;
+        if c == '"' && lookbehind != '\\' {
+            res = true;
+        }
+        lookbehind = c;
+        res
+    });
+
+    let mut escaped = String::with_capacity(input.len());
+
+    // add first part so we can add escaped quotes between the rest easily
+    escaped += match parts.next() {
+        Some(part) => part,
+        None => return escaped,
+    };
+    parts.fold(escaped, |mut accum, part| {
+        accum += "\\\"";
+        accum += part;
+        accum
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_str_escapes() {
+        let input = "a \" b \" c \" d";
+        let expected = "a \\\" b \\\" c \\\" d";
+        let actual = escape_str(input);
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn escaped_str_doesnt_escaped_already_escaped() {
+        let input = "foo \\\" bar";
+        let expected = "foo \\\" bar";
+        let actual = escape_str(input);
+        assert_eq!(expected, actual);
     }
 }

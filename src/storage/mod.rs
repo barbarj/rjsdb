@@ -36,6 +36,7 @@ pub enum StorageError {
     UnkownPrimaryKeyColumn,
     UnknownColumnNameProvided,
     NonIndexedConflictColumn,
+    ReservedColumnName,
 }
 impl Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +56,7 @@ impl Display for StorageError {
             Self::NonIndexedConflictColumn => {
                 f.write_str("A non-indexed column name was provided as part of a conlict rule")
             }
+            Self::ReservedColumnName => f.write_str("A column using a reserved name was provided"),
         }
     }
 }
@@ -167,6 +169,14 @@ impl StorageLayer {
         }
         if has_duplicates(schema.columns().map(|c| c.name.as_str())) {
             return Err(StorageError::DuplicateColumnNames);
+        }
+        if schema
+            .schema
+            .keys()
+            .map(|x| x.to_lowercase())
+            .any(|x| x == "rowid")
+        {
+            return Err(StorageError::ReservedColumnName);
         }
         let table = Table::build(name, schema, primary_key_col)?;
         self.tables.push(table);

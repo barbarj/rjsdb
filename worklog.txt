@@ -23,3 +23,8 @@
 - Fix number being reported by upsert
 - get working in rss reader
 - make tokenizer recognize escapes in strings
+
+
+# 2024-09-03
+- escape all bound sql strings
+- disallow use of reserved column names ("rowid")

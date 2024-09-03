@@ -8,10 +8,11 @@ use rjsdb::{
 };
 
 // TODO:
-// - escape all sql strings
 // - fix possible integer overflow during type coercion
+//   - research how other dbs handle this
 // - transactions in repl
-// - disallow use of reserved column names ("rowid")
+//   - requires table locks,
+// - host repl on a my website
 // - add tests for parser, execution
 // - missing options for trawler testing
 // - figure out how to do read-only stuff with unmutable references
@@ -111,43 +112,43 @@ fn main() {
     // drop(prepped);
     // tx.abort().unwrap();
 
-    // let mut repl = Repl::new();
-    // repl.run(&mut db).unwrap();
+    let mut repl = Repl::new();
+    repl.run(&mut db).unwrap();
 
-    db.execute("CREATE TABLE IF NOT EXISTS _metadata(version UNSIGNED INT);")
-        .unwrap();
-    let mut tx = db.transaction().unwrap();
-    // create table
-    let rows_changed = tx
-        .execute(
-            "CREATE TABLE IF NOT EXISTS posts( \
-                link STRING PRIMARY KEY, \
-                title STRING, \
-                date STRING, \
-                author STRING \
-            );",
-        )
-        .unwrap();
-    assert_eq!(rows_changed, 0);
+    // db.execute("CREATE TABLE IF NOT EXISTS _metadata(version UNSIGNED INT);")
+    //     .unwrap();
+    // let mut tx = db.transaction().unwrap();
+    // // create table
+    // let rows_changed = tx
+    //     .execute(
+    //         "CREATE TABLE IF NOT EXISTS posts( \
+    //             link STRING PRIMARY KEY, \
+    //             title STRING, \
+    //             date STRING, \
+    //             author STRING \
+    //         );",
+    //     )
+    //     .unwrap();
+    // assert_eq!(rows_changed, 0);
 
-    tx.execute("INSERT INTO _metadata(version) VALUES(1);")
-        .unwrap();
-    tx.commit().unwrap();
+    // tx.execute("INSERT INTO _metadata(version) VALUES(1);")
+    //     .unwrap();
+    // tx.commit().unwrap();
 
-    db.execute("CREATE TABLE IF NOT EXISTS _metadata(version UNSIGNED INT);")
-        .unwrap();
+    // db.execute("CREATE TABLE IF NOT EXISTS _metadata(version UNSIGNED INT);")
+    //     .unwrap();
 
-    let version: Option<usize> = db
-        .prepare("SELECT version FROM _metadata ORDER BY version DESC LIMIT 1;")
-        .unwrap()
-        .query()
-        .unwrap()
-        .mapped(|row: &Row| {
-            let version: usize = row.get(0).unwrap();
-            Ok(version)
-        })
-        .flatten()
-        .next();
+    // let version: Option<usize> = db
+    //     .prepare("SELECT version FROM _metadata ORDER BY version DESC LIMIT 1;")
+    //     .unwrap()
+    //     .query()
+    //     .unwrap()
+    //     .mapped(|row: &Row| {
+    //         let version: usize = row.get(0).unwrap();
+    //         Ok(version)
+    //     })
+    //     .flatten()
+    //     .next();
 
-    println!("version: {version:?}");
+    // println!("version: {version:?}");
 }

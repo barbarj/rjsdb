@@ -169,7 +169,7 @@ impl<'a> Tokenizer<'a> {
         if input.is_empty() || !input.starts_with('"') {
             return None;
         }
-        let mut stop = 1;
+        let mut stop;
         let mut lookbehind = '"';
         let mut found = false;
         // skip first quote
