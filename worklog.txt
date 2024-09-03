@@ -20,3 +20,5 @@
 - Make fail if insert values don't match the provided columns and ultimately don't match the table schema
 - Fix string token spec (make it greedy)
 - Make strings use double-quotes instead
+- Fix number being reported by upsert
+- get working in rss reader

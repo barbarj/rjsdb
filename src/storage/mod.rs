@@ -215,7 +215,7 @@ impl StorageLayer {
         table_name: &str,
         rows: &[Row],
         conflict_rule: Option<ConflictRule>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let table = match self.table_mut(table_name) {
             Some(table) => table,
             None => return Err(StorageError::TableDoesNotExist),
@@ -546,7 +546,7 @@ impl Table {
         }
     }
 
-    fn insert_rows(&mut self, rows: &[Row], conflict_rule: Option<ConflictRule>) -> Result<()> {
+    fn insert_rows(&mut self, rows: &[Row], conflict_rule: Option<ConflictRule>) -> Result<usize> {
         match (&conflict_rule, &self.primary_key) {
             (Some(rule), PrimaryKey::Column { col, keyset: _ }) if rule.column != col.name => {
                 return Err(StorageError::NonIndexedConflictColumn);
@@ -557,6 +557,7 @@ impl Table {
             .map(|r| r.action)
             .unwrap_or(ConflictAction::Abort);
 
+        let mut affected_rows = 0;
         for row in rows {
             if !self.header.schema.matches(row) {
                 return Err(StorageError::SchemaDoesntMatch);
@@ -584,8 +585,9 @@ impl Table {
             }
 
             self.rows.push(storage_row);
+            affected_rows += 1;
         }
-        Ok(())
+        Ok(affected_rows)
     }
 
     fn delete_rows(&mut self, ids: &[usize]) -> Result<usize> {

@@ -175,8 +175,8 @@ impl ExecutablePlan {
             .conflict_clause
             .as_ref()
             .map(|c| c.as_conflict_rule());
-        storage.insert_rows(&insert_stmt.table, &rows, conflict_rule)?;
-        Ok(QueryResult::Ok(rows.len()))
+        let affected = storage.insert_rows(&insert_stmt.table, &rows, conflict_rule)?;
+        Ok(QueryResult::Ok(affected))
     }
 
     fn destroy<'strg>(
