@@ -8,7 +8,6 @@ use rjsdb::{
 };
 
 // TODO:
-// - get working in rss reader
 // - escape all sql strings
 // - fix possible integer overflow during type coercion
 // - transactions in repl

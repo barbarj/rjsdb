@@ -83,7 +83,7 @@ impl<'a> Token<'a> {
 
 struct SpecItem(TokenKind, Regex);
 
-const TOKEN_SPEC_LEN: usize = 43;
+const TOKEN_SPEC_LEN: usize = 41;
 pub struct Tokenizer<'a> {
     input: &'a str,
     cursor: usize,
@@ -96,6 +96,14 @@ impl<'a> Tokenizer<'a> {
             cursor: 0,
             spec: Tokenizer::spec(),
         }
+    }
+
+    fn token_identifier(input: &str) -> Option<&str> {
+        let pattern = Regex::new(r"^[^\s*,;=\(\)<>]+").unwrap();
+        if let Some(m) = pattern.find(input) {
+            return Some(m.as_str());
+        }
+        None
     }
 
     fn spec() -> [SpecItem; TOKEN_SPEC_LEN] {
@@ -149,17 +157,38 @@ impl<'a> Tokenizer<'a> {
                 Regex::new(r"^(?i)unsigned int\b").unwrap(),
             ),
             // composites
-            SpecItem(TokenKind::String, Regex::new("^\"(.*?)\"").unwrap()),
             SpecItem(
                 TokenKind::Float,
                 Regex::new(r"^-?\d+\.\d+(e-*\d+)*").unwrap(),
             ),
             SpecItem(TokenKind::Integer, Regex::new(r"^-?\d+").unwrap()),
-            SpecItem(
-                TokenKind::Identifier,
-                Regex::new(r"^[^\s*,;=\(\)<>]+").unwrap(),
-            ),
         ]
+    }
+
+    fn token_string(input: &str) -> Option<&str> {
+        if input.is_empty() || !input.starts_with('"') {
+            return None;
+        }
+        let mut stop = 1;
+        let mut lookbehind = '"';
+        let mut found = false;
+        // skip first quote
+        let mut iter = input.char_indices();
+        iter.next();
+        for (i, c) in iter {
+            stop = i;
+            if found {
+                return Some(&input[0..stop]);
+            }
+            if c == '"' && lookbehind != '\\' {
+                found = true;
+            }
+            lookbehind = c;
+        }
+        if found {
+            return Some(input);
+        }
+        None
     }
 
     fn next_token(&mut self) -> Result<Option<Token<'a>>> {
@@ -182,6 +211,15 @@ impl<'a> Tokenizer<'a> {
                 }
                 return Ok(Some(Token::new(m.as_str(), *kind)));
             }
+        }
+        if let Some(slice) = Tokenizer::token_string(input) {
+            self.cursor += slice.len();
+            let s = &slice[1..slice.len() - 1];
+            return Ok(Some(Token::new(s, TokenKind::String)));
+        }
+        if let Some(slice) = Tokenizer::token_identifier(input) {
+            self.cursor += slice.len();
+            return Ok(Some(Token::new(slice, TokenKind::Identifier)));
         }
         // This should never happen. Everything should at least match against a known
         // symbol or the Identifier TokenKind.
@@ -302,6 +340,26 @@ mod tokenizer_tests {
             Token::new("string1", TokenKind::String),
             Token::new("then", TokenKind::Identifier),
             Token::new("string2", TokenKind::String),
+        ];
+
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn respects_escaped_strings() {
+        // end-of-string
+        let input = "\"this then \\\" that\"";
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
+        let expected = vec![Token::new("this then \\\" that", TokenKind::String)];
+
+        assert_eq!(res, expected);
+
+        // not end-of-string
+        let input = "\"this then \\\" that\" foo";
+        let res: Vec<Token> = Tokenizer::new(input).tokens().to_vec().unwrap();
+        let expected = vec![
+            Token::new("this then \\\" that", TokenKind::String),
+            Token::new("foo", TokenKind::Identifier),
         ];
 
         assert_eq!(res, expected);

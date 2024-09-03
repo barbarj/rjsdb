@@ -22,3 +22,4 @@
 - Make strings use double-quotes instead
 - Fix number being reported by upsert
 - get working in rss reader
+- make tokenizer recognize escapes in strings
