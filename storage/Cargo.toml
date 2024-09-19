@@ -6,3 +6,7 @@ edition.workspace = true
 [lib]
 name = "rjsdb_storage"
 path = "lib.rs"
+
+[dependencies]
+rand = "0.8.5"
+rand_chacha = "0.3.1"

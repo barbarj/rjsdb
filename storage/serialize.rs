@@ -50,7 +50,7 @@ where
     Self: Sized,
 {
     type ExtraInfo;
-    fn from_bytes<'a>(from: &mut impl Read, extra: &'a Self::ExtraInfo) -> Result<Self>;
+    fn from_bytes(from: &mut impl Read, extra: &Self::ExtraInfo) -> Result<Self>;
 }
 
 impl Serialize for u16 {
@@ -148,11 +148,9 @@ impl Deserialize for NumericValueSign {
     fn from_bytes(from: &mut impl Read, _extra: &()) -> Result<Self> {
         let mut buf = [0; 1];
         from.read_exact(&mut buf)?;
-        match buf[0] {
-            0 => Ok(Self::Negative),
-            1 => Ok(Self::Positive),
-            2 => Ok(Self::NaN),
-            _ => Err(SerdeError::InvalidInputs),
+        match NumericValueSign::from_number(buf[0]) {
+            Some(sign) => Ok(sign),
+            None => Err(SerdeError::InvalidInputs),
         }
     }
 }
@@ -273,5 +271,52 @@ impl Deserialize for Row {
             data,
             schema: schema.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use crate::{generate::RNG, NumericCfg};
+
+    use super::*;
+
+    #[test]
+    fn basic_test() {
+        let mut rng = RNG::from_seed(42);
+        let numeric_cfg = Rc::new(NumericCfg {
+            max_precision: 10,
+            max_scale: 5,
+        });
+        let char_size = 5;
+        let schema = Rc::new(vec![
+            DbType::Numeric(numeric_cfg),
+            DbType::Integer,
+            DbType::Varchar,
+            DbType::Char(char_size),
+            DbType::Double,
+            DbType::Timestamp,
+        ]);
+        let mut rows = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let row = Row {
+                data: schema
+                    .iter()
+                    .map(|t| t.as_generated_value(&mut rng))
+                    .collect(),
+                schema: schema.clone(),
+            };
+            rows.push(row);
+        }
+
+        let mut bytes = Vec::new();
+        for row in rows.iter() {
+            row.write_to_bytes(&mut bytes).unwrap();
+        }
+        let mut reader = &bytes[..];
+        let read_rows: Vec<Row> = (0..3)
+            .map(|_| Row::from_bytes(&mut reader, &schema).unwrap())
+            .collect();
+
+        assert_eq!(rows, read_rows);
     }
 }
