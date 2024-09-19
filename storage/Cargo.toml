@@ -1,0 +1,8 @@
+[package]
+name = "rjsdb_storage"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "rjsdb_storage"
+path = "lib.rs"

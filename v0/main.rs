@@ -10,11 +10,10 @@ use rjsdb::{
 // TODO:
 // - fix possible integer overflow during type coercion
 //   - research how other dbs handle this
+// - add tests for parser, execution
 // - transactions in repl
 //   - requires table locks,
 // - host repl on a my website
-// - add tests for parser, execution
-// - missing options for trawler testing
 // - figure out how to do read-only stuff with unmutable references
 // - "stackable"/"traversable" errors when in dev build
 // - better data structure for representing schema/primary key/etc, to allow:
@@ -30,6 +29,7 @@ fn wrapped_join<'a>(input: impl Iterator<Item = &'a str>) -> String {
         str += item;
         str += ", ";
     }
+
     // remove the last ', '
     _ = str.pop();
     _ = str.pop();

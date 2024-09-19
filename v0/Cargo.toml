@@ -1,0 +1,16 @@
+[package]
+name = "rjsdb_v0"
+version.workspace = true
+version.edition = true
+
+[lib]
+name = "rjsdb_v0"
+path = "lib.rs"
+
+[dependencies]
+chrono = { version = "0.4.38", features = ["serde"] }
+console = "0.15.8"
+rand = "0.8.5"
+rand_chacha = "0.3.1"
+regex = "1.10.6"
+serde = { version = "1.0.205", features = ["derive"] }

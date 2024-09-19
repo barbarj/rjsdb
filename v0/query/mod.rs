@@ -11,6 +11,7 @@ pub mod tokenize; // TODO: make not public
 pub use execute::QueryResult;
 pub use execute::ResultRows;
 
+
 #[derive(Debug)]
 pub enum QueryError {
     StorageError(StorageError),
@@ -33,6 +34,7 @@ pub fn execute<'strg>(
     command: &str,
     storage: &'strg mut StorageLayer,
 ) -> Result<QueryResult<'strg>> {
+    
     let tokenizer = Tokenizer::new(command);
     let plan = Parser::build(tokenizer)?.parse()?;
     let executable_plan = ExecutablePlan::new(plan);

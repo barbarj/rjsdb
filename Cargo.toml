@@ -1,12 +1,7 @@
-[package]
+[workspace]
+members = ["storage"]
+
+[workspace.package]
 name = "rjsdb"
 version = "0.1.0"
 edition = "2021"
-
-[dependencies]
-chrono = { version = "0.4.38", features = ["serde"] }
-console = "0.15.8"
-rand = "0.8.5"
-rand_chacha = "0.3.1"
-regex = "1.10.6"
-serde = { version = "1.0.205", features = ["derive"] }
