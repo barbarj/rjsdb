@@ -125,7 +125,7 @@ impl Deserialize for String {
     type ExtraInfo = ();
     fn from_bytes(from: &mut impl Read, _extra: &()) -> Result<Self> {
         let size = u64::from_bytes(from, &())? as usize;
-        let mut buf = Vec::with_capacity(size);
+        let mut buf = vec![0; size];
         from.read_exact(&mut buf)?;
         let res = String::from_utf8(buf)?;
         Ok(res)
@@ -195,14 +195,14 @@ impl Deserialize for NumericValue {
 
 impl Serialize for Char {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
-        self.v.write_to_bytes(dest)?;
+        dest.write_all(self.v.as_bytes())?;
         Ok(())
     }
 }
 impl Deserialize for Char {
     type ExtraInfo = u32; // string size
     fn from_bytes(from: &mut impl Read, size: &u32) -> Result<Self> {
-        let mut buf = Vec::with_capacity(*size as usize);
+        let mut buf = vec![0; *size as usize];
         from.read_exact(&mut buf)?;
         let res = String::from_utf8(buf)?;
         Ok(Char { v: res })
@@ -281,7 +281,39 @@ mod serde_tests {
     use super::*;
 
     #[test]
-    fn basic_test() {
+    fn integer_serde() {
+        let input = DbValue::Integer(553239);
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Integer).unwrap();
+        assert_eq!(input, read);
+    }
+
+    #[test]
+    fn varchar_serde() {
+        let input = DbValue::Varchar("This is a String".to_string());
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Varchar).unwrap();
+        assert_eq!(input, read);
+    }
+
+    #[test]
+    fn char_serde() {
+        let input = DbValue::Char(Char {
+            v: "foobar".to_string(),
+        });
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Char(6)).unwrap();
+        assert_eq!(input, read);
+    }
+
+    #[test]
+    fn rows_serde() {
         let mut rng = RNG::from_seed(42);
         let numeric_cfg = Rc::new(NumericCfg {
             max_precision: 10,

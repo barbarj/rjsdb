@@ -144,6 +144,7 @@ pub enum DbType {
     Timestamp,
 }
 impl DbType {
+    #[allow(dead_code)]
     fn as_generated_value(&self, rng: &mut RNG) -> DbValue {
         match self {
             DbType::Numeric(_) => DbValue::Numeric(NumericValue::generate(rng)),
