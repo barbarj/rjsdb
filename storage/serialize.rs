@@ -281,6 +281,26 @@ mod serde_tests {
     use super::*;
 
     #[test]
+    fn numeric_serde() {
+        let numeric = NumericValue {
+            total_digits: 12,
+            first_group_weight: 8,
+            sign: NumericValueSign::Positive,
+            digits: vec![1234, 1234, 1234],
+        };
+        let cfg = Rc::new(NumericCfg {
+            max_scale: 12,
+            max_precision: 8,
+        });
+        let input = DbValue::Numeric(numeric);
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Numeric(cfg)).unwrap();
+        assert_eq!(input, read);
+    }
+
+    #[test]
     fn integer_serde() {
         let input = DbValue::Integer(553239);
         let mut bytes = Vec::new();
@@ -313,8 +333,28 @@ mod serde_tests {
     }
 
     #[test]
+    fn double_serde() {
+        let input = DbValue::Double(83.2191290);
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Double).unwrap();
+        assert_eq!(input, read);
+    }
+
+    #[test]
+    fn timestamp_serde() {
+        let input = DbValue::Timestamp(Timestamp { v: 12319491 });
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+        let mut reader = &bytes[..];
+        let read = DbValue::from_bytes(&mut reader, &DbType::Timestamp).unwrap();
+        assert_eq!(input, read);
+    }
+    #[test]
     fn rows_serde() {
-        let mut rng = RNG::from_seed(42);
+        let seed = rand::random();
+        let mut rng = RNG::from_seed(seed);
         let numeric_cfg = Rc::new(NumericCfg {
             max_precision: 10,
             max_scale: 5,
@@ -349,6 +389,8 @@ mod serde_tests {
             .map(|_| Row::from_bytes(&mut reader, &schema).unwrap())
             .collect();
 
-        assert_eq!(rows, read_rows);
+        if rows != read_rows {
+            panic!("Failed with a seed of {}", seed);
+        }
     }
 }
