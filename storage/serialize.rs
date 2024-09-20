@@ -42,10 +42,10 @@ impl From<string::FromUtf8Error> for SerdeError {
 
 type Result<T> = std::result::Result<T, SerdeError>;
 
-trait Serialize {
+pub trait Serialize {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()>;
 }
-trait Deserialize
+pub trait Deserialize
 where
     Self: Sized,
 {
@@ -65,6 +65,21 @@ impl Deserialize for u16 {
         let mut buf = [0; 2];
         from.read_exact(&mut buf)?;
         Ok(u16::from_be_bytes(buf))
+    }
+}
+
+impl Serialize for u32 {
+    fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
+        dest.write_all(&self.to_be_bytes())?;
+        Ok(())
+    }
+}
+impl Deserialize for u32 {
+    type ExtraInfo = ();
+    fn from_bytes(from: &mut impl Read, _extra: &()) -> Result<Self> {
+        let mut buf = [0; 4];
+        from.read_exact(&mut buf)?;
+        Ok(u32::from_be_bytes(buf))
     }
 }
 

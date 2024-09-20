@@ -8,12 +8,14 @@ use generate::{Generate, RNG};
 /*
  * Goal: Paging System
  * Subgoals:
- * - Get row disk format figured out, and be able to read and write rows
+ * [x]Get row disk format figured out, and be able to read and write rows
  *   to a byte buffer arbitrarily
  * - Get page data structure working. Be able to interact with data in page
  *   - header fields
  *   - slotted page setup
  *   - see if I can map bytes directly to/from struct (will need to think about struct padding)
+ *   - Write a bunch of rows, read them all back
+ *   - Write a bunch of rows, get a specific row back
  * - Read/Write pages from/to disk
  *   - block-device interface interaction
  * - For a page cache smaller than total number of pages, implement LRU rules
@@ -21,8 +23,10 @@ use generate::{Generate, RNG};
  */
 
 mod generate; // TODO: This should probably be its own crate??
+mod pager;
 mod serialize;
 
+#[derive(Debug)]
 pub enum StorageError {
     IoError(io::Error),
 }
