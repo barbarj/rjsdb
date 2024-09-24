@@ -11,10 +11,10 @@ use generate::{Generate, RNG};
  * [x]Get row disk format figured out, and be able to read and write rows
  *   to a byte buffer arbitrarily
  * - Get page data structure working. Be able to interact with data in page
- *   - header fields
- *   - slotted page setup
+ *   [x] header fields
+ *   [x] slotted page setup
  *   - see if I can map bytes directly to/from struct (will need to think about struct padding)
- *   - Write a bunch of rows, read them all back
+ *   [x] Write a bunch of rows, read them all back
  *   - Write a bunch of rows, get a specific row back
  * - Read/Write pages from/to disk
  *   - block-device interface interaction
@@ -85,7 +85,7 @@ pub struct NumericValue {
 impl Generate for NumericValue {
     // TODO: Make this take into account a NumericCfg
     fn generate(rng: &mut RNG) -> Self {
-        let total_digits = u16::generate(rng);
+        let total_digits = u16::generate(rng) % 100; // TODO: Undo this modulo later?
         let first_group_weight = u16::generate(rng);
         let sign = NumericValueSign::generate(rng);
         let mut digits = Vec::with_capacity(total_digits.into());
@@ -156,6 +156,9 @@ impl DbType {
             DbType::Varchar => DbValue::Varchar(String::generate(rng)),
             DbType::Char(size) => {
                 let mut s = String::generate(rng);
+                while s.len() < *size as usize {
+                    s = String::generate(rng);
+                }
                 s.truncate(*size as usize);
                 DbValue::Char(Char { v: s })
             }

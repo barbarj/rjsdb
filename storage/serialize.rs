@@ -295,6 +295,35 @@ mod serde_tests {
 
     use super::*;
 
+    fn gen_rows(seed: u64, count: usize) -> (Vec<Row>, Rc<Schema>) {
+        let mut rng = RNG::from_seed(seed);
+        let numeric_cfg = Rc::new(NumericCfg {
+            max_precision: 10,
+            max_scale: 5,
+        });
+        let char_size = 5;
+        let schema = Rc::new(vec![
+            DbType::Numeric(numeric_cfg),
+            DbType::Integer,
+            DbType::Varchar,
+            DbType::Char(char_size),
+            DbType::Double,
+            DbType::Timestamp,
+        ]);
+        let mut rows = Vec::with_capacity(3);
+        for _ in 0..count {
+            let row = Row {
+                data: schema
+                    .iter()
+                    .map(|t| t.as_generated_value(&mut rng))
+                    .collect(),
+                schema: schema.clone(),
+            };
+            rows.push(row);
+        }
+        (rows, schema)
+    }
+
     #[test]
     fn numeric_serde() {
         let numeric = NumericValue {
@@ -366,35 +395,12 @@ mod serde_tests {
         let read = DbValue::from_bytes(&mut reader, &DbType::Timestamp).unwrap();
         assert_eq!(input, read);
     }
+
     #[test]
     fn rows_serde() {
         let seed = rand::random();
-        let mut rng = RNG::from_seed(seed);
-        let numeric_cfg = Rc::new(NumericCfg {
-            max_precision: 10,
-            max_scale: 5,
-        });
-        let char_size = 5;
-        let schema = Rc::new(vec![
-            DbType::Numeric(numeric_cfg),
-            DbType::Integer,
-            DbType::Varchar,
-            DbType::Char(char_size),
-            DbType::Double,
-            DbType::Timestamp,
-        ]);
-        let mut rows = Vec::with_capacity(3);
-        for _ in 0..3 {
-            let row = Row {
-                data: schema
-                    .iter()
-                    .map(|t| t.as_generated_value(&mut rng))
-                    .collect(),
-                schema: schema.clone(),
-            };
-            rows.push(row);
-        }
-
+        eprintln!("rows_serde seed: {seed}");
+        let (rows, schema) = gen_rows(seed, 3);
         let mut bytes = Vec::new();
         for row in rows.iter() {
             row.write_to_bytes(&mut bytes).unwrap();
@@ -403,9 +409,21 @@ mod serde_tests {
         let read_rows: Vec<Row> = (0..3)
             .map(|_| Row::from_bytes(&mut reader, &schema).unwrap())
             .collect();
+        assert_eq!(rows, read_rows, "Failed with a seed of {seed}");
+    }
 
-        if rows != read_rows {
-            panic!("Failed with a seed of {}", seed);
+    #[test]
+    fn rows_serde_seed_6353502865089776558() {
+        let seed = 6353502865089776558;
+        let (rows, schema) = gen_rows(seed, 3);
+        let mut bytes = Vec::new();
+        for row in rows.iter() {
+            row.write_to_bytes(&mut bytes).unwrap();
         }
+        let mut reader = &bytes[..];
+        let read_rows: Vec<Row> = (0..3)
+            .map(|i| Row::from_bytes(&mut reader, &schema).unwrap())
+            .collect();
+        assert_eq!(rows, read_rows, "Failed with a seed of {seed}");
     }
 }
