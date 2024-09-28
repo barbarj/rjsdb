@@ -11,19 +11,21 @@ use generate::{Generate, RNG};
  * [x]Get row disk format figured out, and be able to read and write rows
  *   to a byte buffer arbitrarily
  * - Get page data structure working. Be able to interact with data in page
- *   [x] header fields
- *   [x] slotted page setup
+ *   [] header fields
+ *   [] slotted page setup
  *   - see if I can map bytes directly to/from struct (will need to think about struct padding)
- *   [x] Write a bunch of rows, read them all back
- *   - Write a bunch of rows, get a specific row back
+ *   [] Write a bunch of rows, read them all back
  * - Read/Write pages from/to disk
  *   - block-device interface interaction
+ * - Implement smarter cell placement (check empty cells first) via maintaining an availability
+ *   list
  * - For a page cache smaller than total number of pages, implement LRU rules
  * - Ability to pin pages
  */
 
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
+mod pager2;
 mod serialize;
 
 #[derive(Debug)]
