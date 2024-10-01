@@ -3,6 +3,7 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     io::{Error as IoError, Write},
     mem,
+    ops::Range,
 };
 
 use crate::serialize::{Deserialize, SerdeError, Serialize};
@@ -66,16 +67,23 @@ const PAGE_DATA_SIZE: PageBufferOffset = 4096 * 4; // 16KB
 const PAGE_BUFFER_SIZE: PageBufferOffset =
     PAGE_DATA_SIZE - mem::size_of::<PageHeader>() as PageBufferOffset;
 const HEADER_VERSION: u8 = 1;
-const ALIGNMENT_GUARD_VALUE: u32 = 0; // TODO: Make this the int value of bytes 'P', 'A', 'G', 'E'
-                                      //
+// the byte values spell PAGE
+const ALIGNMENT_GUARD_VALUE: u32 = u32::from_be_bytes([50, 41, 47, 45]);
+const CELL_POINTER_SIZE: u16 = mem::size_of::<CellPointer>() as u16;
 
 enum PageError {
-    Io(IoError),
+    IoError(IoError),
+    SerdeError(SerdeError),
     NotEnoughSpace,
 }
 impl From<IoError> for PageError {
     fn from(value: IoError) -> Self {
-        Self::Io(value)
+        Self::IoError(value)
+    }
+}
+impl From<SerdeError> for PageError {
+    fn from(value: SerdeError) -> Self {
+        Self::SerdeError(value)
     }
 }
 
@@ -130,17 +138,17 @@ enum PageKind {
 #[repr(C)]
 struct PageHeader {
     // comments: size, end-of-this-field-with-padding in layout
-    checksum: u64,                         // 8, 8
-    header_version: u8,                    // 1, 9
-    flags: PageFlags,                      // 1, 10
-    page_kind: PageKind,                   // 1, 12
-    alignment_guard: u32,                  // 4, 16
-    page_id: PageId,                       // 8, 24
-    overflow_page_id: Option<PageId>,      // 16, 40
-    cell_count: u16,                       // 2, 42
-    right_most_free_position: Option<u16>, // 4, 46
-    free_space_start: PageBufferOffset,    // 2, 48
-    free_space_end: PageBufferOffset,      // 2, 56
+    checksum: u64,                      // 8, 8
+    header_version: u8,                 // 1, 9
+    flags: PageFlags,                   // 1, 10
+    page_kind: PageKind,                // 1, 12
+    alignment_guard: u32,               // 4, 16
+    page_id: PageId,                    // 8, 24
+    overflow_page_id: Option<PageId>,   // 16, 40
+    cell_count: u16,                    // 2, 42
+    free_space_start: PageBufferOffset, // 2, 44
+    free_space_end: PageBufferOffset,   // 2, 46
+    total_free_space: PageBufferOffset, // 2, 48
 }
 
 #[repr(C)]
@@ -149,10 +157,15 @@ struct PageBuffer {
 }
 impl PageBuffer {
     fn write_to(&mut self, offset: PageBufferOffset, data: &[u8]) -> Result<(), PageError> {
-        let offset = offset as usize;
-        let mut writer = &mut self.data[offset..offset + data.len()];
+        let mut writer = self.get_writer(offset, data.len());
         writer.write_all(data)?;
         Ok(())
+    }
+
+    fn get_writer(&mut self, offset: PageBufferOffset, data_size: usize) -> impl Write + '_ {
+        let offset = offset as usize;
+        let size = data_size as usize;
+        &mut self.data[offset..offset + size]
     }
 }
 
@@ -164,15 +177,15 @@ struct Page {
 impl Page {
     fn new(id: PageId, kind: PageKind) -> Self {
         let header = PageHeader {
-            checksum: unimplemented!(),
+            checksum: todo!(),
             header_version: HEADER_VERSION,
             flags: PageFlags { flags: 0 },
             cell_count: 0,
-            right_most_free_position: None,
             page_kind: kind,
             alignment_guard: ALIGNMENT_GUARD_VALUE,
             free_space_start: 0,
             free_space_end: PAGE_BUFFER_SIZE,
+            total_free_space: PAGE_BUFFER_SIZE,
             page_id: id,
             overflow_page_id: None,
         };
@@ -194,41 +207,15 @@ impl Page {
     }
 }
 
-enum CellPointerDecision {
-    // use_idx, range_end_inclusive_idx
-    UseExistingSlotWithMove(u16, u16),
-    // use_idx
-    UseExistingSlotNoMove(u16),
-    UseNewSlot,
-}
-
-struct AvailableSpaceRef<'a> {
-    list: &'a mut Vec<AvailableSpace>,
-    index: usize,
-}
-impl<'a> AvailableSpaceRef<'a> {
-    fn take(self) -> AvailableSpace {
-        self.list.swap_remove(self.index)
-    }
-
-    fn space(&self) -> &AvailableSpace {
-        self.list.get(self.index).unwrap()
-    }
-}
-
-enum CellDecision<'a> {
-    UseExistingSlot(AvailableSpaceRef<'a>),
-    UseNewSlot,
-}
-
 impl Page {
     fn insert_cell(
         &mut self,
         cell_position: u16, // must be <= cell count
         data: &[u8],
-        availability_list: &mut AvailabilityList,
-    ) -> Result<u8, PageError> {
+    ) -> Result<u16, PageError> {
         let data_size: PageBufferOffset = data.len().try_into().unwrap();
+        // Going to not use an availability_list, and instead track total free space. If there is
+        // enough total space, but not enough space in the free area, the page will be defragged
 
         // TODO: Confirm we have sufficient space before modifying anything.
         // states:
@@ -278,142 +265,81 @@ impl Page {
         // - write new cell pointer to cell pointer dest
         // - write new cell to cell dest
 
-        // verify we have room for the cell pointer
-        let cell_pointer_size: u16 = mem::size_of::<CellPointer>().try_into().unwrap();
-        let pointer_decision = match self.header.right_most_free_position {
-            Some(rightmost) if rightmost > cell_position => {
-                // TODO: Replace use of rightmost free position with the minimum free slot in
-                // (cell_position, rightmost]
-                CellPointerDecision::UseExistingSlotWithMove(cell_position, rightmost)
-            }
-            Some(rightmost) if rightmost == cell_position => {
-                CellPointerDecision::UseExistingSlotNoMove(cell_position)
-            }
-            _ => {
-                if self.header.free_space_end - self.header.free_space_start < cell_pointer_size {
-                    return Err(PageError::NotEnoughSpace);
-                }
-                CellPointerDecision::UseNewSlot
-            }
-        };
-        let cell_decision = match availability_list.get_best_fit(self.header.page_id, data_size) {
-            Some(space_ref) => CellDecision::UseExistingSlot(space_ref),
-            None => {
-                let mut required = data_size;
-                match pointer_decision {
-                    CellPointerDecision::UseExistingSlotWithMove(_, _)
-                    | CellPointerDecision::UseNewSlot => {
-                        required += cell_pointer_size;
-                    }
-                    _ => {}
-                }
-                if self.header.free_space_end - self.header.free_space_start < required {
-                    return Err(PageError::NotEnoughSpace);
-                }
-                CellDecision::UseNewSlot
-            }
-        };
+        // verify we have room for the cell pointer + data
+        let total_space_needed = CELL_POINTER_SIZE + data_size;
+        if self.header.total_free_space < total_space_needed {
+            return Err(PageError::NotEnoughSpace);
+        }
+        if self.header.free_space_end - self.header.free_space_start < total_space_needed {
+            self.defragment()?;
+        }
+        let cell_end = self.header.free_space_end;
 
-        // update cell pointers
-        // - move cells at and to the right of cell_position over 1.
-        // - write new cell pointer
-        // - update free_space_start
+        // write pointer
+        self.shift_pointers_write_starting_at(cell_position);
+        let cell_pointer = CellPointer {
+            end_position: cell_end,
+            size: data_size,
+        };
+        let mut pointer_writer = self
+            .data
+            .get_writer(self.header.free_space_start, CELL_POINTER_SIZE as usize);
+        cell_pointer.write_to_bytes(&mut pointer_writer)?;
+        drop(pointer_writer);
+        self.header.cell_count += 1;
+        self.header.free_space_start += CELL_POINTER_SIZE;
+
+        //write data
+        let write_start = cell_end - data_size;
+        self.data.write_to(write_start, data)?;
+        self.header.free_space_end -= data_size;
+
+        self.header.total_free_space -= total_space_needed;
+
+        // Okay, now we can actual act and change things
+        Ok(cell_position)
+    }
+
+    fn remove_cell(&mut self, cell_position: u8) {
         unimplemented!();
     }
 
-    fn remove_cell(&mut self, cell_position: u8, availability_list: &mut AvailabilityList) {
+    fn defragment(&mut self) -> Result<(), PageError> {
+        self.header.free_space_end = PAGE_BUFFER_SIZE;
+        for i in 0..self.header.cell_count {
+            let offset_start = (i * CELL_POINTER_SIZE) as usize;
+            let offset_size = CELL_POINTER_SIZE as usize;
+            let pointer_slice: [u8; CELL_POINTER_SIZE as usize] = self.data.data
+                [offset_start..offset_start + offset_size]
+                .try_into()
+                .unwrap();
+            unsafe {
+                let pointer: CellPointer = mem::transmute(pointer_slice);
+                let cell_start = pointer.end_position - pointer.size;
+                let dest_start = (self.header.free_space_end - pointer.size).into();
+                let src_range: Range<usize> = cell_start.into()..pointer.end_position.into();
+                self.data.data.copy_within(src_range, dest_start);
+                self.header.free_space_end -= pointer.size;
+            }
+        }
         unimplemented!();
     }
-}
 
-#[derive(Debug, PartialEq)]
-struct AvailableSpace {
-    end_position: PageBufferOffset,
-    size: PageBufferOffset,
-}
-impl AvailableSpace {
-    fn new(end_position: PageBufferOffset, size: PageBufferOffset) -> Self {
-        AvailableSpace { end_position, size }
-    }
-}
-struct AvailabilityList {
-    // TODO: This is probably better represented as a heap instead of a vec, since we'll be doing a
-    // best_fit search of the list often (or at least use a deque or something)
-    available_space: HashMap<PageId, Vec<AvailableSpace>>,
-}
-impl AvailabilityList {
-    fn new() -> Self {
-        AvailabilityList {
-            available_space: HashMap::new(),
+    fn shift_pointers_write_starting_at(&mut self, cell_position: u16) {
+        assert!(cell_position <= self.header.cell_count);
+        if cell_position == self.header.cell_count {
+            // no pointers need to be moved
+            return;
         }
-    }
-
-    fn add_space(&mut self, page_id: PageId, space: AvailableSpace) {
-        let list = match self.available_space.entry(page_id) {
-            Entry::Vacant(v) => v.insert(Vec::new()),
-            Entry::Occupied(o) => o.into_mut(),
-        };
-        list.push(space);
-    }
-
-    /// # Panics:
-    /// - if called for a page not in the availability list, as this likely represents a bug
-    /// - if the page is in the list, but there is no entry with the provided end position
-    fn remove_space(&mut self, page_id: PageId, space_end_position: PageBufferOffset) {
-        let list = match self.available_space.entry(page_id) {
-            Entry::Vacant(_) => {
-                panic!("Called remove_space for a page id not in this AvailabilityList")
-            }
-            Entry::Occupied(o) => o.into_mut(),
-        };
-
-        let (index_to_remove, _) = list
-            .iter()
-            .enumerate()
-            .find(|(_idx, i)| i.end_position == space_end_position)
-            .expect("Tried to remove an entry that does not exist.");
-        list.swap_remove(index_to_remove);
-    }
-
-    /// Searches the list for this page for the available space with the best fit given the
-    /// provided size. If found, removes that entry from the list and returns Some(AvailableSpace),
-    /// otherwise returns none
-    fn get_best_fit<'a>(
-        &'a mut self,
-        page_id: PageId,
-        size: PageBufferOffset,
-    ) -> Option<AvailableSpaceRef<'a>> {
-        let list: &'a mut Vec<AvailableSpace> = match self.available_space.entry(page_id) {
-            Entry::Vacant(_) => return None,
-            Entry::Occupied(o) => o.into_mut(),
-        };
-
-        let max = list
-            .iter()
-            .enumerate()
-            .filter(|(_, space)| space.size >= size)
-            .min_by_key(|(_, space)| space.size);
-        if max.is_none() {
-            None
-        } else {
-            let index = max.unwrap().0;
-            Some(AvailableSpaceRef { list, index })
+        let slice_start = (cell_position * CELL_POINTER_SIZE) as usize;
+        let slice_end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
+        let slice = &mut self.data.data[slice_start..slice_end];
+        // TODO: Unsure if I should do this with memcopy instead?
+        for i in slice_end - 1..slice_start {
+            // copy one byte at a time, safely because we're not overwriting any yet-to-be-copied
+            // data
+            slice[i] = slice[i - 1];
         }
-    }
-
-    fn drop_page(&mut self, page_id: PageId) {
-        self.available_space.remove(&page_id);
-    }
-
-    /// This is meant for adding an entire page efficiently, i.e. all at once. If you need to only
-    /// add an entry or two, use add_space
-    fn add_page(&mut self, page: &Page) {
-        assert!(
-            !self.available_space.contains_key(&page.header.page_id),
-            "Called add_page for a page already in the availability list"
-        );
-        // TODO: Implement after I've sorted out the page implementation
-        unimplemented!()
     }
 }
 
@@ -452,165 +378,10 @@ mod tests {
         assert_eq!(mem::size_of::<PageKind>(), 1);
         assert_eq!(mem::size_of::<Option<PageId>>(), 16);
         assert_eq!(mem::size_of::<Option<u16>>(), 4);
-        assert_eq!(mem::size_of::<PageHeader>(), 56);
+        assert_eq!(mem::size_of::<PageHeader>(), 48);
         assert_eq!(mem::size_of::<PageBuffer>(), PAGE_BUFFER_SIZE as usize);
         assert_eq!(mem::size_of::<Page>(), PAGE_DATA_SIZE as usize);
         assert_eq!(PAGE_BUFFER_SIZE % 8, 0);
         assert_eq!(mem::size_of::<CellPointer>(), 4);
-    }
-
-    #[test]
-    fn availability_list_single_page() {
-        let mut list = AvailabilityList::new();
-        list.add_space(1, AvailableSpace::new(100, 10));
-        list.add_space(1, AvailableSpace::new(80, 10));
-        list.add_space(1, AvailableSpace::new(60, 20));
-        assert_eq!(
-            &vec![
-                AvailableSpace::new(100, 10),
-                AvailableSpace::new(80, 10),
-                AvailableSpace::new(60, 20)
-            ],
-            list.available_space.get(&1).unwrap()
-        );
-
-        list.remove_space(1, 80);
-        assert_eq!(
-            &vec![AvailableSpace::new(100, 10), AvailableSpace::new(60, 20)],
-            list.available_space.get(&1).unwrap()
-        );
-        list.remove_space(1, 100);
-        assert_eq!(
-            &vec![AvailableSpace::new(60, 20)],
-            list.available_space.get(&1).unwrap()
-        );
-        list.drop_page(1);
-        assert!(!list.available_space.contains_key(&1));
-    }
-
-    #[test]
-    fn availability_list_multiple_pages() {
-        let mut list = AvailabilityList::new();
-        list.add_space(1, AvailableSpace::new(100, 10));
-        list.add_space(1, AvailableSpace::new(180, 10));
-        list.add_space(1, AvailableSpace::new(160, 20));
-        assert_eq!(
-            &vec![
-                AvailableSpace::new(100, 10),
-                AvailableSpace::new(180, 10),
-                AvailableSpace::new(160, 20)
-            ],
-            list.available_space.get(&1).unwrap()
-        );
-        list.add_space(2, AvailableSpace::new(200, 10));
-        list.add_space(2, AvailableSpace::new(280, 10));
-        list.add_space(3, AvailableSpace::new(360, 20));
-        assert_eq!(
-            &vec![
-                AvailableSpace::new(100, 10),
-                AvailableSpace::new(180, 10),
-                AvailableSpace::new(160, 20)
-            ],
-            list.available_space.get(&1).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(200, 10), AvailableSpace::new(280, 10),],
-            list.available_space.get(&2).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(360, 20),],
-            list.available_space.get(&3).unwrap()
-        );
-
-        list.remove_space(1, 180);
-        assert_eq!(
-            &vec![AvailableSpace::new(100, 10), AvailableSpace::new(160, 20)],
-            list.available_space.get(&1).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(200, 10), AvailableSpace::new(280, 10),],
-            list.available_space.get(&2).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(360, 20),],
-            list.available_space.get(&3).unwrap()
-        );
-
-        list.remove_space(2, 200);
-        assert_eq!(
-            &vec![AvailableSpace::new(100, 10), AvailableSpace::new(160, 20)],
-            list.available_space.get(&1).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(280, 10),],
-            list.available_space.get(&2).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(360, 20),],
-            list.available_space.get(&3).unwrap()
-        );
-
-        list.drop_page(1);
-        assert!(!list.available_space.contains_key(&1));
-        assert_eq!(
-            &vec![AvailableSpace::new(280, 10),],
-            list.available_space.get(&2).unwrap()
-        );
-        assert_eq!(
-            &vec![AvailableSpace::new(360, 20),],
-            list.available_space.get(&3).unwrap()
-        );
-    }
-
-    #[test]
-    fn availability_list_take_best_fit() {
-        let mut list = AvailabilityList::new();
-        list.add_space(1, AvailableSpace::new(200, 50));
-        list.add_space(1, AvailableSpace::new(150, 40));
-        list.add_space(1, AvailableSpace::new(110, 30));
-        assert_eq!(
-            &vec![
-                AvailableSpace::new(200, 50),
-                AvailableSpace::new(150, 40),
-                AvailableSpace::new(110, 30)
-            ],
-            list.available_space.get(&1).unwrap()
-        );
-
-        // prove get_best fit does not modify list until taken
-        let taken = list.get_best_fit(1, 39);
-        assert_eq!(
-            Some(&AvailableSpace::new(150, 40)),
-            taken.as_ref().map(|x| x.space())
-        );
-        assert_eq!(
-            &vec![
-                AvailableSpace::new(200, 50),
-                AvailableSpace::new(150, 40),
-                AvailableSpace::new(110, 30)
-            ],
-            list.available_space.get(&1).unwrap()
-        );
-        let taken = list.get_best_fit(1, 39).unwrap().take();
-        assert_eq!(AvailableSpace::new(150, 40), taken);
-        assert_eq!(
-            &vec![AvailableSpace::new(200, 50), AvailableSpace::new(110, 30)],
-            list.available_space.get(&1).unwrap()
-        );
-
-        // no fit
-        let taken = list.get_best_fit(1, 75);
-        assert!(taken.is_none());
-        assert_eq!(
-            &vec![AvailableSpace::new(200, 50), AvailableSpace::new(110, 30)],
-            list.available_space.get(&1).unwrap()
-        );
-
-        let taken = list.get_best_fit(1, 30).unwrap().take();
-        assert_eq!(AvailableSpace::new(110, 30), taken);
-        assert_eq!(
-            &vec![AvailableSpace::new(200, 50)],
-            list.available_space.get(&1).unwrap()
-        );
     }
 }
