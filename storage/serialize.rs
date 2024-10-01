@@ -289,6 +289,27 @@ impl Deserialize for Row {
     }
 }
 
+impl<T: Serialize> Serialize for Vec<T> {
+    fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
+        (self.len() as u64).write_to_bytes(dest)?;
+        for item in self.iter() {
+            item.write_to_bytes(dest)?;
+        }
+        Ok(())
+    }
+}
+impl<T: Deserialize<ExtraInfo = ()>> Deserialize for Vec<T> {
+    type ExtraInfo = ();
+    fn from_bytes(from: &mut impl Read, _extra: &Self::ExtraInfo) -> Result<Self> {
+        let len = u64::from_bytes(from, &())? as usize;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(T::from_bytes(from, &())?);
+        }
+        Ok(v)
+    }
+}
+
 #[cfg(test)]
 mod serde_tests {
     use crate::{generate::RNG, NumericCfg};
@@ -425,5 +446,16 @@ mod serde_tests {
             .map(|i| Row::from_bytes(&mut reader, &schema).unwrap())
             .collect();
         assert_eq!(rows, read_rows, "Failed with a seed of {seed}");
+    }
+
+    #[test]
+    fn vec_serde() {
+        let input = vec![10, 20, 30, 40, 50];
+        let mut bytes = Vec::new();
+        input.write_to_bytes(&mut bytes).unwrap();
+
+        let mut reader = &bytes[..];
+        let read_value = Vec::from_bytes(&mut reader, &()).unwrap();
+        assert_eq!(input, read_value);
     }
 }

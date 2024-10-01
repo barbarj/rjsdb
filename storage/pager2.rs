@@ -1,6 +1,5 @@
+use core::slice;
 use std::{
-    cell,
-    collections::{hash_map::Entry, HashMap},
     io::{Error as IoError, Write},
     mem,
     ops::Range,
@@ -71,6 +70,7 @@ const HEADER_VERSION: u8 = 1;
 const ALIGNMENT_GUARD_VALUE: u32 = u32::from_be_bytes([50, 41, 47, 45]);
 const CELL_POINTER_SIZE: u16 = mem::size_of::<CellPointer>() as u16;
 
+#[derive(Debug)]
 enum PageError {
     IoError(IoError),
     SerdeError(SerdeError),
@@ -177,7 +177,7 @@ struct Page {
 impl Page {
     fn new(id: PageId, kind: PageKind) -> Self {
         let header = PageHeader {
-            checksum: todo!(),
+            checksum: 0,
             header_version: HEADER_VERSION,
             flags: PageFlags { flags: 0 },
             cell_count: 0,
@@ -194,7 +194,17 @@ impl Page {
             data: [0; PAGE_BUFFER_SIZE as usize],
         };
 
-        Page { header, data }
+        let mut page = Page { header, data };
+        page.header.checksum = page.calc_checksum();
+        page
+    }
+
+    fn calc_checksum(&self) -> u64 {
+        unsafe {
+            let bytes =
+                slice::from_raw_parts((self as *const Page) as *const u8, mem::size_of::<Page>());
+            checksum(&bytes[8..]).unwrap()
+        }
     }
 
     // TODO: Fix the error type
@@ -232,9 +242,10 @@ impl Page {
             end_position: cell_end,
             size: data_size,
         };
-        let mut pointer_writer = self
-            .data
-            .get_writer(self.header.free_space_start, CELL_POINTER_SIZE as usize);
+        let mut pointer_writer = self.data.get_writer(
+            CELL_POINTER_SIZE * cell_position,
+            CELL_POINTER_SIZE as usize,
+        );
         cell_pointer.write_to_bytes(&mut pointer_writer)?;
         drop(pointer_writer);
         self.header.cell_count += 1;
@@ -254,9 +265,11 @@ impl Page {
     fn remove_cell(&mut self, cell_position: u16) {
         assert!(self.header.cell_count > 0);
         assert!(cell_position < self.header.cell_count);
+        let ptr = self.get_cell_pointer(cell_position);
         self.remove_pointer(cell_position);
         self.header.cell_count -= 1;
         self.header.free_space_start -= CELL_POINTER_SIZE;
+        self.header.total_free_space += ptr.size + CELL_POINTER_SIZE;
         self.header.flags.set_dirty(true);
         self.header.flags.set_compactible(true);
     }
@@ -282,7 +295,8 @@ impl Page {
         }
         let start = (cell_position * CELL_POINTER_SIZE) as usize;
         let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
-        self.data.data.copy_within(start..end, start + 1);
+        let dest = start + (CELL_POINTER_SIZE as usize);
+        self.data.data.copy_within(start..end, dest);
     }
 
     fn remove_pointer(&mut self, cell_position: u16) {
@@ -290,9 +304,10 @@ impl Page {
             // don't need to move anything
             return;
         }
-        let start = (cell_position * CELL_POINTER_SIZE) as usize;
+        let start = ((cell_position + 1) * CELL_POINTER_SIZE) as usize;
         let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
-        self.data.data.copy_within(start..end, start - 1);
+        let dest = (cell_position * CELL_POINTER_SIZE) as usize;
+        self.data.data.copy_within(start..end, dest);
     }
 
     fn get_cell_pointer(&self, position: u16) -> CellPointer {
@@ -316,6 +331,18 @@ impl Page {
     }
 }
 
+fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
+    assert!(data.len() % 8 == 0);
+    let mut reader = data;
+    let mut sum = 0;
+    for _ in 0..(data.len() / 8) {
+        let v = u64::from_bytes(&mut reader, &())?;
+        sum += v;
+    }
+    Ok(sum)
+}
+
+#[derive(Debug)]
 struct CellPointer {
     end_position: PageBufferOffset,
     size: PageBufferOffset,
@@ -356,5 +383,134 @@ mod tests {
         assert_eq!(mem::size_of::<Page>(), PAGE_DATA_SIZE as usize);
         assert_eq!(PAGE_BUFFER_SIZE % 8, 0);
         assert_eq!(mem::size_of::<CellPointer>(), 4);
+    }
+
+    #[test]
+    fn test_checksum() {
+        let mut bytes = Vec::new();
+        100u64.write_to_bytes(&mut bytes).unwrap();
+        200u64.write_to_bytes(&mut bytes).unwrap();
+        300u64.write_to_bytes(&mut bytes).unwrap();
+        0u32.write_to_bytes(&mut bytes).unwrap();
+        100u32.write_to_bytes(&mut bytes).unwrap();
+        let res = checksum(&bytes[..]).unwrap();
+        assert_eq!(res, 700);
+    }
+
+    fn get_all_cells(page: &Page) -> Vec<Vec<u32>> {
+        let mut read_cells: Vec<Vec<u32>> = Vec::new();
+        for idx in 0..page.header.cell_count {
+            let data = page.get_cell(idx);
+            let mut reader = &data[..];
+            read_cells.push(Vec::from_bytes(&mut reader, &()).unwrap());
+        }
+        read_cells
+    }
+
+    fn print_pointers(page: &Page) {
+        for idx in 0..page.header.cell_count {
+            println!("{idx}: {:?}", page.get_cell_pointer(idx));
+        }
+    }
+
+    #[test]
+    fn page_basics() {
+        // add cells
+        let mut page = Page::new(1, PageKind::Data);
+        let cells = vec![
+            vec![1u32, 2, 3, 4, 5],
+            vec![10u32, 20, 30, 40, 50],
+            vec![100u32, 200, 300, 400, 500],
+        ];
+        let mut buffer = Vec::new();
+        for (idx, cell) in cells.iter().enumerate() {
+            cell.write_to_bytes(&mut buffer).unwrap();
+            page.insert_cell(idx as u16, &buffer[..]).unwrap();
+            buffer.clear();
+        }
+
+        let read_cells = get_all_cells(&page);
+        assert_eq!(cells, read_cells);
+
+        //remove
+        page.remove_cell(1);
+        let read_cells = get_all_cells(&page);
+        assert_eq!(
+            vec![vec![1u32, 2, 3, 4, 5], vec![100u32, 200, 300, 400, 500]],
+            read_cells
+        );
+
+        print_pointers(&page);
+        println!("----------");
+
+        // add in middle
+        let mut buffer = Vec::new();
+        vec![10u32, 9, 8, 7].write_to_bytes(&mut buffer).unwrap();
+        page.insert_cell(2, &buffer[..]).unwrap();
+        buffer.clear();
+        print_pointers(&page);
+        println!("----------");
+
+        vec![11u32, 12, 13, 14, 15]
+            .write_to_bytes(&mut buffer)
+            .unwrap();
+        page.insert_cell(1, &buffer[..]).unwrap();
+        print_pointers(&page);
+        println!("----------");
+
+        let read_cells = get_all_cells(&page);
+        assert_eq!(
+            vec![
+                vec![1u32, 2, 3, 4, 5],
+                vec![11u32, 12, 13, 14, 15],
+                vec![100u32, 200, 300, 400, 500],
+                vec![10u32, 9, 8, 7]
+            ],
+            read_cells
+        );
+    }
+
+    #[test]
+    fn page_defrag() {
+        let mut page = Page::new(1, PageKind::Data);
+        let cell = vec![10u32, 10, 10, 10, 10];
+        let mut bytes = Vec::new();
+        cell.write_to_bytes(&mut bytes).unwrap();
+
+        let mut cell_count = 0;
+        let mut idx = 0;
+
+        let has_space = |page: &Page| {
+            page.header.free_space_end - page.header.free_space_start
+                > (bytes.len() as u16 + CELL_POINTER_SIZE)
+        };
+
+        // fill up the free space in a fragmented way
+        while has_space(&page) {
+            page.insert_cell(idx, &bytes[..]).unwrap();
+            if !has_space(&page) {
+                break;
+            }
+            page.insert_cell(idx + 1, &bytes[..]).unwrap();
+            page.remove_cell(idx);
+            idx += 1;
+            cell_count += 1;
+        }
+        assert_eq!(cell_count, page.header.cell_count);
+        let read_cells = get_all_cells(&page);
+        for c in read_cells {
+            assert_eq!(cell, c);
+        }
+        // add one more to trigger defrag
+        page.insert_cell(idx, &bytes[..]).unwrap();
+        assert_eq!(cell_count + 1, page.header.cell_count);
+        let read_cells = get_all_cells(&page);
+        for c in read_cells {
+            assert_eq!(cell, c);
+        }
+        assert_eq!(
+            page.header.total_free_space,
+            page.header.free_space_end - page.header.free_space_start
+        );
     }
 }
