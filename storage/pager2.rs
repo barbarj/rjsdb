@@ -212,58 +212,9 @@ impl Page {
         &mut self,
         cell_position: u16, // must be <= cell count
         data: &[u8],
-    ) -> Result<u16, PageError> {
+    ) -> Result<(), PageError> {
+        assert!(cell_position <= self.header.cell_count);
         let data_size: PageBufferOffset = data.len().try_into().unwrap();
-        // Going to not use an availability_list, and instead track total free space. If there is
-        // enough total space, but not enough space in the free area, the page will be defragged
-
-        // TODO: Confirm we have sufficient space before modifying anything.
-        // states:
-        // - cell pointer
-        //   - not enough space in free space for new cell pointer
-        //   - enough space for new pointer
-        //   - using existing nulled pointer
-        // - cell
-        //   - using existing available slot
-        //   - using free space
-        //   - not enough space in free space or available slots
-        //
-        //   framed differently:
-        //   - need new cell pointer
-        //      - not enough free space
-        //      - enough free space
-        //          - using slot for cell
-        //          - using free space for cell
-        //          - not enough free space
-        //  - using existing cell pointer
-        //      - using slot for cell
-        //      - using free space for cell
-        //      - not enough free space
-        //
-        //  down to four cases: (for have cell pointer, how we get it doesn't matter)
-        //  - (have cell pointer, using slot)
-        //  - (have cell pointer, using free_space)
-        //  - (have cell pointer, not enough free_space)
-        //  - not enough for cell pointer
-        //
-        //  So basically need to, in order:
-        //  - determine cell pointer position
-        //  - determine cell position
-        //  - modify stuff and write data
-
-        // determine cell pointer position:
-        // - cases requiring new pointer slot
-        //      - cell_postion >= cell count
-        //      - all existing cells at and to the right of cell_position are filled
-        // - cases not requiring new slot:
-        //  - at least one cell at or to the right of cell_position is empty
-
-        // steps to possibly do:
-        // - MAYBE: move a range of cell pointers to the right 1
-        // - MAYBE: Take space from availability list
-        // - MAYBE: "Take" space from free space
-        // - write new cell pointer to cell pointer dest
-        // - write new cell to cell dest
 
         // verify we have room for the cell pointer + data
         let total_space_needed = CELL_POINTER_SIZE + data_size;
@@ -271,12 +222,12 @@ impl Page {
             return Err(PageError::NotEnoughSpace);
         }
         if self.header.free_space_end - self.header.free_space_start < total_space_needed {
-            self.defragment()?;
+            self.defragment();
         }
         let cell_end = self.header.free_space_end;
 
         // write pointer
-        self.shift_pointers_write_starting_at(cell_position);
+        self.make_room_for_pointer(cell_position);
         let cell_pointer = CellPointer {
             end_position: cell_end,
             size: data_size,
@@ -295,51 +246,73 @@ impl Page {
         self.header.free_space_end -= data_size;
 
         self.header.total_free_space -= total_space_needed;
+        self.header.flags.set_dirty(true);
 
-        // Okay, now we can actual act and change things
-        Ok(cell_position)
+        Ok(())
     }
 
-    fn remove_cell(&mut self, cell_position: u8) {
-        unimplemented!();
+    fn remove_cell(&mut self, cell_position: u16) {
+        assert!(self.header.cell_count > 0);
+        assert!(cell_position < self.header.cell_count);
+        self.remove_pointer(cell_position);
+        self.header.cell_count -= 1;
+        self.header.free_space_start -= CELL_POINTER_SIZE;
+        self.header.flags.set_dirty(true);
+        self.header.flags.set_compactible(true);
     }
 
-    fn defragment(&mut self) -> Result<(), PageError> {
+    fn defragment(&mut self) {
         self.header.free_space_end = PAGE_BUFFER_SIZE;
         for i in 0..self.header.cell_count {
-            let offset_start = (i * CELL_POINTER_SIZE) as usize;
-            let offset_size = CELL_POINTER_SIZE as usize;
-            let pointer_slice: [u8; CELL_POINTER_SIZE as usize] = self.data.data
-                [offset_start..offset_start + offset_size]
-                .try_into()
-                .unwrap();
-            unsafe {
-                let pointer: CellPointer = mem::transmute(pointer_slice);
-                let cell_start = pointer.end_position - pointer.size;
-                let dest_start = (self.header.free_space_end - pointer.size).into();
-                let src_range: Range<usize> = cell_start.into()..pointer.end_position.into();
-                self.data.data.copy_within(src_range, dest_start);
-                self.header.free_space_end -= pointer.size;
-            }
+            let pointer = self.get_cell_pointer(i);
+            let cell_start = pointer.end_position - pointer.size;
+            let dest_start = (self.header.free_space_end - pointer.size).into();
+            let src_range: Range<usize> = cell_start.into()..pointer.end_position.into();
+            self.data.data.copy_within(src_range, dest_start);
+            self.header.free_space_end -= pointer.size;
         }
-        unimplemented!();
+        self.header.flags.set_compactible(false);
     }
 
-    fn shift_pointers_write_starting_at(&mut self, cell_position: u16) {
+    fn make_room_for_pointer(&mut self, cell_position: u16) {
         assert!(cell_position <= self.header.cell_count);
         if cell_position == self.header.cell_count {
             // no pointers need to be moved
             return;
         }
-        let slice_start = (cell_position * CELL_POINTER_SIZE) as usize;
-        let slice_end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
-        let slice = &mut self.data.data[slice_start..slice_end];
-        // TODO: Unsure if I should do this with memcopy instead?
-        for i in slice_end - 1..slice_start {
-            // copy one byte at a time, safely because we're not overwriting any yet-to-be-copied
-            // data
-            slice[i] = slice[i - 1];
+        let start = (cell_position * CELL_POINTER_SIZE) as usize;
+        let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
+        self.data.data.copy_within(start..end, start + 1);
+    }
+
+    fn remove_pointer(&mut self, cell_position: u16) {
+        if cell_position == 0 {
+            // don't need to move anything
+            return;
         }
+        let start = (cell_position * CELL_POINTER_SIZE) as usize;
+        let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
+        self.data.data.copy_within(start..end, start - 1);
+    }
+
+    fn get_cell_pointer(&self, position: u16) -> CellPointer {
+        assert!(position < self.header.cell_count);
+        let offset_start = (position * CELL_POINTER_SIZE) as usize;
+        let offset_size = CELL_POINTER_SIZE as usize;
+        let mut pointer_slice = &self.data.data[offset_start..offset_start + offset_size];
+        CellPointer::from_bytes(&mut pointer_slice, &()).unwrap()
+    }
+
+    fn get_cell(&self, cell_position: u16) -> Vec<u8> {
+        assert!(cell_position < self.header.cell_count);
+        let pointer = self.get_cell_pointer(cell_position);
+        let start = (pointer.end_position - pointer.size) as usize;
+        let end = pointer.end_position as usize;
+        let slice = &self.data.data[start..end];
+
+        let mut cell = Vec::with_capacity(pointer.size as usize);
+        cell.extend_from_slice(slice);
+        cell
     }
 }
 
