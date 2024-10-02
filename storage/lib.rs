@@ -25,7 +25,6 @@ use generate::{Generate, RNG};
 
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
-mod pager2;
 mod serialize;
 
 #[derive(Debug)]

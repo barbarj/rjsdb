@@ -15,11 +15,7 @@ use crate::serialize::{Deserialize, SerdeError, Serialize};
 *      - I will want to do an unsafe cast to and from a [u8] when writing to and reading from disk
 *  - All types that will serialize to a page cell or cell pointer also need a defined layout for
 *  the same reasons
-*  - An availibility list to track free space that is external to the page. This should be
-*  derivable from the buffer when reading in a fresh page
-*   - methods that modify the contents of the page will take a mutable reference to the availabily
-*   list, make the decision on where to write, and update the the list accordingly.
-*  - cell pointers must always be sorted by key value (we don't need to move the cells themselves
+  - cell pointers must always be sorted by key value (we don't need to move the cells themselves
 *  if we just sort the pointers instead)
 *    - insert_cell takes a 'location' that is the index of the cell pointer this cell will occupy.
        Everything at this index and to the right should be shifted over by one position before insertion.
@@ -54,14 +50,11 @@ use crate::serialize::{Deserialize, SerdeError, Serialize};
 * - compression
 * - right only appends (probably a higher level op anyways)
 * - rebalancing (probably a higher level op anyways)
-* - vacumming/compression (this is definitely a higher level op since it requires copying data
-* from one page to another)
 */
 
-type PageId = u64;
+pub type PageId = u64;
 type PageBufferOffset = u16;
 
-// TODO: Convert to 16kb
 const PAGE_DATA_SIZE: PageBufferOffset = 4096 * 4; // 16KB
 const PAGE_BUFFER_SIZE: PageBufferOffset =
     PAGE_DATA_SIZE - mem::size_of::<PageHeader>() as PageBufferOffset;
@@ -71,7 +64,7 @@ const ALIGNMENT_GUARD_VALUE: u32 = u32::from_be_bytes([50, 41, 47, 45]);
 const CELL_POINTER_SIZE: u16 = mem::size_of::<CellPointer>() as u16;
 
 #[derive(Debug)]
-enum PageError {
+pub enum PageError {
     IoError(IoError),
     SerdeError(SerdeError),
     NotEnoughSpace,
@@ -119,7 +112,7 @@ impl PageFlags {
 }
 
 #[repr(u8)]
-enum PageKind {
+pub enum PageKind {
     Data,
 }
 
@@ -170,12 +163,12 @@ impl PageBuffer {
 }
 
 #[repr(C)]
-struct Page {
+pub struct Page {
     header: PageHeader,
     data: PageBuffer,
 }
 impl Page {
-    fn new(id: PageId, kind: PageKind) -> Self {
+    pub fn new(id: PageId, kind: PageKind) -> Self {
         let header = PageHeader {
             checksum: 0,
             header_version: HEADER_VERSION,
@@ -208,17 +201,17 @@ impl Page {
     }
 
     // TODO: Fix the error type
-    fn from_disk(offset: usize) -> Result<Self, ()> {
+    pub fn from_disk(offset: usize) -> Result<Self, ()> {
         unimplemented!();
     }
 
-    fn flush(&mut self) {
+    pub fn flush(&mut self) {
         unimplemented!();
     }
 }
 
 impl Page {
-    fn insert_cell(
+    pub fn insert_cell(
         &mut self,
         cell_position: u16, // must be <= cell count
         data: &[u8],
@@ -262,7 +255,7 @@ impl Page {
         Ok(())
     }
 
-    fn remove_cell(&mut self, cell_position: u16) {
+    pub fn remove_cell(&mut self, cell_position: u16) {
         assert!(self.header.cell_count > 0);
         assert!(cell_position < self.header.cell_count);
         let ptr = self.get_cell_pointer(cell_position);
@@ -318,7 +311,7 @@ impl Page {
         CellPointer::from_bytes(&mut pointer_slice, &()).unwrap()
     }
 
-    fn get_cell(&self, cell_position: u16) -> Vec<u8> {
+    pub fn get_cell(&self, cell_position: u16) -> Vec<u8> {
         assert!(cell_position < self.header.cell_count);
         let pointer = self.get_cell_pointer(cell_position);
         let start = (pointer.end_position - pointer.size) as usize;
