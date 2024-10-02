@@ -423,22 +423,40 @@ mod tests {
             vec![100u32, 200, 300, 400, 500],
         ];
         let mut buffer = Vec::new();
+        let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
             cell.write_to_bytes(&mut buffer).unwrap();
             page.insert_cell(idx as u16, &buffer[..]).unwrap();
+            data_sizes.push(buffer.len());
             buffer.clear();
         }
+        let data_sizes_sum: usize = data_sizes.iter().sum();
+        let free_space_end = PAGE_BUFFER_SIZE - data_sizes_sum as u16;
+        let free_space_start = CELL_POINTER_SIZE * 3;
+        let total_free_space = free_space_end - free_space_start;
 
         let read_cells = get_all_cells(&page);
         assert_eq!(cells, read_cells);
+        assert_eq!(free_space_start, page.header.free_space_start);
+        assert_eq!(free_space_end, page.header.free_space_end);
+        assert_eq!(total_free_space, page.header.total_free_space);
+        assert_eq!(3, page.header.cell_count);
 
         //remove
         page.remove_cell(1);
         let read_cells = get_all_cells(&page);
+        let free_space_start = free_space_start - CELL_POINTER_SIZE;
+        #[allow(clippy::redundant_locals)]
+        let free_space_end = free_space_end; // no change
+        let total_free_space = total_free_space + CELL_POINTER_SIZE + (data_sizes[1] as u16);
         assert_eq!(
             vec![vec![1u32, 2, 3, 4, 5], vec![100u32, 200, 300, 400, 500]],
             read_cells
         );
+        assert_eq!(free_space_start, page.header.free_space_start);
+        assert_eq!(free_space_end, page.header.free_space_end);
+        assert_eq!(total_free_space, page.header.total_free_space);
+        assert_eq!(2, page.header.cell_count);
 
         print_pointers(&page);
         println!("----------");
@@ -446,6 +464,7 @@ mod tests {
         // add in middle
         let mut buffer = Vec::new();
         vec![10u32, 9, 8, 7].write_to_bytes(&mut buffer).unwrap();
+        let middle_cell_size = buffer.len();
         page.insert_cell(2, &buffer[..]).unwrap();
         buffer.clear();
         print_pointers(&page);
@@ -454,6 +473,7 @@ mod tests {
         vec![11u32, 12, 13, 14, 15]
             .write_to_bytes(&mut buffer)
             .unwrap();
+        let end_cell_size = buffer.len();
         page.insert_cell(1, &buffer[..]).unwrap();
         print_pointers(&page);
         println!("----------");
@@ -468,6 +488,16 @@ mod tests {
             ],
             read_cells
         );
+        let free_space_start = free_space_start + (CELL_POINTER_SIZE * 2);
+        let free_space_end = free_space_end - middle_cell_size as u16 - end_cell_size as u16;
+        let total_free_space = total_free_space
+            - (CELL_POINTER_SIZE * 2)
+            - middle_cell_size as u16
+            - end_cell_size as u16;
+        assert_eq!(free_space_start, page.header.free_space_start);
+        assert_eq!(free_space_end, page.header.free_space_end);
+        assert_eq!(total_free_space, page.header.total_free_space);
+        assert_eq!(4, page.header.cell_count);
     }
 
     #[test]
@@ -476,9 +506,11 @@ mod tests {
         let cell = vec![10u32, 10, 10, 10, 10];
         let mut bytes = Vec::new();
         cell.write_to_bytes(&mut bytes).unwrap();
+        let cell_size = bytes.len() as u16;
 
         let mut cell_count = 0;
         let mut idx = 0;
+        let mut used_slots = 0;
 
         let has_space = |page: &Page| {
             page.header.free_space_end - page.header.free_space_start
@@ -495,22 +527,33 @@ mod tests {
             page.remove_cell(idx);
             idx += 1;
             cell_count += 1;
+            used_slots += 2;
         }
-        assert_eq!(cell_count, page.header.cell_count);
         let read_cells = get_all_cells(&page);
         for c in read_cells {
             assert_eq!(cell, c);
         }
+        let free_space_start = cell_count * CELL_POINTER_SIZE;
+        let free_space_end = PAGE_BUFFER_SIZE - (used_slots * cell_size);
+        let total_free_space = PAGE_BUFFER_SIZE - free_space_start - (cell_count * cell_size);
+        assert_eq!(free_space_start, page.header.free_space_start);
+        assert_eq!(free_space_end, page.header.free_space_end);
+        assert_eq!(total_free_space, page.header.total_free_space);
+        assert_eq!(cell_count, page.header.cell_count);
+
         // add one more to trigger defrag
         page.insert_cell(idx, &bytes[..]).unwrap();
-        assert_eq!(cell_count + 1, page.header.cell_count);
+        cell_count += 1;
         let read_cells = get_all_cells(&page);
         for c in read_cells {
             assert_eq!(cell, c);
         }
-        assert_eq!(
-            page.header.total_free_space,
-            page.header.free_space_end - page.header.free_space_start
-        );
+        let free_space_start = free_space_start + CELL_POINTER_SIZE;
+        let free_space_end = PAGE_BUFFER_SIZE - (cell_count * cell_size);
+        let total_free_space = free_space_end - free_space_start;
+        assert_eq!(free_space_start, page.header.free_space_start);
+        assert_eq!(free_space_end, page.header.free_space_end);
+        assert_eq!(total_free_space, page.header.total_free_space);
+        assert_eq!(cell_count, page.header.cell_count);
     }
 }
