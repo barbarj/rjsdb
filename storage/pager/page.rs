@@ -208,9 +208,7 @@ impl Page {
     pub fn flush(&mut self) {
         unimplemented!();
     }
-}
 
-impl Page {
     pub fn insert_cell(
         &mut self,
         cell_position: u16, // must be <= cell count
