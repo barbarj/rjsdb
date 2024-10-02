@@ -98,7 +98,7 @@ impl PageFlags {
 
     fn set_flag(&mut self, flag: u8, val: bool) {
         let without_flag = self.flags & (u8::MAX ^ flag);
-        let desired_val = if val { 1 } else { 0 };
+        let desired_val = if val { flag } else { 0 };
         self.flags = without_flag | desired_val;
     }
 
@@ -531,6 +531,8 @@ mod tests {
         assert_eq!(free_space_end, page.header.free_space_end);
         assert_eq!(total_free_space, page.header.total_free_space);
         assert_eq!(cell_count, page.header.cell_count);
+        assert!(page.header.flags.is_dirty());
+        assert!(page.header.flags.is_compactible());
 
         // add one more to trigger defrag
         page.insert_cell(idx, &bytes[..]).unwrap();
@@ -546,5 +548,7 @@ mod tests {
         assert_eq!(free_space_end, page.header.free_space_end);
         assert_eq!(total_free_space, page.header.total_free_space);
         assert_eq!(cell_count, page.header.cell_count);
+        assert!(page.header.flags.is_dirty());
+        assert!(!page.header.flags.is_compactible());
     }
 }
