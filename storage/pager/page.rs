@@ -135,10 +135,10 @@ pub enum PageKind {
 ///     All changes will requiring incrementing the header_version and maintaining the old & new
 ///     page layouts while pages with the old layout still exist.
 ///
-///     We must also be careful to lay this out in a way that doesn't have any unitialized memory.
-///     This is why we use Option<NonZeroU64> instead of Option<u64> for overflow_page_id. Option<NonZeroU64>
-///     can use a compiler optimization to store the None state as 0, so the enum tag doesn't need
-///     to be stored seperately, meaning we don't need the padding that would require.
+/// We must also be careful to lay this out in a way that doesn't have any unitialized memory.
+/// This is why we use Option<NonZeroU64> instead of Option<u64> for overflow_page_id. Option<NonZeroU64>
+/// can use a compiler optimization to store the None state as 0, so the enum tag doesn\'t need
+/// to be stored seperately, meaning we don't need the padding that would require.
 ///
 /// checksum and header_version must be at the beginning of every version of this struct so that:
 /// - The checksum can be validated before continuing
@@ -658,6 +658,61 @@ mod tests {
         page.write_to_disk(fd.as_fd()).unwrap();
 
         let read_page = Page::from_disk(fd.as_fd(), 0).unwrap();
+        let read_cells = get_all_cells(&read_page);
+        assert_eq!(cells, read_cells);
         assert_eq!(page, read_page);
+    }
+
+    #[test]
+    fn to_from_disk_multiple_pages() {
+        let fd = rustix::fs::open(
+            Path::new("to_from_disk_multiple_pages.test"),
+            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
+            Mode::RWXU,
+        )
+        .unwrap();
+
+        let mut page0 = Page::new(0, PageKind::Data);
+        let cells0 = vec![vec![10, 11, 12, 13]];
+        let mut buffer = Vec::new();
+        for (idx, cell) in cells0.iter().enumerate() {
+            cell.write_to_bytes(&mut buffer).unwrap();
+            page0.insert_cell(idx as u16, &buffer[..]).unwrap();
+            buffer.clear();
+        }
+        page0.write_to_disk(fd.as_fd()).unwrap();
+
+        let mut page1 = Page::new(1, PageKind::Data);
+        let cells1 = vec![vec![20, 21, 22, 23]];
+        let mut buffer = Vec::new();
+        for (idx, cell) in cells1.iter().enumerate() {
+            cell.write_to_bytes(&mut buffer).unwrap();
+            page1.insert_cell(idx as u16, &buffer[..]).unwrap();
+            buffer.clear();
+        }
+        page1.write_to_disk(fd.as_fd()).unwrap();
+
+        let mut page2 = Page::new(2, PageKind::Data);
+        let cells2 = vec![vec![30, 31, 32, 33]];
+        let mut buffer = Vec::new();
+        for (idx, cell) in cells2.iter().enumerate() {
+            cell.write_to_bytes(&mut buffer).unwrap();
+            page2.insert_cell(idx as u16, &buffer[..]).unwrap();
+            buffer.clear();
+        }
+        page2.write_to_disk(fd.as_fd()).unwrap();
+
+        // read out of order now
+        let read_page1 = Page::from_disk(fd.as_fd(), 1).unwrap();
+        assert_eq!(page1, read_page1);
+        assert_eq!(cells1, get_all_cells(&read_page1));
+
+        let read_page2 = Page::from_disk(fd.as_fd(), 2).unwrap();
+        assert_eq!(page2, read_page2);
+        assert_eq!(cells2, get_all_cells(&read_page2));
+
+        let read_page0 = Page::from_disk(fd.as_fd(), 0).unwrap();
+        assert_eq!(page0, read_page0);
+        assert_eq!(cells0, get_all_cells(&read_page0));
     }
 }
