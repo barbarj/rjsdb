@@ -270,6 +270,7 @@ impl Page {
     }
 
     pub fn write_to_disk<Fd: AsFd>(&mut self, fd: Fd) -> Result<(), PageError> {
+        self.defragment();
         let offset = self.header.page_id * PAGE_SIZE as u64;
         // setting dirty flag before slice cast and write to:
         // 1: Make the effects on other vars easier to reason about.
@@ -341,6 +342,11 @@ impl Page {
     }
 
     fn defragment(&mut self) {
+        if self.header.total_free_space == self.header.free_space_end - self.header.free_space_start
+        {
+            // nothing to do
+            return;
+        }
         self.header.free_space_end = PAGE_BUFFER_SIZE;
         for i in 0..self.header.cell_count {
             let pointer = self.get_cell_pointer(i);
