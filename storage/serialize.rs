@@ -312,12 +312,12 @@ impl<T: Deserialize<ExtraInfo = ()>> Deserialize for Vec<T> {
 
 #[cfg(test)]
 mod serde_tests {
-    use crate::{generate::RNG, NumericCfg};
+    use crate::{generate::Rng, NumericCfg};
 
     use super::*;
 
     fn gen_rows(seed: u64, count: usize) -> (Vec<Row>, Rc<Schema>) {
-        let mut rng = RNG::from_seed(seed);
+        let mut rng = Rng::from_seed(seed);
         let numeric_cfg = Rc::new(NumericCfg {
             max_precision: 10,
             max_scale: 5,
@@ -443,7 +443,7 @@ mod serde_tests {
         }
         let mut reader = &bytes[..];
         let read_rows: Vec<Row> = (0..3)
-            .map(|i| Row::from_bytes(&mut reader, &schema).unwrap())
+            .map(|_| Row::from_bytes(&mut reader, &schema).unwrap())
             .collect();
         assert_eq!(rows, read_rows, "Failed with a seed of {seed}");
     }

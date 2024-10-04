@@ -1,9 +1,6 @@
-use std::{
-    io::{self, Write},
-    rc::Rc,
-};
+use std::{io, rc::Rc};
 
-use generate::{Generate, RNG};
+use generate::{Generate, Rng};
 
 /*
  * Goal: Paging System
@@ -37,11 +34,7 @@ impl From<io::Error> for StorageError {
     }
 }
 
-type Result<T> = std::result::Result<T, StorageError>;
-
-trait Serialize {
-    fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()>;
-}
+pub type Result<T> = std::result::Result<T, StorageError>;
 
 #[derive(Debug, PartialEq)]
 pub struct NumericCfg {
@@ -68,7 +61,7 @@ impl NumericValueSign {
     }
 }
 impl Generate for NumericValueSign {
-    fn generate(rng: &mut RNG) -> Self {
+    fn generate(rng: &mut Rng) -> Self {
         let num: u8 = (rng.next_value() % 3).try_into().unwrap();
         NumericValueSign::from_number(num).unwrap()
     }
@@ -85,7 +78,7 @@ pub struct NumericValue {
 }
 impl Generate for NumericValue {
     // TODO: Make this take into account a NumericCfg
-    fn generate(rng: &mut RNG) -> Self {
+    fn generate(rng: &mut Rng) -> Self {
         let total_digits = u16::generate(rng) % 100; // TODO: Undo this modulo later?
         let first_group_weight = u16::generate(rng);
         let sign = NumericValueSign::generate(rng);
@@ -150,7 +143,7 @@ pub enum DbType {
 }
 impl DbType {
     #[allow(dead_code)]
-    fn as_generated_value(&self, rng: &mut RNG) -> DbValue {
+    fn as_generated_value(&self, rng: &mut Rng) -> DbValue {
         match self {
             DbType::Numeric(_) => DbValue::Numeric(NumericValue::generate(rng)),
             DbType::Integer => DbValue::Integer(i32::generate(rng)),

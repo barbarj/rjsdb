@@ -59,7 +59,7 @@ use crate::serialize::{Deserialize, SerdeError, Serialize};
 pub type PageId = u64;
 type PageBufferOffset = u16;
 
-const PAGE_SIZE: PageBufferOffset = 4096 * 4; // 16KB
+pub const PAGE_SIZE: PageBufferOffset = 4096 * 4; // 16KB
 const PAGE_BUFFER_SIZE: PageBufferOffset =
     PAGE_SIZE - mem::size_of::<PageHeader>() as PageBufferOffset;
 const HEADER_VERSION: u8 = 1;
@@ -171,6 +171,12 @@ struct PageBuffer {
     data: [u8; PAGE_BUFFER_SIZE as usize],
 }
 impl PageBuffer {
+    fn new() -> Self {
+        PageBuffer {
+            data: [0; PAGE_BUFFER_SIZE as usize],
+        }
+    }
+
     fn write_to(&mut self, offset: PageBufferOffset, data: &[u8]) -> Result<(), PageError> {
         let mut writer = self.get_writer(offset, data.len());
         writer.write_all(data)?;
@@ -206,9 +212,7 @@ impl Page {
             overflow_page_id: None,
         };
 
-        let data = PageBuffer {
-            data: [0; PAGE_BUFFER_SIZE as usize],
-        };
+        let data = PageBuffer::new();
 
         Page { header, data }
     }
@@ -220,17 +224,23 @@ impl Page {
 
     pub fn from_disk<Fd: AsFd>(fd: Fd, page_id: PageId) -> Result<Self, PageError> {
         let mut new_page = Page::new(0, PageKind::Data);
-        let buf = new_page.as_slice_mut();
+        new_page.replace_contents(fd, page_id)?;
+        Ok(new_page)
+    }
+
+    // replaces the contents of this page object with the indicated on-disk page's contents
+    pub fn replace_contents<Fd: AsFd>(&mut self, fd: Fd, page_id: PageId) -> Result<(), PageError> {
+        let buf = self.as_slice_mut();
         let offset = page_id * PAGE_SIZE as u64;
         // make read all
         Page::read_entire_page(fd, buf, offset)?;
 
         // new page should now have values from disk
-        let checksum = new_page.calc_checksum();
-        if checksum != new_page.header.checksum {
+        let checksum = self.calc_checksum();
+        if checksum != self.header.checksum {
             return Err(PageError::Corrupted);
         }
-        Ok(new_page)
+        Ok(())
     }
 
     fn as_slice(&self) -> &[u8] {
@@ -270,7 +280,7 @@ impl Page {
     }
 
     pub fn write_to_disk<Fd: AsFd>(&mut self, fd: Fd) -> Result<(), PageError> {
-        self.defragment();
+        self.defragment()?;
         let offset = self.header.page_id * PAGE_SIZE as u64;
         // setting dirty flag before slice cast and write to:
         // 1: Make the effects on other vars easier to reason about.
@@ -299,7 +309,7 @@ impl Page {
             return Err(PageError::NotEnoughSpace);
         }
         if self.header.free_space_end - self.header.free_space_start < total_space_needed {
-            self.defragment();
+            self.defragment()?;
         }
         let cell_end = self.header.free_space_end;
 
@@ -341,22 +351,40 @@ impl Page {
         self.header.flags.set_compactible(true);
     }
 
-    fn defragment(&mut self) {
+    fn defragment(&mut self) -> Result<(), PageError> {
         if self.header.total_free_space == self.header.free_space_end - self.header.free_space_start
         {
             // nothing to do
-            return;
+            return Ok(());
         }
-        self.header.free_space_end = PAGE_BUFFER_SIZE;
+        self.force_defragment()
+    }
+
+    fn force_defragment(&mut self) -> Result<(), PageError> {
+        let mut tmp_buffer = PageBuffer::new();
+        let mut dest_end = PAGE_BUFFER_SIZE;
+        let mut ptr_buf = Vec::with_capacity(CELL_POINTER_SIZE as usize);
         for i in 0..self.header.cell_count {
-            let pointer = self.get_cell_pointer(i);
+            let mut pointer = self.get_cell_pointer(i);
             let cell_start = pointer.end_position - pointer.size;
-            let dest_start = (self.header.free_space_end - pointer.size).into();
             let src_range: Range<usize> = cell_start.into()..pointer.end_position.into();
-            self.data.data.copy_within(src_range, dest_start);
-            self.header.free_space_end -= pointer.size;
+            let data = &self.data.data[src_range];
+
+            // write cell
+            tmp_buffer.write_to(dest_end - pointer.size, data)?;
+
+            // write updated pointer
+            pointer.end_position = dest_end;
+            pointer.write_to_bytes(&mut ptr_buf)?;
+            let ptr_data = &ptr_buf[..];
+            tmp_buffer.write_to(CELL_POINTER_SIZE * i, ptr_data)?;
+            ptr_buf.clear();
+
+            dest_end -= pointer.size;
         }
+        self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
+        Ok(())
     }
 
     fn make_room_for_pointer(&mut self, cell_position: u16) {
@@ -372,7 +400,7 @@ impl Page {
     }
 
     fn remove_pointer(&mut self, cell_position: u16) {
-        if cell_position == 0 {
+        if cell_position == self.header.cell_count - 1 {
             // don't need to move anything
             return;
         }
@@ -441,7 +469,7 @@ impl Deserialize for CellPointer {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, mem, path::Path};
+    use std::{mem, path::Path};
 
     use rustix::fs::{Mode, OFlags};
 
@@ -578,10 +606,13 @@ mod tests {
     #[test]
     fn page_defrag() {
         let mut page = Page::new(1, PageKind::Data);
-        let cell = vec![10u32, 10, 10, 10, 10];
-        let mut bytes = Vec::new();
-        cell.write_to_bytes(&mut bytes).unwrap();
-        let cell_size = bytes.len() as u16;
+        let cell10s = vec![10u32, 10, 10, 10, 10];
+        let cell20s = vec![20u32, 20, 20, 20, 20];
+        let mut bytes10s = Vec::new();
+        cell10s.write_to_bytes(&mut bytes10s).unwrap();
+        let mut bytes20s = Vec::new();
+        cell20s.write_to_bytes(&mut bytes20s).unwrap();
+        let cell_size = bytes10s.len() as u16;
 
         let mut cell_count = 0;
         let mut idx = 0;
@@ -589,16 +620,18 @@ mod tests {
 
         let has_space = |page: &Page| {
             page.header.free_space_end - page.header.free_space_start
-                > (bytes.len() as u16 + CELL_POINTER_SIZE)
+                > (2 * (bytes10s.len() as u16 + CELL_POINTER_SIZE))
         };
 
-        // fill up the free space in a fragmented way
+        // fill up the free space in a fragmented way by:
+        // 1) insert 2 cells of 20s and 10s respectively, then remove the one with 20s leaving some
+        //    unused space
+        // 2) when there's not enough free space left for 2 cells, add 1 (with 10s)
+        // 3) Add one more with 10s to trigger defrag
+        // 4) Check that all read cells contain 10s and other properties are correct
         while has_space(&page) {
-            page.insert_cell(idx, &bytes[..]).unwrap();
-            if !has_space(&page) {
-                break;
-            }
-            page.insert_cell(idx + 1, &bytes[..]).unwrap();
+            page.insert_cell(idx, &bytes20s[..]).unwrap();
+            page.insert_cell(idx + 1, &bytes10s[..]).unwrap();
             page.remove_cell(idx);
             idx += 1;
             cell_count += 1;
@@ -606,7 +639,7 @@ mod tests {
         }
         let read_cells = get_all_cells(&page);
         for c in read_cells {
-            assert_eq!(cell, c);
+            assert_eq!(cell10s, c);
         }
         let free_space_start = cell_count * CELL_POINTER_SIZE;
         let free_space_end = PAGE_BUFFER_SIZE - (used_slots * cell_size);
@@ -618,14 +651,15 @@ mod tests {
         assert!(page.header.flags.is_dirty());
         assert!(page.header.flags.is_compactible());
 
-        // add one more to trigger defrag
-        page.insert_cell(idx, &bytes[..]).unwrap();
-        cell_count += 1;
+        // add two more to trigger defrag
+        page.insert_cell(idx, &bytes10s[..]).unwrap();
+        page.insert_cell(idx + 1, &bytes10s[..]).unwrap();
+        cell_count += 2;
         let read_cells = get_all_cells(&page);
         for c in read_cells {
-            assert_eq!(cell, c);
+            assert_eq!(cell10s, c);
         }
-        let free_space_start = free_space_start + CELL_POINTER_SIZE;
+        let free_space_start = free_space_start + CELL_POINTER_SIZE + CELL_POINTER_SIZE;
         let free_space_end = PAGE_BUFFER_SIZE - (cell_count * cell_size);
         let total_free_space = free_space_end - free_space_start;
         assert_eq!(free_space_start, page.header.free_space_start);
@@ -634,6 +668,120 @@ mod tests {
         assert_eq!(cell_count, page.header.cell_count);
         assert!(page.header.flags.is_dirty());
         assert!(!page.header.flags.is_compactible());
+        // TODO: check that pointers have changed appropriately
+    }
+
+    #[test]
+    fn defrag_with_non_insertion_order_pointers_no_gaps() {
+        let mut page = Page::new(1, PageKind::Data);
+        let cell0 = vec![10u32, 10, 10, 10, 10];
+        let cell2 = vec![20u32, 20, 20];
+        let cell1 = vec![30u32, 30, 30, 30];
+
+        let mut bytes = Vec::new();
+        cell0.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(0, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        cell2.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(1, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        cell1.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(1, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        let undefragged_cells = get_all_cells(&page);
+        page.force_defragment().unwrap(); // should have no effect, since there's no space to remove
+        print_pointers(&page);
+        let defragged_cells = get_all_cells(&page);
+        let expected = vec![cell0, cell1, cell2];
+        assert_eq!(expected, undefragged_cells);
+        assert_eq!(expected, defragged_cells);
+    }
+
+    #[test]
+    fn defrag_with_non_insertion_order_pointers_with_gaps() {
+        let mut page = Page::new(1, PageKind::Data);
+        let cell0 = vec![10u32, 10, 10, 10, 10];
+        let cell_deleted = vec![1u32, 2];
+        let cell2 = vec![20u32, 20, 20];
+        let cell1 = vec![30u32, 30, 30, 30];
+
+        let mut bytes = Vec::new();
+        cell0.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(0, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        cell_deleted.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(1, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        cell2.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(2, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        page.remove_cell(1);
+
+        cell1.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(1, &bytes).unwrap();
+        bytes.clear();
+        print_pointers(&page);
+        println!("--------------");
+
+        let undefragged_cells = get_all_cells(&page);
+        page.force_defragment().unwrap(); // should have no effect, since there's no space to remove
+        print_pointers(&page);
+        let defragged_cells = get_all_cells(&page);
+        let expected = vec![cell0, cell1, cell2];
+        assert_eq!(expected, undefragged_cells);
+        assert_eq!(expected, defragged_cells);
+    }
+
+    #[test]
+    fn test_replace_contents() {
+        let fd = rustix::fs::open(
+            Path::new("replace_contents.test"),
+            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
+            Mode::RWXU,
+        )
+        .unwrap();
+
+        // add cells
+        let mut page = Page::new(0, PageKind::Data);
+        let cells = vec![
+            vec![1u32, 2, 3, 4, 5],
+            vec![10u32, 20, 30, 40, 50],
+            vec![100u32, 200, 300, 400, 500],
+        ];
+        let mut buffer = Vec::new();
+        let mut data_sizes = Vec::new();
+        for (idx, cell) in cells.iter().enumerate() {
+            cell.write_to_bytes(&mut buffer).unwrap();
+            page.insert_cell(idx as u16, &buffer[..]).unwrap();
+            data_sizes.push(buffer.len());
+            buffer.clear();
+        }
+
+        page.write_to_disk(fd.as_fd()).unwrap();
+
+        let mut replaced_page = Page::new(42, PageKind::Data);
+        replaced_page.replace_contents(fd.as_fd(), 0).unwrap();
+        let read_cells = get_all_cells(&replaced_page);
+        assert_eq!(cells, read_cells);
+        assert_eq!(page, replaced_page);
     }
 
     #[test]

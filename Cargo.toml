@@ -1,8 +1,7 @@
 [workspace]
 members = ["storage"]
+resolver = "2"
 
 [workspace.package]
-name = "rjsdb"
 version = "0.1.0"
 edition = "2021"
-resolver = "1"
