@@ -2,10 +2,10 @@
 
 mod page;
 
-use std::{collections::HashMap, os::fd::AsFd};
+use std::collections::HashMap;
 
-use page::{PageKind, PAGE_SIZE};
-use rustix::{fd::BorrowedFd, io::Errno};
+use page::{PageError, PageKind, PAGE_SIZE};
+use rustix::{fd::AsFd, fd::AsRawFd, fd::BorrowedFd, io::Errno};
 
 pub type PageId = page::PageId;
 pub type Page = page::Page;
@@ -54,23 +54,50 @@ const MAX_PAGE_COUNT: usize = MAX_PAGER_MEMORY / PAGE_SIZE as usize;
 #[derive(Debug)]
 pub enum PagerError {
     IoError(Errno),
+    PageError(PageError),
 }
 impl From<Errno> for PagerError {
     fn from(value: Errno) -> Self {
         Self::IoError(value)
     }
 }
-
-type PageLookupKey<'db> = (BorrowedFd<'db>, PageId);
-
-pub struct Pager<'db> {
-    pages: Vec<Page>,
-    page_locations: HashMap<PageLookupKey<'db>, usize>,
-    free_locations: Vec<usize>,
-    next_page_ids: Vec<(BorrowedFd<'db>, PageId)>,
+impl From<PageError> for PagerError {
+    fn from(value: PageError) -> Self {
+        Self::PageError(value)
+    }
 }
-impl<'db> Pager<'db> {
-    fn new(table_fds: &'db [BorrowedFd]) -> Self {
+
+type RawFd = i32;
+type PageLookupKey = (RawFd, PageId);
+
+struct NextPageId {
+    raw_fd: RawFd,
+    next_id: PageId,
+}
+impl NextPageId {
+    fn new(raw_fd: RawFd, next_id: PageId) -> Self {
+        NextPageId { raw_fd, next_id }
+    }
+
+    fn matches_fd<Fd: AsRawFd>(&self, fd: Fd) -> bool {
+        self.raw_fd == fd.as_raw_fd()
+    }
+
+    fn use_id(&mut self) -> PageId {
+        let next_id = self.next_id;
+        self.next_id += 1;
+        next_id
+    }
+}
+
+pub struct Pager {
+    pages: Vec<Page>,
+    page_locations: HashMap<PageLookupKey, usize>,
+    free_locations: Vec<usize>,
+    next_page_ids: Vec<NextPageId>,
+}
+impl Pager {
+    fn new(table_fds: &[BorrowedFd]) -> Self {
         Pager {
             pages: (0..MAX_PAGE_COUNT)
                 .map(|_| Page::new(0, PageKind::Data))
@@ -80,7 +107,10 @@ impl<'db> Pager<'db> {
             // TODO: Make this actually calc next page id
             next_page_ids: table_fds
                 .iter()
-                .map(|fd| (fd.as_fd(), Pager::calc_page_count(fd.as_fd()).unwrap()))
+                .map(|fd| {
+                    let next_id = Pager::calc_page_count(fd.as_fd()).unwrap();
+                    NextPageId::new(fd.as_raw_fd(), next_id)
+                })
                 .collect(),
         }
     }
@@ -90,16 +120,63 @@ impl<'db> Pager<'db> {
         Ok(size / PAGE_SIZE as u64)
     }
 
-    pub fn get_page<Fd: AsFd>(&mut self, _fd: Fd, _page_id: PageId) -> &Page {
-        unimplemented!();
+    pub fn get_page_mut<Fd: AsRawFd + AsFd>(
+        &mut self,
+        fd: Fd,
+        page_id: PageId,
+    ) -> Result<&mut Page, PagerError> {
+        match self.page_locations.get(&(fd.as_raw_fd(), page_id)) {
+            Some(loc) => Ok(self.pages.get_mut(*loc).unwrap()),
+            None => {
+                // not in cache, so get a free page
+                let location = self.get_free_page_location();
+                let page = self.pages.get_mut(location).unwrap();
+                page.replace_contents(fd.as_fd(), page_id)?;
+                Ok(page)
+            }
+        }
     }
 
-    pub fn new_page<Fd: AsFd>(&mut self, _fd: Fd, _page_id: PageId) -> &Page {
-        unimplemented!();
+    pub fn get_page<Fd: AsRawFd + AsFd>(
+        &mut self,
+        fd: Fd,
+        page_id: PageId,
+    ) -> Result<&Page, PagerError> {
+        let page = self.get_page_mut(fd, page_id)?;
+        Ok(&*page)
+    }
+
+    fn get_free_page_location(&mut self) -> usize {
+        match self.free_locations.pop() {
+            Some(loc) => loc,
+            None => {
+                // no free locations, so evice a page first
+                self.evict_page();
+                self.free_locations
+                    .pop()
+                    .expect("There should be a free location now")
+            }
+        }
+    }
+
+    pub fn new_page<Fd: AsRawFd>(&mut self, fd: Fd, kind: PageKind) -> &mut Page {
+        let page_id = self
+            .next_page_ids
+            .iter_mut()
+            .find(|npid| npid.matches_fd(fd.as_raw_fd()))
+            .unwrap()
+            .use_id();
+
+        let location = self.get_free_page_location();
+        let page = self.pages.get_mut(location).unwrap();
+        page.reset(page_id, kind);
+        self.page_locations
+            .insert((fd.as_raw_fd(), page_id), location);
+        page
     }
 
     fn evict_page(&mut self) {
-        unimplemented!();
+        // TODO: add this
     }
 }
 

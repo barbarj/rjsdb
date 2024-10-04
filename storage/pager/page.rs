@@ -4,9 +4,9 @@ use std::{
     mem,
     num::NonZeroU64,
     ops::Range,
-    os::fd::AsFd,
 };
 
+use rustix::fd::AsFd;
 use rustix::io::{pread, pwrite, retry_on_intr, Errno as RustixErrno};
 
 use crate::serialize::{Deserialize, SerdeError, Serialize};
@@ -385,6 +385,17 @@ impl Page {
         self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
         Ok(())
+    }
+
+    pub fn reset(&mut self, page_id: PageId, kind: PageKind) {
+        self.header.page_id = page_id;
+        self.header.page_kind = kind;
+        self.header.free_space_start = 0;
+        self.header.free_space_end = PAGE_BUFFER_SIZE;
+        self.header.total_free_space = PAGE_BUFFER_SIZE;
+        self.header.cell_count = 0;
+        self.header.overflow_page_id = None;
+        self.header.flags = PageFlags { flags: 0 };
     }
 
     fn make_room_for_pointer(&mut self, cell_position: u16) {
