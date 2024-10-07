@@ -98,12 +98,16 @@ pub struct Pager {
 }
 impl Pager {
     fn new(table_fds: &[BorrowedFd]) -> Self {
+        Self::with_page_count(table_fds, MAX_PAGE_COUNT)
+    }
+
+    fn with_page_count(table_fds: &[BorrowedFd], page_count: usize) -> Self {
         Pager {
-            pages: (0..MAX_PAGE_COUNT)
+            pages: (0..page_count)
                 .map(|_| Page::new(0, PageKind::Data))
                 .collect(),
-            page_locations: HashMap::with_capacity(MAX_PAGE_COUNT),
-            free_locations: (0..MAX_PAGE_COUNT).collect(),
+            page_locations: HashMap::with_capacity(page_count),
+            free_locations: (0..page_count).collect(),
             // TODO: Make this actually calc next page id
             next_page_ids: table_fds
                 .iter()
@@ -182,10 +186,137 @@ impl Pager {
 
 #[cfg(test)]
 mod tests {
-    use crate::pager::{page::PAGE_SIZE, MAX_PAGER_MEMORY, MAX_PAGE_COUNT};
+    use rustix::{
+        fd::OwnedFd,
+        fs::{Mode, OFlags},
+    };
+
+    use crate::serialize::{Deserialize, Serialize};
+
+    use super::*;
 
     #[test]
     fn size_proofs() {
         assert!(MAX_PAGER_MEMORY % PAGE_SIZE as usize == 0);
+    }
+
+    fn fill_page(page: &mut Page, starting_at: u64) {
+        let id = page.id();
+        let fill_val = starting_at + (id * 10);
+        let data = vec![fill_val, fill_val, fill_val];
+        let mut bytes = Vec::new();
+        data.write_to_bytes(&mut bytes).unwrap();
+        page.insert_cell(page.cell_count(), &bytes[..]).unwrap();
+    }
+
+    fn get_first_cell_from_page(pager: &mut Pager, fd: BorrowedFd, page_id: PageId) -> Vec<u64> {
+        let page = pager.get_page(fd, page_id).unwrap();
+        assert_eq!(page.id(), page_id);
+        let actual_bytes = page.get_cell(0);
+        let mut reader = &actual_bytes[..];
+        Vec::from_bytes(&mut reader, &()).unwrap()
+    }
+
+    fn open_test_file(name: &str) -> OwnedFd {
+        rustix::fs::open(
+            name,
+            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
+            Mode::RWXU,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn basics() {
+        let table_fd0 = open_test_file("pager_basics_t0.test");
+        let table_fd1 = open_test_file("pager_basics_t1.test");
+        let table_fd2 = open_test_file("pager_basics_t2.test");
+        let fds = [table_fd0.as_fd(), table_fd1.as_fd(), table_fd2.as_fd()];
+        let mut pager = Pager::new(&fds[..]);
+
+        // set up table 0
+        let page0 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        fill_page(page0, 0);
+        assert_eq!(page0.id(), 0);
+        let page1 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        fill_page(page1, 0);
+        assert_eq!(page1.id(), 1);
+        let page2 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        fill_page(page2, 0);
+        assert_eq!(page2.id(), 2);
+
+        // set up table 1
+        let page0 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        fill_page(page0, 100);
+        assert_eq!(page0.id(), 0);
+        let page1 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        fill_page(page1, 100);
+        assert_eq!(page1.id(), 1);
+        let page2 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        fill_page(page2, 100);
+        assert_eq!(page2.id(), 2);
+
+        // set up table 2
+        let page0 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        fill_page(page0, 200);
+        assert_eq!(page0.id(), 0);
+        let page1 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        fill_page(page1, 200);
+        assert_eq!(page1.id(), 1);
+        let page2 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        fill_page(page2, 200);
+        assert_eq!(page2.id(), 2);
+
+        // out of order checks on all pages
+        assert_eq!(
+            // fd 2, page 0
+            vec![200, 200, 200],
+            get_first_cell_from_page(&mut pager, table_fd2.as_fd(), 0)
+        );
+        assert_eq!(
+            //fd 0, page 2
+            vec![20, 20, 20],
+            get_first_cell_from_page(&mut pager, table_fd0.as_fd(), 2)
+        );
+        assert_eq!(
+            //fd 1, page 1
+            vec![110, 110, 110],
+            get_first_cell_from_page(&mut pager, table_fd1.as_fd(), 1)
+        );
+        assert_eq!(
+            //fd 0, page 0
+            vec![0, 0, 0],
+            get_first_cell_from_page(&mut pager, table_fd0.as_fd(), 0)
+        );
+        assert_eq!(
+            //fd 1, page 0
+            vec![100, 100, 100],
+            get_first_cell_from_page(&mut pager, table_fd1.as_fd(), 0)
+        );
+        assert_eq!(
+            //fd 1, page 2
+            vec![120, 120, 120],
+            get_first_cell_from_page(&mut pager, table_fd1.as_fd(), 2)
+        );
+        assert_eq!(
+            //fd 0, page 1
+            vec![10, 10, 10],
+            get_first_cell_from_page(&mut pager, table_fd0.as_fd(), 1)
+        );
+        assert_eq!(
+            //fd 1, page 2
+            vec![120, 120, 120],
+            get_first_cell_from_page(&mut pager, table_fd1.as_fd(), 2)
+        );
+        assert_eq!(
+            //fd 2, page 1
+            vec![210, 210, 210],
+            get_first_cell_from_page(&mut pager, table_fd2.as_fd(), 1)
+        );
+        assert_eq!(
+            //fd 2, page 2
+            vec![220, 220, 220],
+            get_first_cell_from_page(&mut pager, table_fd2.as_fd(), 2)
+        );
     }
 }

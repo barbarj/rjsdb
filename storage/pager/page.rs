@@ -222,6 +222,14 @@ impl Page {
         checksum(&bytes[8..]).unwrap()
     }
 
+    pub fn id(&self) -> PageId {
+        self.header.page_id
+    }
+
+    pub fn cell_count(&self) -> u16 {
+        self.header.cell_count
+    }
+
     pub fn from_disk<Fd: AsFd>(fd: Fd, page_id: PageId) -> Result<Self, PageError> {
         let mut new_page = Page::new(0, PageKind::Data);
         new_page.replace_contents(fd, page_id)?;
