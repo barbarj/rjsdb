@@ -226,6 +226,10 @@ impl Page {
         self.header.page_id
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.header.flags.is_dirty()
+    }
+
     pub fn cell_count(&self) -> u16 {
         self.header.cell_count
     }

@@ -90,11 +90,67 @@ impl NextPageId {
     }
 }
 
+struct ClockCacheHandler {
+    hand: usize,
+    use_bits: Vec<u8>,
+}
+impl ClockCacheHandler {
+    fn new(page_count: usize) -> Self {
+        let size = if page_count % 8 == 0 {
+            page_count / 8
+        } else {
+            (page_count / 8) + 1
+        };
+        let use_bits = vec![0; size];
+        ClockCacheHandler { use_bits, hand: 0 }
+    }
+
+    fn get_use_bit(&self, location: usize) -> bool {
+        let byte = location / 8;
+        let bit = 1 << (7 - (location % 8));
+        self.use_bits[byte] & bit > 0
+    }
+
+    fn set_use_bit(&mut self, location: usize) {
+        let byte = location / 8;
+        let bit = 1 << (7 - (location % 8));
+        self.use_bits[byte] |= bit;
+    }
+
+    fn unset_use_bit(&mut self, location: usize) {
+        let byte = location / 8;
+        let bit = 1 << (7 - (location % 8));
+        let mask = u8::MAX ^ bit;
+        self.use_bits[byte] &= mask;
+    }
+
+    fn advance_to_next_evictable_location(&mut self) -> usize {
+        // advance until we get to a zero bit
+        while self.get_use_bit(self.hand) {
+            // set 1 bit to 0
+            self.unset_use_bit(self.hand);
+            // advance hand. Wrap to 0 if necessary
+            self.hand += 1;
+            if self.hand == self.use_bits.len() * 8 {
+                self.hand = 0;
+            }
+        }
+        // now at a zero bit, this is our eviction candidate
+        self.hand
+    }
+}
+
+/*
+ * TODO: Put proper documentation of how this works here
+ */
+// TODO: Try to get a safer way of knowing which file a page id is associated with than using raw
+// fds
 pub struct Pager {
     pages: Vec<Page>,
     page_locations: HashMap<PageLookupKey, usize>,
-    free_locations: Vec<usize>,
+    location_fd_mapping: HashMap<usize, RawFd>,
     next_page_ids: Vec<NextPageId>,
+    clock_cache: ClockCacheHandler,
 }
 impl Pager {
     fn new(table_fds: &[BorrowedFd]) -> Self {
@@ -107,8 +163,7 @@ impl Pager {
                 .map(|_| Page::new(0, PageKind::Data))
                 .collect(),
             page_locations: HashMap::with_capacity(page_count),
-            free_locations: (0..page_count).collect(),
-            // TODO: Make this actually calc next page id
+            location_fd_mapping: HashMap::with_capacity(page_count),
             next_page_ids: table_fds
                 .iter()
                 .map(|fd| {
@@ -116,10 +171,11 @@ impl Pager {
                     NextPageId::new(fd.as_raw_fd(), next_id)
                 })
                 .collect(),
+            clock_cache: ClockCacheHandler::new(page_count),
         }
     }
 
-    fn calc_page_count<Fd: AsFd>(fd: Fd) -> Result<PageId, PagerError> {
+    fn calc_page_count<Fd: AsFd>(fd: Fd) -> Result<u64, PagerError> {
         let size: u64 = rustix::fs::fstat(fd)?.st_size.try_into().unwrap();
         Ok(size / PAGE_SIZE as u64)
     }
@@ -130,15 +186,54 @@ impl Pager {
         page_id: PageId,
     ) -> Result<&mut Page, PagerError> {
         match self.page_locations.get(&(fd.as_raw_fd(), page_id)) {
-            Some(loc) => Ok(self.pages.get_mut(*loc).unwrap()),
+            Some(loc) => {
+                self.clock_cache.set_use_bit(*loc);
+                Ok(self.pages.get_mut(*loc).unwrap())
+            }
             None => {
-                // not in cache, so get a free page
-                let location = self.get_free_page_location();
-                let page = self.pages.get_mut(location).unwrap();
-                page.replace_contents(fd.as_fd(), page_id)?;
+                let page = self.evict_page_and_replace_with(fd.as_fd(), page_id)?;
                 Ok(page)
             }
         }
+    }
+
+    // evicts a page and returns the location of that now usable page
+    fn evict_page(&mut self) -> Result<usize, PagerError> {
+        // NOTE: This code is copied in evict_page_and_replace_with, so changes to this code should
+        // be duplicated there
+        let location = self.clock_cache.advance_to_next_evictable_location();
+        let page = self.pages.get_mut(location).unwrap();
+
+        // handle old page, which may not actually be in use yet
+        if self.location_fd_mapping.contains_key(&location) {
+            let old_fd = self.location_fd_mapping.get(&location).unwrap();
+            let old_fd = unsafe { BorrowedFd::borrow_raw(*old_fd) };
+            if page.is_dirty() {
+                page.write_to_disk(old_fd)?;
+            }
+            self.location_fd_mapping.remove(&location);
+            self.page_locations.remove(&(old_fd.as_raw_fd(), page.id()));
+        }
+
+        Ok(location)
+    }
+
+    fn evict_page_and_replace_with<Fd: AsRawFd + AsFd>(
+        &mut self,
+        new_fd: Fd,
+        page_id: PageId,
+    ) -> Result<&mut Page, PagerError> {
+        let location = self.evict_page()?;
+        let page = self.pages.get_mut(location).unwrap();
+
+        // replace with new page
+        page.replace_contents(new_fd.as_fd(), page_id)?;
+        self.location_fd_mapping
+            .insert(location, new_fd.as_raw_fd());
+        self.page_locations
+            .insert((new_fd.as_raw_fd(), page_id), location);
+        self.clock_cache.set_use_bit(location);
+        Ok(page)
     }
 
     pub fn get_page<Fd: AsRawFd + AsFd>(
@@ -150,20 +245,11 @@ impl Pager {
         Ok(&*page)
     }
 
-    fn get_free_page_location(&mut self) -> usize {
-        match self.free_locations.pop() {
-            Some(loc) => loc,
-            None => {
-                // no free locations, so evice a page first
-                self.evict_page();
-                self.free_locations
-                    .pop()
-                    .expect("There should be a free location now")
-            }
-        }
-    }
-
-    pub fn new_page<Fd: AsRawFd>(&mut self, fd: Fd, kind: PageKind) -> &mut Page {
+    pub fn new_page<Fd: AsRawFd>(
+        &mut self,
+        fd: Fd,
+        kind: PageKind,
+    ) -> Result<&mut Page, PagerError> {
         let page_id = self
             .next_page_ids
             .iter_mut()
@@ -171,16 +257,14 @@ impl Pager {
             .unwrap()
             .use_id();
 
-        let location = self.get_free_page_location();
+        let location = self.evict_page()?;
         let page = self.pages.get_mut(location).unwrap();
         page.reset(page_id, kind);
         self.page_locations
             .insert((fd.as_raw_fd(), page_id), location);
-        page
-    }
-
-    fn evict_page(&mut self) {
-        // TODO: add this
+        self.location_fd_mapping.insert(location, fd.as_raw_fd());
+        self.clock_cache.set_use_bit(location);
+        Ok(page)
     }
 }
 
@@ -235,35 +319,35 @@ mod tests {
         let mut pager = Pager::new(&fds[..]);
 
         // set up table 0
-        let page0 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        let page0 = pager.new_page(table_fd0.as_fd(), PageKind::Data).unwrap();
         fill_page(page0, 0);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        let page1 = pager.new_page(table_fd0.as_fd(), PageKind::Data).unwrap();
         fill_page(page1, 0);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(table_fd0.as_fd(), PageKind::Data);
+        let page2 = pager.new_page(table_fd0.as_fd(), PageKind::Data).unwrap();
         fill_page(page2, 0);
         assert_eq!(page2.id(), 2);
 
         // set up table 1
-        let page0 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        let page0 = pager.new_page(table_fd1.as_fd(), PageKind::Data).unwrap();
         fill_page(page0, 100);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        let page1 = pager.new_page(table_fd1.as_fd(), PageKind::Data).unwrap();
         fill_page(page1, 100);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(table_fd1.as_fd(), PageKind::Data);
+        let page2 = pager.new_page(table_fd1.as_fd(), PageKind::Data).unwrap();
         fill_page(page2, 100);
         assert_eq!(page2.id(), 2);
 
         // set up table 2
-        let page0 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        let page0 = pager.new_page(table_fd2.as_fd(), PageKind::Data).unwrap();
         fill_page(page0, 200);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        let page1 = pager.new_page(table_fd2.as_fd(), PageKind::Data).unwrap();
         fill_page(page1, 200);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(table_fd2.as_fd(), PageKind::Data);
+        let page2 = pager.new_page(table_fd2.as_fd(), PageKind::Data).unwrap();
         fill_page(page2, 200);
         assert_eq!(page2.id(), 2);
 
