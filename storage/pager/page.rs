@@ -4,10 +4,8 @@ use std::{
     mem,
     num::NonZeroU64,
     ops::Range,
+    os::unix::fs::FileExt,
 };
-
-use rustix::fd::AsFd;
-use rustix::io::{pread, pwrite, retry_on_intr, Errno as RustixErrno};
 
 use crate::serialize::{Deserialize, SerdeError, Serialize};
 
@@ -72,7 +70,6 @@ pub enum PageError {
     IoError(IoError),
     SerdeError(SerdeError),
     NotEnoughSpace,
-    RustixError(RustixErrno),
     Corrupted,
 }
 impl From<IoError> for PageError {
@@ -83,11 +80,6 @@ impl From<IoError> for PageError {
 impl From<SerdeError> for PageError {
     fn from(value: SerdeError) -> Self {
         Self::SerdeError(value)
-    }
-}
-impl From<RustixErrno> for PageError {
-    fn from(value: RustixErrno) -> Self {
-        Self::RustixError(value)
     }
 }
 
@@ -234,18 +226,22 @@ impl Page {
         self.header.cell_count
     }
 
-    pub fn from_disk<Fd: AsFd>(fd: Fd, page_id: PageId) -> Result<Self, PageError> {
+    pub fn from_disk<F: FileExt>(source: &F, page_id: PageId) -> Result<Self, PageError> {
         let mut new_page = Page::new(0, PageKind::Data);
-        new_page.replace_contents(fd, page_id)?;
+        new_page.replace_contents(source, page_id)?;
         Ok(new_page)
     }
 
     // replaces the contents of this page object with the indicated on-disk page's contents
-    pub fn replace_contents<Fd: AsFd>(&mut self, fd: Fd, page_id: PageId) -> Result<(), PageError> {
+    pub fn replace_contents<F: FileExt>(
+        &mut self,
+        source: &F,
+        page_id: PageId,
+    ) -> Result<(), PageError> {
         let buf = self.as_slice_mut();
         let offset = page_id * PAGE_SIZE as u64;
         // make read all
-        Page::read_entire_page(fd, buf, offset)?;
+        Page::read_entire_page(source, buf, offset)?;
 
         // new page should now have values from disk
         let checksum = self.calc_checksum();
@@ -263,35 +259,27 @@ impl Page {
         unsafe { slice::from_raw_parts_mut(self as *mut Self as *mut u8, PAGE_SIZE.into()) }
     }
 
-    fn read_entire_page<Fd: AsFd>(fd: Fd, buf: &mut [u8], offset: u64) -> Result<(), RustixErrno> {
+    fn read_entire_page<F: FileExt>(
+        source: &F,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<(), PageError> {
         assert!(buf.len() == PAGE_SIZE as usize);
-        let mut buf = buf;
-        let mut offset = offset;
-        let mut bytes_left = PAGE_SIZE as usize;
-        while bytes_left > 0 {
-            let bytes_read = retry_on_intr(|| pread(fd.as_fd(), buf, offset))?;
-            bytes_left -= bytes_read;
-            buf = &mut buf[bytes_read..];
-            offset += bytes_read as u64;
-        }
+        source.read_exact_at(buf, offset)?;
         Ok(())
     }
 
-    fn write_entire_page<Fd: AsFd>(fd: Fd, buf: &[u8], offset: u64) -> Result<(), RustixErrno> {
+    fn write_entire_page<F: FileExt>(
+        dest: &mut F,
+        buf: &[u8],
+        offset: u64,
+    ) -> Result<(), PageError> {
         assert!(buf.len() == PAGE_SIZE as usize);
-        let mut buf = buf;
-        let mut offset = offset;
-        let mut bytes_left = PAGE_SIZE as usize;
-        while bytes_left > 0 {
-            let bytes_written = retry_on_intr(|| pwrite(fd.as_fd(), buf, offset))?;
-            bytes_left -= bytes_written;
-            buf = &buf[bytes_written..];
-            offset += bytes_written as u64;
-        }
+        dest.write_all_at(buf, offset)?;
         Ok(())
     }
 
-    pub fn write_to_disk<Fd: AsFd>(&mut self, fd: Fd) -> Result<(), PageError> {
+    pub fn write_to_disk<F: FileExt>(&mut self, dest: &mut F) -> Result<(), PageError> {
         self.defragment()?;
         let offset = self.header.page_id * PAGE_SIZE as u64;
         // setting dirty flag before slice cast and write to:
@@ -301,7 +289,7 @@ impl Page {
         self.header.flags.set_dirty(false);
         self.header.checksum = self.calc_checksum();
         let buf = self.as_slice();
-        Page::write_entire_page(fd, buf, offset).inspect_err(|_err| {
+        Page::write_entire_page(dest, buf, offset).inspect_err(|_err| {
             self.header.flags.set_dirty(dirty_val);
         })?;
         Ok(())
@@ -492,9 +480,7 @@ impl Deserialize for CellPointer {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem, path::Path};
-
-    use rustix::fs::{Mode, OFlags};
+    use std::{fs::OpenOptions, mem};
 
     use super::*;
 
@@ -775,12 +761,13 @@ mod tests {
 
     #[test]
     fn test_replace_contents() {
-        let fd = rustix::fs::open(
-            Path::new("replace_contents.test"),
-            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
-            Mode::RWXU,
-        )
-        .unwrap();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open("replace_contents.test")
+            .unwrap();
 
         // add cells
         let mut page = Page::new(0, PageKind::Data);
@@ -798,10 +785,10 @@ mod tests {
             buffer.clear();
         }
 
-        page.write_to_disk(fd.as_fd()).unwrap();
+        page.write_to_disk(&mut file).unwrap();
 
         let mut replaced_page = Page::new(42, PageKind::Data);
-        replaced_page.replace_contents(fd.as_fd(), 0).unwrap();
+        replaced_page.replace_contents(&file, 0).unwrap();
         let read_cells = get_all_cells(&replaced_page);
         assert_eq!(cells, read_cells);
         assert_eq!(page, replaced_page);
@@ -809,12 +796,13 @@ mod tests {
 
     #[test]
     fn to_from_disk_basics() {
-        let fd = rustix::fs::open(
-            Path::new("to_from_disk_basics.test"),
-            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
-            Mode::RWXU,
-        )
-        .unwrap();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open("to_from_disk_basics.test")
+            .unwrap();
 
         // add cells
         let mut page = Page::new(0, PageKind::Data);
@@ -832,9 +820,9 @@ mod tests {
             buffer.clear();
         }
 
-        page.write_to_disk(fd.as_fd()).unwrap();
+        page.write_to_disk(&mut file).unwrap();
 
-        let read_page = Page::from_disk(fd.as_fd(), 0).unwrap();
+        let read_page = Page::from_disk(&file, 0).unwrap();
         let read_cells = get_all_cells(&read_page);
         assert_eq!(cells, read_cells);
         assert_eq!(page, read_page);
@@ -842,12 +830,13 @@ mod tests {
 
     #[test]
     fn to_from_disk_multiple_pages() {
-        let fd = rustix::fs::open(
-            Path::new("to_from_disk_multiple_pages.test"),
-            OFlags::CREATE | OFlags::TRUNC | OFlags::RDWR,
-            Mode::RWXU,
-        )
-        .unwrap();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open("to_from_disk_multiple_pages.test")
+            .unwrap();
 
         let mut page0 = Page::new(0, PageKind::Data);
         let cells0 = vec![vec![10, 11, 12, 13]];
@@ -857,7 +846,7 @@ mod tests {
             page0.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }
-        page0.write_to_disk(fd.as_fd()).unwrap();
+        page0.write_to_disk(&mut file).unwrap();
 
         let mut page1 = Page::new(1, PageKind::Data);
         let cells1 = vec![vec![20, 21, 22, 23]];
@@ -867,7 +856,7 @@ mod tests {
             page1.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }
-        page1.write_to_disk(fd.as_fd()).unwrap();
+        page1.write_to_disk(&mut file).unwrap();
 
         let mut page2 = Page::new(2, PageKind::Data);
         let cells2 = vec![vec![30, 31, 32, 33]];
@@ -877,18 +866,18 @@ mod tests {
             page2.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }
-        page2.write_to_disk(fd.as_fd()).unwrap();
+        page2.write_to_disk(&mut file).unwrap();
 
         // read out of order now
-        let read_page1 = Page::from_disk(fd.as_fd(), 1).unwrap();
+        let read_page1 = Page::from_disk(&file, 1).unwrap();
         assert_eq!(page1, read_page1);
         assert_eq!(cells1, get_all_cells(&read_page1));
 
-        let read_page2 = Page::from_disk(fd.as_fd(), 2).unwrap();
+        let read_page2 = Page::from_disk(&file, 2).unwrap();
         assert_eq!(page2, read_page2);
         assert_eq!(cells2, get_all_cells(&read_page2));
 
-        let read_page0 = Page::from_disk(fd.as_fd(), 0).unwrap();
+        let read_page0 = Page::from_disk(&file, 0).unwrap();
         assert_eq!(page0, read_page0);
         assert_eq!(cells0, get_all_cells(&read_page0));
     }
