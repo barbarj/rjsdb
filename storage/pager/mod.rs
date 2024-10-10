@@ -94,6 +94,7 @@ impl NextPageId {
 
 struct ClockCacheHandler {
     hand: usize,
+    page_count: usize,
     use_bits: Vec<u8>,
 }
 impl ClockCacheHandler {
@@ -104,7 +105,11 @@ impl ClockCacheHandler {
             (page_count / 8) + 1
         };
         let use_bits = vec![0; size];
-        ClockCacheHandler { use_bits, hand: 0 }
+        ClockCacheHandler {
+            use_bits,
+            page_count,
+            hand: 0,
+        }
     }
 
     fn get_use_bit(&self, location: usize) -> bool {
@@ -133,7 +138,7 @@ impl ClockCacheHandler {
             self.unset_use_bit(self.hand);
             // advance hand. Wrap to 0 if necessary
             self.hand += 1;
-            if self.hand == self.use_bits.len() * 8 {
+            if self.hand == self.page_count {
                 self.hand = 0;
             }
         }
@@ -407,5 +412,100 @@ mod tests {
             vec![220, 220, 220],
             get_first_cell_from_page(&mut pager, fd2, 2)
         );
+    }
+
+    fn count_pages_in_cache_from_fd(pager: &Pager, fd: RawFd) -> usize {
+        pager
+            .location_fd_mapping
+            .iter()
+            .filter(|(_k, v)| **v == fd)
+            .count()
+    }
+
+    #[test]
+    fn cache_eviction() {
+        let table0 = open_test_file("cache_eviction_t0.test");
+        let table1 = open_test_file("cache_eviction_t1.test");
+        let fd0 = table0.as_raw_fd();
+        let fd1 = table1.as_raw_fd();
+        let mut pager = Pager::with_page_count(vec![table0, table1], 3);
+
+        /*
+         * Plan:
+         * - Fill table0 pages, check properties
+         * - Fill table1 pages, check properties,
+         * - get a table0 page, check properties
+         */
+        // fill cache with table 0 pages
+        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        fill_page(page, 0);
+        assert_eq!(page.id(), 0);
+        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        fill_page(page, 0);
+        assert_eq!(page.id(), 1);
+        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        fill_page(page, 0);
+        assert_eq!(page.id(), 2);
+        // check properties
+        assert_eq!(pager.pages.len(), 3);
+        assert_eq!(pager.page_locations.len(), 3);
+        assert_eq!(pager.location_fd_mapping.len(), 3);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 3);
+
+        // fill cache with table 1 pages
+        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        fill_page(page, 100);
+        assert_eq!(page.id(), 0);
+        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        fill_page(page, 100);
+        assert_eq!(page.id(), 1);
+        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        fill_page(page, 100);
+        assert_eq!(page.id(), 2);
+        // check properties
+        assert_eq!(pager.pages.len(), 3);
+        assert_eq!(pager.page_locations.len(), 3);
+        assert_eq!(pager.location_fd_mapping.len(), 3);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd1), 3);
+
+        // load a table 0 page
+        assert_eq!(
+            vec![10, 10, 10],
+            get_first_cell_from_page(&mut pager, fd0, 1)
+        );
+        assert_eq!(pager.pages.len(), 3);
+        assert_eq!(pager.page_locations.len(), 3);
+        assert_eq!(pager.location_fd_mapping.len(), 3);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd1), 2);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 1);
+        // the evicted page should have been in position 0, so lets confirm that.
+        assert_eq!(pager.location_fd_mapping.get(&0), Some(&fd0));
+        // the rest should be from fd1
+        assert_eq!(pager.location_fd_mapping.get(&1), Some(&fd1));
+        assert_eq!(pager.location_fd_mapping.get(&2), Some(&fd1));
+
+        // get an already in-cache page that is next-to-be evicted (position 1), then load a
+        // non-cached page. It should load in position 2.
+
+        // load in-cache page
+        assert_eq!(
+            vec![110, 110, 110],
+            get_first_cell_from_page(&mut pager, fd1, 1)
+        );
+        // load out-of-cache page
+        assert_eq!(
+            vec![20, 20, 20],
+            get_first_cell_from_page(&mut pager, fd0, 2)
+        );
+        // check properties
+        assert_eq!(pager.pages.len(), 3);
+        assert_eq!(pager.page_locations.len(), 3);
+        assert_eq!(pager.location_fd_mapping.len(), 3);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd1), 1);
+        assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 2);
+        // new fd mapping should be [0,1,0]
+        assert_eq!(pager.location_fd_mapping.get(&0), Some(&fd0));
+        assert_eq!(pager.location_fd_mapping.get(&1), Some(&fd1));
+        assert_eq!(pager.location_fd_mapping.get(&2), Some(&fd0));
     }
 }
