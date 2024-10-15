@@ -7,10 +7,14 @@ use std::io::Error as IoError;
 use std::os::unix::fs::MetadataExt;
 use std::{collections::HashMap, os::fd::AsRawFd};
 
-use page::{PageError, PageKind, PAGE_SIZE};
+use page::PageError;
 
 pub type PageId = page::PageId;
-pub type Page = page::Page;
+pub use page::{Page, PageKind, PAGE_SIZE};
+
+use crate::serialize::SerdeError;
+pub const CELL_POINTER_SIZE: u16 = page::CELL_POINTER_SIZE;
+pub const PAGE_BUFFER_SIZE: u16 = page::PAGE_BUFFER_SIZE;
 
 /*
  * Pager Requirements:
@@ -57,6 +61,7 @@ const MAX_PAGE_COUNT: usize = MAX_PAGER_MEMORY / PAGE_SIZE as usize;
 pub enum PagerError {
     IoError(IoError),
     PageError(PageError),
+    SerdeError(SerdeError),
 }
 impl From<IoError> for PagerError {
     fn from(value: IoError) -> Self {
@@ -66,6 +71,11 @@ impl From<IoError> for PagerError {
 impl From<PageError> for PagerError {
     fn from(value: PageError) -> Self {
         Self::PageError(value)
+    }
+}
+impl From<SerdeError> for PagerError {
+    fn from(value: SerdeError) -> Self {
+        Self::SerdeError(value)
     }
 }
 

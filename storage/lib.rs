@@ -20,6 +20,7 @@ use generate::{Generate, Rng};
  * - Ability to pin pages
  */
 
+mod btree;
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
 mod serialize;

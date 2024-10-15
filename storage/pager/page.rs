@@ -58,12 +58,12 @@ pub type PageId = u64;
 type PageBufferOffset = u16;
 
 pub const PAGE_SIZE: PageBufferOffset = 4096 * 4; // 16KB
-const PAGE_BUFFER_SIZE: PageBufferOffset =
+pub const PAGE_BUFFER_SIZE: PageBufferOffset =
     PAGE_SIZE - mem::size_of::<PageHeader>() as PageBufferOffset;
 const HEADER_VERSION: u8 = 1;
 // the byte values spell PAGE
 const ALIGNMENT_GUARD_VALUE: u32 = u32::from_be_bytes([50, 41, 47, 45]);
-const CELL_POINTER_SIZE: u16 = mem::size_of::<CellPointer>() as u16;
+pub const CELL_POINTER_SIZE: u16 = mem::size_of::<CellPointer>() as u16;
 
 #[derive(Debug)]
 pub enum PageError {
@@ -116,9 +116,10 @@ impl PageFlags {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PageKind {
     Data,
+    NotData,
 }
 
 // TODO: Add CRC check in addition to the checksum
@@ -140,21 +141,21 @@ pub enum PageKind {
 /// the page size increases, those fields will need to use larger types
 #[repr(C)]
 #[derive(Debug, PartialEq)]
-struct PageHeader {
+pub struct PageHeader {
     // comments: size, end-of-this-field-with-padding in layout
     checksum: u64,      // 8, 8
     header_version: u8, // 1, 9
     flags: PageFlags,   // 1, 10
     //  (included so that this memory is initialized instead of being padding)
-    _padding1: u8,                        // 1, 11
-    page_kind: PageKind,                  // 1, 12
-    alignment_guard: u32,                 // 4, 16
-    page_id: PageId,                      // 8, 24
-    overflow_page_id: Option<NonZeroU64>, // 8, 32
-    cell_count: u16,                      // 2, 34
-    free_space_start: PageBufferOffset,   // 2, 36
-    free_space_end: PageBufferOffset,     // 2, 38
-    total_free_space: PageBufferOffset,   // 2, 40
+    _padding1: u8,                            // 1, 11
+    page_kind: PageKind,                      // 1, 12
+    alignment_guard: u32,                     // 4, 16
+    page_id: PageId,                          // 8, 24
+    pub overflow_page_id: Option<NonZeroU64>, // 8, 32
+    cell_count: u16,                          // 2, 34
+    free_space_start: PageBufferOffset,       // 2, 36
+    free_space_end: PageBufferOffset,         // 2, 38
+    total_free_space: PageBufferOffset,       // 2, 40
 }
 
 #[repr(C)]
@@ -184,7 +185,7 @@ impl PageBuffer {
 #[repr(C)]
 #[derive(Debug, PartialEq)]
 pub struct Page {
-    header: PageHeader,
+    pub header: PageHeader,
     data: PageBuffer,
 }
 impl Page {
@@ -224,6 +225,14 @@ impl Page {
 
     pub fn cell_count(&self) -> u16 {
         self.header.cell_count
+    }
+
+    pub fn total_free_space(&self) -> u16 {
+        self.header.total_free_space
+    }
+
+    pub fn kind(&self) -> PageKind {
+        self.header.page_kind
     }
 
     pub fn from_disk<F: FileExt>(source: &F, page_id: PageId) -> Result<Self, PageError> {
