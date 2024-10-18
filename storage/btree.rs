@@ -127,7 +127,7 @@ impl BTreeCursor {
         Ok(K::from_bytes(&mut reader, &())?)
     }
 
-    fn get_page_id_from_cell(page: &Page, position: u16) -> Result<PageId, PagerError> {
+    fn get_page_id_from_node_cell(page: &Page, position: u16) -> Result<PageId, PagerError> {
         assert!(position < page.cell_count());
         assert!(matches!(
             page.kind(),
@@ -138,17 +138,20 @@ impl BTreeCursor {
         Ok(PageId::from_bytes(&mut reader, &())?)
     }
 
-    fn get_pade_id_and_position_from_cell(
+    fn get_heap_insertion_data_from_leaf_cell(
         page: &Page,
         position: u16,
-    ) -> Result<(PageId, u16), PagerError> {
+    ) -> Result<HeapInsertionData, PagerError> {
         assert!(position < page.cell_count());
         assert!(matches!(page.kind(), PageKind::BTreeLeaf));
         let cell_bytes = page.get_cell(position);
         let mut reader = &cell_bytes[..];
         let heap_page_id = PageId::from_bytes(&mut reader, &())?;
         let page_position = u16::from_bytes(&mut reader, &())?;
-        Ok((heap_page_id, page_position))
+        Ok(HeapInsertionData {
+            page_id: heap_page_id,
+            cell_position: page_position,
+        })
     }
 
     // TODO: Handle overflow case
@@ -175,7 +178,7 @@ impl BTreeCursor {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => pos,
             };
-            let page_id = BTreeCursor::get_page_id_from_cell(page, position)?;
+            let page_id = BTreeCursor::get_page_id_from_node_cell(page, position)?;
             page = self.pager.get_page(fd, page_id)?;
         }
         // now re-get that page mutably
@@ -198,10 +201,10 @@ impl BTreeCursor {
             SearchResult::Found(position) => position,
             SearchResult::NotFound(_) => return Ok(None),
         };
-        let (heap_page_id, position) =
-            BTreeCursor::get_pade_id_and_position_from_cell(leaf_page, position)?;
-        let heap_page = self.pager.get_page(heap_fd, heap_page_id)?;
-        let data = BTreeCursor::get_cell_value(heap_page, position)?;
+        let heap_insertion_data =
+            BTreeCursor::get_heap_insertion_data_from_leaf_cell(leaf_page, position)?;
+        let heap_page = self.pager.get_page(heap_fd, heap_insertion_data.page_id)?;
+        let data = BTreeCursor::get_cell_value(heap_page, heap_insertion_data.cell_position)?;
         Ok(Some(data))
     }
 
@@ -232,6 +235,11 @@ impl From<PageError> for InsertionError {
     }
 }
 
+pub struct HeapInsertionData {
+    pub page_id: PageId,
+    pub cell_position: u16,
+}
+
 impl BTreeCursor {
     fn make_node_cell<K>(key: &K, page_id: PageId) -> Result<Vec<u8>, PagerError>
     where
@@ -244,18 +252,24 @@ impl BTreeCursor {
         Ok(bytes)
     }
 
-    fn make_heap_cell<K>(key: &K, value: &[u8]) -> Result<Vec<u8>, PagerError>
+    fn make_leaf_cell<K>(key: &K, insertion_data: &HeapInsertionData) -> Result<Vec<u8>, PagerError>
     where
         K: Serialize,
     {
-        let mut bytes = Vec::with_capacity(value.len());
-        bytes.push(0); // Overflow flag. Always false for now
+        let mut bytes = Vec::with_capacity(12); // absolute minimum size
+        insertion_data.page_id.write_to_bytes(&mut bytes)?;
+        insertion_data.cell_position.write_to_bytes(&mut bytes)?;
+        bytes.push(0); // overflow flag, always false for now
         key.write_to_bytes(&mut bytes)?;
-        bytes.extend_from_slice(value);
         Ok(bytes)
     }
 
-    pub fn insert<K>(&mut self, fd: RawFd, key: &K, value: &[u8]) -> Result<(), InsertionError>
+    pub fn insert<K>(
+        &mut self,
+        fd: RawFd,
+        key: &K,
+        insertion_data: &HeapInsertionData,
+    ) -> Result<(), InsertionError>
     where
         K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
     {
@@ -266,7 +280,7 @@ impl BTreeCursor {
         };
         // TODO: Handle case where data needs to overflow
         // TODO: Handle non-heap inserts
-        let data = BTreeCursor::make_heap_cell(key, value)?;
+        let data = BTreeCursor::make_leaf_cell(key, insertion_data)?;
         // TODO: Handle case where a split is necessary. i.e. where cell_count is already at
         // FANOUT_FACTOR
         // TODO: Handle case where parent-node's rightmost value needs to be updated
