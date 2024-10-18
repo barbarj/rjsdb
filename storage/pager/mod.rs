@@ -7,10 +7,8 @@ use std::io::Error as IoError;
 use std::os::unix::fs::MetadataExt;
 use std::{collections::HashMap, os::fd::AsRawFd};
 
-use page::PageError;
-
 pub type PageId = page::PageId;
-pub use page::{Page, PageKind, PAGE_SIZE};
+pub use page::{Page, PageError, PageKind, PAGE_SIZE};
 
 use crate::serialize::SerdeError;
 pub const CELL_POINTER_SIZE: u16 = page::CELL_POINTER_SIZE;
@@ -178,7 +176,7 @@ impl Pager {
     fn with_page_count(file_refs: Vec<File>, page_count: usize) -> Self {
         Pager {
             pages: (0..page_count)
-                .map(|_| Page::new(0, PageKind::Data))
+                .map(|_| Page::new(0, PageKind::Heap))
                 .collect(),
             page_locations: HashMap::with_capacity(page_count),
             location_fd_mapping: HashMap::with_capacity(page_count),
@@ -339,35 +337,35 @@ mod tests {
         let mut pager = Pager::new(vec![table0, table1, table2]);
 
         // set up table 0
-        let page0 = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page0 = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page0, 0);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page1 = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page1, 0);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page2 = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page2, 0);
         assert_eq!(page2.id(), 2);
 
         // set up table 1
-        let page0 = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page0 = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page0, 100);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page1 = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page1, 100);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page2 = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page2, 100);
         assert_eq!(page2.id(), 2);
 
         // set up table 2
-        let page0 = pager.new_page(fd2, PageKind::Data).unwrap();
+        let page0 = pager.new_page(fd2, PageKind::Heap).unwrap();
         fill_page(page0, 200);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd2, PageKind::Data).unwrap();
+        let page1 = pager.new_page(fd2, PageKind::Heap).unwrap();
         fill_page(page1, 200);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd2, PageKind::Data).unwrap();
+        let page2 = pager.new_page(fd2, PageKind::Heap).unwrap();
         fill_page(page2, 200);
         assert_eq!(page2.id(), 2);
 
@@ -447,13 +445,13 @@ mod tests {
          * - get a table0 page, check properties
          */
         // fill cache with table 0 pages
-        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page, 0);
         assert_eq!(page.id(), 0);
-        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page, 0);
         assert_eq!(page.id(), 1);
-        let page = pager.new_page(fd0, PageKind::Data).unwrap();
+        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
         fill_page(page, 0);
         assert_eq!(page.id(), 2);
         // check properties
@@ -463,13 +461,13 @@ mod tests {
         assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 3);
 
         // fill cache with table 1 pages
-        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page, 100);
         assert_eq!(page.id(), 0);
-        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page, 100);
         assert_eq!(page.id(), 1);
-        let page = pager.new_page(fd1, PageKind::Data).unwrap();
+        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
         fill_page(page, 100);
         assert_eq!(page.id(), 2);
         // check properties

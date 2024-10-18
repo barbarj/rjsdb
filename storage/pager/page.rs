@@ -118,8 +118,10 @@ impl PageFlags {
 #[repr(u8)]
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PageKind {
-    Data,
-    NotData,
+    Heap,
+    BTreeRoot,
+    BTreeNode,
+    BTreeLeaf,
 }
 
 // TODO: Add CRC check in addition to the checksum
@@ -236,7 +238,7 @@ impl Page {
     }
 
     pub fn from_disk<F: FileExt>(source: &F, page_id: PageId) -> Result<Self, PageError> {
-        let mut new_page = Page::new(0, PageKind::Data);
+        let mut new_page = Page::new(0, PageKind::Heap);
         new_page.replace_contents(source, page_id)?;
         Ok(new_page)
     }
@@ -537,7 +539,7 @@ mod tests {
     #[test]
     fn page_basics() {
         // add cells
-        let mut page = Page::new(1, PageKind::Data);
+        let mut page = Page::new(1, PageKind::Heap);
         let cells = vec![
             vec![1u32, 2, 3, 4, 5],
             vec![10u32, 20, 30, 40, 50],
@@ -623,7 +625,7 @@ mod tests {
 
     #[test]
     fn page_defrag() {
-        let mut page = Page::new(1, PageKind::Data);
+        let mut page = Page::new(1, PageKind::Heap);
         let cell10s = vec![10u32, 10, 10, 10, 10];
         let cell20s = vec![20u32, 20, 20, 20, 20];
         let mut bytes10s = Vec::new();
@@ -691,7 +693,7 @@ mod tests {
 
     #[test]
     fn defrag_with_non_insertion_order_pointers_no_gaps() {
-        let mut page = Page::new(1, PageKind::Data);
+        let mut page = Page::new(1, PageKind::Heap);
         let cell0 = vec![10u32, 10, 10, 10, 10];
         let cell2 = vec![20u32, 20, 20];
         let cell1 = vec![30u32, 30, 30, 30];
@@ -726,7 +728,7 @@ mod tests {
 
     #[test]
     fn defrag_with_non_insertion_order_pointers_with_gaps() {
-        let mut page = Page::new(1, PageKind::Data);
+        let mut page = Page::new(1, PageKind::Heap);
         let cell0 = vec![10u32, 10, 10, 10, 10];
         let cell_deleted = vec![1u32, 2];
         let cell2 = vec![20u32, 20, 20];
@@ -779,7 +781,7 @@ mod tests {
             .unwrap();
 
         // add cells
-        let mut page = Page::new(0, PageKind::Data);
+        let mut page = Page::new(0, PageKind::Heap);
         let cells = vec![
             vec![1u32, 2, 3, 4, 5],
             vec![10u32, 20, 30, 40, 50],
@@ -796,7 +798,7 @@ mod tests {
 
         page.write_to_disk(&mut file).unwrap();
 
-        let mut replaced_page = Page::new(42, PageKind::Data);
+        let mut replaced_page = Page::new(42, PageKind::Heap);
         replaced_page.replace_contents(&file, 0).unwrap();
         let read_cells = get_all_cells(&replaced_page);
         assert_eq!(cells, read_cells);
@@ -814,7 +816,7 @@ mod tests {
             .unwrap();
 
         // add cells
-        let mut page = Page::new(0, PageKind::Data);
+        let mut page = Page::new(0, PageKind::Heap);
         let cells = vec![
             vec![1u32, 2, 3, 4, 5],
             vec![10u32, 20, 30, 40, 50],
@@ -847,7 +849,7 @@ mod tests {
             .open("to_from_disk_multiple_pages.test")
             .unwrap();
 
-        let mut page0 = Page::new(0, PageKind::Data);
+        let mut page0 = Page::new(0, PageKind::Heap);
         let cells0 = vec![vec![10, 11, 12, 13]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells0.iter().enumerate() {
@@ -857,7 +859,7 @@ mod tests {
         }
         page0.write_to_disk(&mut file).unwrap();
 
-        let mut page1 = Page::new(1, PageKind::Data);
+        let mut page1 = Page::new(1, PageKind::Heap);
         let cells1 = vec![vec![20, 21, 22, 23]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells1.iter().enumerate() {
@@ -867,7 +869,7 @@ mod tests {
         }
         page1.write_to_disk(&mut file).unwrap();
 
-        let mut page2 = Page::new(2, PageKind::Data);
+        let mut page2 = Page::new(2, PageKind::Heap);
         let cells2 = vec![vec![30, 31, 32, 33]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells2.iter().enumerate() {
