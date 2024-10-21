@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    pager::{Page, PageError, PageId, PageKind, Pager, PagerError},
+    pager::{Page, PageError, PageId, PageKind, Pager, PagerError, PAGE_BUFFER_SIZE},
     serialize::{Deserialize, Serialize},
 };
 
@@ -36,23 +36,26 @@ use crate::{
 /*
  * BTree Node Cell Layout:
  *
- * 0                  8                  9             8 + key_size
- * +------------------+------------------+------------------+
- * | [u64] PageId     | [byte] overflows | [Serialized] Key |
- * +------------------+------------------+------------------+
+ * 0                  8             8 + key_size
+ * +------------------+------------------+
+ * | [u64] PageId     | [Serialized] Key |
+ * +------------------+------------------+
  *
  * BTree Leaf Cell Layout:
  *
- * 0                  8                     10                 11               8 + key_size
- * +------------------+---------------------+------------------+------------------+
- * | [u64] PageId     | [u16] cell_position | [byte] overflows | [Serialized] Key |
- * +------------------+---------------------+------------------+------------------+
+ * 0                  8                     10              10 + key_size
+ * +------------------+---------------------+------------------+
+ * | [u64] PageId     | [u16] cell_position | [Serialized] Key |
+ * +------------------+---------------------+------------------+
  * - This points to the HEAP page id
  *
  *
  */
-const NODE_CELL_KEY_OFFSET: usize = 9;
-const LEAF_CELL_KEY_OFFSET: usize = 11;
+const NODE_CELL_KEY_OFFSET: usize = 8;
+const LEAF_CELL_KEY_OFFSET: usize = 10;
+
+const MIN_FANOUT_FACTOR: u16 = 4;
+const MAX_BTREE_CELL_SIZE: u16 = PAGE_BUFFER_SIZE / MIN_FANOUT_FACTOR;
 
 #[derive(Debug, PartialEq)]
 enum SearchResult {
@@ -256,7 +259,6 @@ impl BTreeCursor {
     {
         let mut bytes = Vec::with_capacity(10); // this is the absolute minimum size we'll need
         page_id.write_to_bytes(&mut bytes)?;
-        bytes.push(0); // overflow flag, always false for now
         key.write_to_bytes(&mut bytes)?;
         Ok(bytes)
     }
@@ -268,7 +270,6 @@ impl BTreeCursor {
         let mut bytes = Vec::with_capacity(12); // absolute minimum size
         insertion_data.page_id.write_to_bytes(&mut bytes)?;
         insertion_data.cell_position.write_to_bytes(&mut bytes)?;
-        bytes.push(0); // overflow flag, always false for now
         key.write_to_bytes(&mut bytes)?;
         Ok(bytes)
     }
@@ -290,6 +291,7 @@ impl BTreeCursor {
         // TODO: Handle case where data needs to overflow
         // TODO: Handle non-heap inserts
         let data = BTreeCursor::make_leaf_cell(key, insertion_data)?;
+
         // TODO: Handle case where a split is necessary. i.e. where cell_count is already at
         // FANOUT_FACTOR
         // TODO: Handle case where parent-node's rightmost value needs to be updated
@@ -316,6 +318,12 @@ impl BTreeCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_assumptions() {
+        assert_eq!(PAGE_BUFFER_SIZE % MIN_FANOUT_FACTOR, 0);
+        assert_eq!(PAGE_BUFFER_SIZE % MAX_BTREE_CELL_SIZE, 0);
+    }
 
     #[test]
     fn get_key_from_cell_works() {
