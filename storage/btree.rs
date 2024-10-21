@@ -235,9 +235,18 @@ impl From<PageError> for InsertionError {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct HeapInsertionData {
     pub page_id: PageId,
     pub cell_position: u16,
+}
+impl HeapInsertionData {
+    pub fn new(page_id: PageId, cell_position: u16) -> Self {
+        HeapInsertionData {
+            page_id,
+            cell_position,
+        }
+    }
 }
 
 impl BTreeCursor {
@@ -378,5 +387,43 @@ mod tests {
             let res = BTreeCursor::binary_search_page(&page, &search_for).unwrap();
             assert_eq!(res, SearchResult::NotFound(*v));
         }
+    }
+
+    #[test]
+    fn node_cell_construction() {
+        let mut page = Page::new(0, PageKind::BTreeNode);
+        let page_id = 42;
+        let key = String::from("foo");
+        let cell = BTreeCursor::make_node_cell(&key, page_id).unwrap();
+        page.insert_cell(0, &cell).unwrap();
+
+        assert_eq!(
+            key,
+            BTreeCursor::get_key_from_cell::<String>(&page, 0).unwrap()
+        );
+        assert_eq!(
+            page_id,
+            BTreeCursor::get_page_id_from_node_cell(&page, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn leaf_cell_construction() {
+        let mut page = Page::new(0, PageKind::BTreeLeaf);
+        let page_id = 42;
+        let page_location = 43;
+        let key = String::from("foo");
+        let heap_data = HeapInsertionData::new(page_id, page_location);
+        let cell = BTreeCursor::make_leaf_cell(&key, &heap_data).unwrap();
+        page.insert_cell(0, &cell).unwrap();
+
+        assert_eq!(
+            key,
+            BTreeCursor::get_key_from_cell::<String>(&page, 0).unwrap()
+        );
+        assert_eq!(
+            heap_data,
+            BTreeCursor::get_heap_insertion_data_from_leaf_cell(&page, 0).unwrap()
+        );
     }
 }
