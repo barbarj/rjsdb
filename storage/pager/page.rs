@@ -119,9 +119,10 @@ impl PageFlags {
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PageKind {
     Heap,
-    BTreeRoot,
+    BTreeMetaRoot,
     BTreeNode,
-    BTreeLeaf,
+    BTreeLeafHeap,
+    BTreeLeafNotHeap,
 }
 
 // TODO: Add CRC check in addition to the checksum

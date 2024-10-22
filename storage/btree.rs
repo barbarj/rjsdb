@@ -1,31 +1,23 @@
-#![allow(dead_code, unused_imports)]
-/*
- * BTreeNode should reference a page and have methods for operating on it.
- * - allow search, which will allocate a new node and use it for the entire search process,
- * replacing the referenced page as necessary.
- */
-use std::{
-    cmp::{self, Ordering},
-    fmt::{Debug, Display},
-    os::fd::RawFd,
-    rc::Rc,
-};
+#![allow(dead_code)]
+use std::{cell::RefCell, cmp::Ordering, fmt::Debug, os::fd::RawFd, rc::Rc};
 
 use crate::{
     pager::{Page, PageError, PageId, PageKind, Pager, PagerError, PAGE_BUFFER_SIZE},
-    serialize::{Deserialize, Serialize},
+    serialize::{Deserialize, SerdeError, Serialize},
 };
 
-// TODO: Implement overflow handling
-
 /*
- * Logic for overflow pages:
+ * GOALS:
+ * - Support heap-location indices for Row_id as key
+ *   - Not bothering about wraparound
+ *   - Leaf nodes store HeapInsertionData
+ *   - Support point queries by row id, and table scans
+ * - Support row_id indices with user-defined primary key as key
+ *   - Leaf nodes store row id
+ *   - support same point queries and range scans
  *
- * There will be some max_payload_size. If payload is larger than that, split it at that size.
- * Go to the overflow page. If there is not one, allocate a new one and go to it. Store the
- * overflow part. Then on the original page, store the non-overflow part.
- * -- need to now include a cell header that indicates if this cell overflows to the overflow page,
- * and if so, the cell position of the overflow bytes in the overflow page.
+ * FUTURE GOALS:
+ * - Support secondary indices
  *
  */
 
@@ -34,28 +26,39 @@ use crate::{
  */
 
 /*
- * BTree Node Cell Layout:
- *
- * 0                  8             8 + key_size
- * +------------------+------------------+
- * | [u64] PageId     | [Serialized] Key |
- * +------------------+------------------+
- *
- * BTree Leaf Cell Layout:
- *
- * 0                  8                     10              10 + key_size
- * +------------------+---------------------+------------------+
- * | [u64] PageId     | [u16] cell_position | [Serialized] Key |
- * +------------------+---------------------+------------------+
- * - This points to the HEAP page id
- *
- *
- */
+* BTree Node Cell Layout:
+*
+* 0                  8             8 + key_size
+* +------------------+------------------+
+* | [u64] PageId     | [Serialized] Key |
+* +------------------+------------------+
+*
+ * BTree Leaf Not Heap Cell Layout:
+*
+* 0                  8             8 + key_size
+* +------------------+------------------+
+* | [u64] row_id     | [Serialized] Key |
+* +------------------+------------------+
+
+*
+* BTree Leaf Heap Cell Layout:
+*
+* 0                  8                     10              10 + key_size
+* +------------------+---------------------+------------------+
+* | [u64] PageId     | [u16] cell_position | [Serialized] Key |
+* +------------------+---------------------+------------------+
+* - This points to the HEAP page id
+*
+*
+*/
 const NODE_CELL_KEY_OFFSET: usize = 8;
-const LEAF_CELL_KEY_OFFSET: usize = 10;
+const LEAF_NOTHEAP_CELL_KEY_OFFSET: usize = 8;
+const LEAF_HEAP_CELL_KEY_OFFSET: usize = 10;
 
 const MIN_FANOUT_FACTOR: u16 = 4;
 const MAX_BTREE_CELL_SIZE: u16 = PAGE_BUFFER_SIZE / MIN_FANOUT_FACTOR;
+
+const METAROOT_ROOT_PTR_LOCATION: u16 = 0;
 
 #[derive(Debug, PartialEq)]
 enum SearchResult {
@@ -63,16 +66,55 @@ enum SearchResult {
     NotFound(u16),
 }
 
+#[derive(Debug)]
+pub enum BTreeCursorError {
+    Serde(SerdeError),
+    Pager(PagerError),
+    Page(PageError),
+    KeyAlreadyExists,
+}
+impl From<SerdeError> for BTreeCursorError {
+    fn from(value: SerdeError) -> Self {
+        Self::Serde(value)
+    }
+}
+impl From<PagerError> for BTreeCursorError {
+    fn from(value: PagerError) -> Self {
+        Self::Pager(value)
+    }
+}
+impl From<PageError> for BTreeCursorError {
+    fn from(value: PageError) -> Self {
+        Self::Page(value)
+    }
+}
+
 pub struct BTreeCursor {
     pager: Pager,
+    max_cell_size: u16,
 }
 impl BTreeCursor {
+    pub fn new(pager: Pager) -> Self {
+        BTreeCursor {
+            pager,
+            max_cell_size: MAX_BTREE_CELL_SIZE,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_max_cell_size(pager: Pager, max_cell_size: u16) -> Self {
+        BTreeCursor {
+            pager,
+            max_cell_size,
+        }
+    }
+
     /// Searches the page. If the page contains the key (i.e., this is a data page and the key is
     /// present, or is not a data page, but happens to have a split key matching the key), return
     /// a SearchResult::Found containing the cell location the key was found in.
     /// If the key was not found, return a SearchResult::NotFound containing the location that the
     /// key would belong at if inserted into the page.
-    fn binary_search_page<K>(page: &Page, key: &K) -> Result<SearchResult, PagerError>
+    fn binary_search_page<K>(page: &Page, key: &K) -> Result<SearchResult, BTreeCursorError>
     where
         K: Ord + Deserialize<ExtraInfo = ()>,
     {
@@ -113,29 +155,29 @@ impl BTreeCursor {
         }
     }
 
-    // TODO: Handle overflow case
     fn get_key_from_cell<K: Deserialize<ExtraInfo = ()>>(
         page: &Page,
         position: u16,
-    ) -> Result<K, PagerError> {
+    ) -> Result<K, BTreeCursorError> {
         assert!(position < page.cell_count());
-        assert!(!matches!(page.kind(), PageKind::Heap));
+        assert!(!matches!(
+            page.kind(),
+            PageKind::Heap | PageKind::BTreeMetaRoot
+        ));
 
         let cell_bytes = page.get_cell(position);
         let mut reader = match page.kind() {
-            PageKind::BTreeNode | PageKind::BTreeRoot => &cell_bytes[NODE_CELL_KEY_OFFSET..],
-            PageKind::BTreeLeaf => &cell_bytes[LEAF_CELL_KEY_OFFSET..],
-            PageKind::Heap => unreachable!(),
+            PageKind::BTreeNode => &cell_bytes[NODE_CELL_KEY_OFFSET..],
+            PageKind::BTreeLeafHeap => &cell_bytes[LEAF_HEAP_CELL_KEY_OFFSET..],
+            PageKind::BTreeLeafNotHeap => todo!(),
+            PageKind::Heap | PageKind::BTreeMetaRoot => unreachable!(),
         };
         Ok(K::from_bytes(&mut reader, &())?)
     }
 
-    fn get_page_id_from_node_cell(page: &Page, position: u16) -> Result<PageId, PagerError> {
+    fn get_page_id_from_node_cell(page: &Page, position: u16) -> Result<PageId, BTreeCursorError> {
         assert!(position < page.cell_count());
-        assert!(matches!(
-            page.kind(),
-            PageKind::BTreeNode | PageKind::BTreeRoot
-        ));
+        assert!(matches!(page.kind(), PageKind::BTreeNode));
         let cell_bytes = page.get_cell(position);
         let mut reader = &cell_bytes[0..];
         Ok(PageId::from_bytes(&mut reader, &())?)
@@ -144,9 +186,9 @@ impl BTreeCursor {
     fn get_heap_insertion_data_from_leaf_cell(
         page: &Page,
         position: u16,
-    ) -> Result<HeapInsertionData, PagerError> {
+    ) -> Result<HeapInsertionData, BTreeCursorError> {
         assert!(position < page.cell_count());
-        assert!(matches!(page.kind(), PageKind::BTreeLeaf));
+        assert!(matches!(page.kind(), PageKind::BTreeLeafHeap));
         let cell_bytes = page.get_cell(position);
         let mut reader = &cell_bytes[..];
         let heap_page_id = PageId::from_bytes(&mut reader, &())?;
@@ -157,84 +199,73 @@ impl BTreeCursor {
         })
     }
 
-    // TODO: Handle overflow case
-    fn get_cell_value(page: &Page, position: u16) -> Result<Vec<u8>, PagerError> {
+    fn get_cell_value(page: &Page, position: u16) -> Result<Vec<u8>, BTreeCursorError> {
         assert!(position < page.cell_count());
         assert!(matches!(page.kind(), PageKind::Heap));
         let cell_bytes = page.get_cell(position);
         Ok(cell_bytes)
     }
 
-    fn traverse_to_leaf<'db, K>(
-        &'db mut self,
-        fd: RawFd,
-        key: &K,
-    ) -> Result<&'db mut Page, PagerError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()>,
-    {
-        // load root page (unmutably)
-        let mut page = self.pager.get_page(fd, 0)?;
-        // traverse until we hit a leaf page
-        while !matches!(page.kind(), PageKind::BTreeLeaf) {
-            let position = match BTreeCursor::binary_search_page(page, key)? {
-                SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => pos,
-            };
-            let page_id = BTreeCursor::get_page_id_from_node_cell(page, position)?;
-            page = self.pager.get_page(fd, page_id)?;
-        }
-        // now re-get that page mutably
-        let page_id = page.id();
-        let page = self.pager.get_page_mut(fd, page_id)?;
-        Ok(page)
+    fn get_root_page_id(&mut self, fd: RawFd) -> Result<PageId, BTreeCursorError> {
+        let meta_root_ref = self.pager.get_page(fd, 0)?;
+        let meta_root_page = meta_root_ref.borrow();
+        assert!(matches!(meta_root_page.kind(), PageKind::BTreeMetaRoot));
+        assert!(meta_root_page.cell_count() > METAROOT_ROOT_PTR_LOCATION);
+        let ptr_bytes = BTreeCursor::get_cell_value(&meta_root_page, METAROOT_ROOT_PTR_LOCATION)?;
+        let mut reader = &ptr_bytes[..];
+        Ok(PageId::from_bytes(&mut reader, &())?)
     }
 
-    pub fn retrieve_tuple<K>(
-        &mut self,
-        btree_fd: RawFd,
-        heap_fd: RawFd,
-        key: &K,
-    ) -> Result<Option<Vec<u8>>, PagerError>
+    pub fn contains_key<K>(&mut self, fd: RawFd, key: &K) -> Result<bool, BTreeCursorError>
     where
         K: Ord + Deserialize<ExtraInfo = ()>,
     {
-        let leaf_page = self.traverse_to_leaf(btree_fd, key)?;
-        let position = match BTreeCursor::binary_search_page(leaf_page, key)? {
-            SearchResult::Found(position) => position,
-            SearchResult::NotFound(_) => return Ok(None),
-        };
-        let heap_insertion_data =
-            BTreeCursor::get_heap_insertion_data_from_leaf_cell(leaf_page, position)?;
-        let heap_page = self.pager.get_page(heap_fd, heap_insertion_data.page_id)?;
-        let data = BTreeCursor::get_cell_value(heap_page, heap_insertion_data.cell_position)?;
-        Ok(Some(data))
-    }
-
-    pub fn contains_key<K>(&mut self, fd: RawFd, key: &K) -> Result<bool, PagerError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()>,
-    {
-        let leaf_page = self.traverse_to_leaf(fd, key)?;
-        match BTreeCursor::binary_search_page(leaf_page, key)? {
+        let traversal_res = self.traverse_to_leaf(fd, key)?;
+        let leaf_page = traversal_res.leaf.borrow();
+        match BTreeCursor::binary_search_page(&leaf_page, key)? {
             SearchResult::Found(_) => Ok(true),
             SearchResult::NotFound(_) => Ok(false),
         }
     }
 }
 
-pub enum InsertionError {
-    Error(PagerError),
-    KeyAlreadyExists,
+struct TraversalResult {
+    leaf: Rc<RefCell<Page>>,
+    breadcrumbs: Vec<Rc<RefCell<Page>>>,
 }
-impl From<PagerError> for InsertionError {
-    fn from(value: PagerError) -> Self {
-        Self::Error(value)
-    }
-}
-impl From<PageError> for InsertionError {
-    fn from(value: PageError) -> Self {
-        Self::Error(PagerError::from(value))
+
+impl BTreeCursor {
+    fn traverse_to_leaf<K>(
+        &mut self,
+        fd: RawFd,
+        key: &K,
+    ) -> Result<TraversalResult, BTreeCursorError>
+    where
+        K: Ord + Deserialize<ExtraInfo = ()>,
+    {
+        let root_page_id = self.get_root_page_id(fd)?;
+        // load root page (unmutably)
+        let mut page_ref = self.pager.get_page(fd, root_page_id)?;
+        let mut breadcrumbs = Vec::new();
+        // traverse until we hit a leaf page
+        while !matches!(page_ref.borrow().kind(), PageKind::BTreeLeafHeap) {
+            let page = page_ref.borrow();
+            let position = match BTreeCursor::binary_search_page(&page, key)? {
+                SearchResult::Found(pos) => pos,
+                SearchResult::NotFound(pos) => pos,
+            };
+            let page_id = BTreeCursor::get_page_id_from_node_cell(&page, position)?;
+            drop(page);
+            breadcrumbs.push(page_ref);
+            page_ref = self.pager.get_page(fd, page_id)?;
+        }
+        // now re-get that page mutably
+        let page_id = page_ref.borrow().id();
+        let page_ref = self.pager.get_page(fd, page_id)?;
+        Ok(TraversalResult {
+            leaf: page_ref,
+            breadcrumbs,
+        })
     }
 }
 
@@ -253,7 +284,7 @@ impl HeapInsertionData {
 }
 
 impl BTreeCursor {
-    fn make_node_cell<K>(key: &K, page_id: PageId) -> Result<Vec<u8>, PagerError>
+    fn make_node_cell<K>(key: &K, page_id: PageId) -> Result<Vec<u8>, BTreeCursorError>
     where
         K: Serialize,
     {
@@ -263,7 +294,10 @@ impl BTreeCursor {
         Ok(bytes)
     }
 
-    fn make_leaf_cell<K>(key: &K, insertion_data: &HeapInsertionData) -> Result<Vec<u8>, PagerError>
+    fn make_leaf_cell<K>(
+        key: &K,
+        insertion_data: &HeapInsertionData,
+    ) -> Result<Vec<u8>, BTreeCursorError>
     where
         K: Serialize,
     {
@@ -279,32 +313,48 @@ impl BTreeCursor {
         fd: RawFd,
         key: &K,
         insertion_data: &HeapInsertionData,
-    ) -> Result<(), InsertionError>
+    ) -> Result<(), BTreeCursorError>
     where
         K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
     {
-        let leaf_page = self.traverse_to_leaf(fd, key)?;
-        let location = match BTreeCursor::binary_search_page(leaf_page, key)? {
+        let traversal_res = self.traverse_to_leaf(fd, key)?;
+        let mut leaf_page = traversal_res.leaf.borrow_mut();
+        let location = match BTreeCursor::binary_search_page(&leaf_page, key)? {
             SearchResult::NotFound(loc) => loc,
-            SearchResult::Found(_) => return Err(InsertionError::KeyAlreadyExists),
+            SearchResult::Found(_) => return Err(BTreeCursorError::KeyAlreadyExists),
         };
-        // TODO: Handle case where data needs to overflow
-        // TODO: Handle non-heap inserts
+        // TODO: Handle case where parent-node's rightmost value needs to be updated (will be the
+        // case if location == leaf_page.cell_count() )
         let data = BTreeCursor::make_leaf_cell(key, insertion_data)?;
-
-        // TODO: Handle case where a split is necessary. i.e. where cell_count is already at
-        // FANOUT_FACTOR
-        // TODO: Handle case where parent-node's rightmost value needs to be updated
-        leaf_page.insert_cell(location, &data)?;
-        Ok(())
+        match leaf_page.insert_cell(location, &data) {
+            Err(PageError::NotEnoughSpace) => {
+                /* Splitting:
+                 * - find cell position to split on such that each resulting page is roughly the
+                 * same size (including the size of the to-be-inserted cell)
+                 * - make new page
+                 * - For all cell locations at or greater than split location, copy those cells to
+                 * the new page
+                 * - After all cells copied, delete cells in reverse order (to avoid uneccessary
+                 * pointer movement)
+                 * - insert new cell into the correct page.
+                 * - write the node cell containing this page id and it's new rightmost key, and
+                 * update the next cell up to point at the new page.
+                 *
+                 */
+                Ok(())
+            }
+            Err(err) => Err(BTreeCursorError::from(err)),
+            Ok(_) => Ok(()),
+        }
     }
 
-    pub fn delete<K>(&mut self, fd: RawFd, key: &K) -> Result<(), PagerError>
+    pub fn delete<K>(&mut self, fd: RawFd, key: &K) -> Result<(), BTreeCursorError>
     where
         K: Ord + Deserialize<ExtraInfo = ()>,
     {
-        let leaf_page = self.traverse_to_leaf(fd, key)?;
-        let location = match BTreeCursor::binary_search_page(leaf_page, key)? {
+        let traversal_res = self.traverse_to_leaf(fd, key)?;
+        let mut leaf_page = traversal_res.leaf.borrow_mut();
+        let location = match BTreeCursor::binary_search_page(&leaf_page, key)? {
             SearchResult::Found(loc) => loc,
             SearchResult::NotFound(_) => return Ok(()),
         };
@@ -417,7 +467,7 @@ mod tests {
 
     #[test]
     fn leaf_cell_construction() {
-        let mut page = Page::new(0, PageKind::BTreeLeaf);
+        let mut page = Page::new(0, PageKind::BTreeLeafHeap);
         let page_id = 42;
         let page_location = 43;
         let key = String::from("foo");

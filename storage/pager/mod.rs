@@ -2,9 +2,11 @@
 
 mod page;
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::Error as IoError;
 use std::os::unix::fs::MetadataExt;
+use std::rc::Rc;
 use std::{collections::HashMap, os::fd::AsRawFd};
 
 pub type PageId = page::PageId;
@@ -161,7 +163,7 @@ impl ClockCacheHandler {
 // TODO: Try to get a safer way of knowing which file a page id is associated with than using raw
 // fds
 pub struct Pager {
-    pages: Vec<Page>,
+    pages: Vec<Rc<RefCell<Page>>>,
     page_locations: HashMap<PageLookupKey, usize>,
     location_fd_mapping: HashMap<usize, RawFd>,
     next_page_ids: Vec<NextPageId>,
@@ -176,7 +178,7 @@ impl Pager {
     fn with_page_count(file_refs: Vec<File>, page_count: usize) -> Self {
         Pager {
             pages: (0..page_count)
-                .map(|_| Page::new(0, PageKind::Heap))
+                .map(|_| Rc::new(RefCell::new(Page::new(0, PageKind::Heap))))
                 .collect(),
             page_locations: HashMap::with_capacity(page_count),
             location_fd_mapping: HashMap::with_capacity(page_count),
@@ -197,15 +199,15 @@ impl Pager {
         Ok(size / PAGE_SIZE as u64)
     }
 
-    pub fn get_page_mut<Fd: AsRawFd>(
+    pub fn get_page<Fd: AsRawFd>(
         &mut self,
         fd: Fd,
         page_id: PageId,
-    ) -> Result<&mut Page, PagerError> {
+    ) -> Result<Rc<RefCell<Page>>, PagerError> {
         match self.page_locations.get(&(fd.as_raw_fd(), page_id)) {
             Some(loc) => {
                 self.clock_cache.set_use_bit(*loc);
-                Ok(self.pages.get_mut(*loc).unwrap())
+                Ok(self.pages.get(*loc).unwrap().clone())
             }
             None => {
                 let page = self.evict_page_and_replace_with(fd.as_raw_fd(), page_id)?;
@@ -219,7 +221,7 @@ impl Pager {
         // NOTE: This code is copied in evict_page_and_replace_with, so changes to this code should
         // be duplicated there
         let location = self.clock_cache.advance_to_next_evictable_location();
-        let page = self.pages.get_mut(location).unwrap();
+        let mut page = self.pages.get_mut(location).unwrap().borrow_mut();
 
         // handle old page, which may not actually be in use yet
         if self.location_fd_mapping.contains_key(&location) {
@@ -239,9 +241,12 @@ impl Pager {
         &mut self,
         new_fd: Fd,
         page_id: PageId,
-    ) -> Result<&mut Page, PagerError> {
+    ) -> Result<Rc<RefCell<Page>>, PagerError> {
         let location = self.evict_page()?;
-        let page = self.pages.get_mut(location).unwrap();
+        let page_ref = self.pages.get(location).unwrap();
+        assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to evict a page");
+
+        let mut page = page_ref.borrow_mut();
 
         // replace with new page
         let file = self.fd_to_file_mapping.get(&new_fd.as_raw_fd()).unwrap();
@@ -251,19 +256,14 @@ impl Pager {
         self.page_locations
             .insert((new_fd.as_raw_fd(), page_id), location);
         self.clock_cache.set_use_bit(location);
-        Ok(page)
-    }
-
-    pub fn get_page<Fd: AsRawFd>(&mut self, fd: Fd, page_id: PageId) -> Result<&Page, PagerError> {
-        let page = self.get_page_mut(fd, page_id)?;
-        Ok(&*page)
+        Ok(page_ref.clone())
     }
 
     pub fn new_page<Fd: AsRawFd>(
         &mut self,
         fd: Fd,
         kind: PageKind,
-    ) -> Result<&mut Page, PagerError> {
+    ) -> Result<&RefCell<Page>, PagerError> {
         let page_id = self
             .next_page_ids
             .iter_mut()
@@ -272,13 +272,14 @@ impl Pager {
             .use_id();
 
         let location = self.evict_page()?;
-        let page = self.pages.get_mut(location).unwrap();
+        let page_ref = self.pages.get_mut(location).unwrap();
+        let mut page = page_ref.borrow_mut();
         page.reset(page_id, kind);
         self.page_locations
             .insert((fd.as_raw_fd(), page_id), location);
         self.location_fd_mapping.insert(location, fd.as_raw_fd());
         self.clock_cache.set_use_bit(location);
-        Ok(page)
+        Ok(page_ref)
     }
 }
 
@@ -309,7 +310,8 @@ mod tests {
         fd: Fd,
         page_id: PageId,
     ) -> Vec<u64> {
-        let page = pager.get_page(fd.as_raw_fd(), page_id).unwrap();
+        let page_ref = pager.get_page(fd.as_raw_fd(), page_id).unwrap();
+        let page = page_ref.borrow();
         assert_eq!(page.id(), page_id);
         let actual_bytes = page.get_cell(0);
         let mut reader = &actual_bytes[..];
@@ -337,37 +339,46 @@ mod tests {
         let mut pager = Pager::new(vec![table0, table1, table2]);
 
         // set up table 0
-        let page0 = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page0, 0);
+        let mut page0 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page0, 0);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page1, 0);
+        drop(page0);
+        let mut page1 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page1, 0);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page2, 0);
+        drop(page1);
+        let mut page2 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page2, 0);
         assert_eq!(page2.id(), 2);
+        drop(page2);
 
         // set up table 1
-        let page0 = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page0, 100);
+        let mut page0 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page0, 100);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page1, 100);
+        drop(page0);
+        let mut page1 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page1, 100);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page2, 100);
+        drop(page1);
+        let mut page2 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page2, 100);
         assert_eq!(page2.id(), 2);
+        drop(page2);
 
         // set up table 2
-        let page0 = pager.new_page(fd2, PageKind::Heap).unwrap();
-        fill_page(page0, 200);
+        let mut page0 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page0, 200);
         assert_eq!(page0.id(), 0);
-        let page1 = pager.new_page(fd2, PageKind::Heap).unwrap();
-        fill_page(page1, 200);
+        drop(page0);
+        let mut page1 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page1, 200);
         assert_eq!(page1.id(), 1);
-        let page2 = pager.new_page(fd2, PageKind::Heap).unwrap();
-        fill_page(page2, 200);
+        drop(page1);
+        let mut page2 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page2, 200);
         assert_eq!(page2.id(), 2);
+        drop(page2);
 
         // out of order checks on all pages
         assert_eq!(
@@ -445,15 +456,18 @@ mod tests {
          * - get a table0 page, check properties
          */
         // fill cache with table 0 pages
-        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page, 0);
+        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 0);
         assert_eq!(page.id(), 0);
-        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page, 0);
+        drop(page);
+        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 0);
         assert_eq!(page.id(), 1);
-        let page = pager.new_page(fd0, PageKind::Heap).unwrap();
-        fill_page(page, 0);
+        drop(page);
+        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 0);
         assert_eq!(page.id(), 2);
+        drop(page);
         // check properties
         assert_eq!(pager.pages.len(), 3);
         assert_eq!(pager.page_locations.len(), 3);
@@ -461,15 +475,18 @@ mod tests {
         assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 3);
 
         // fill cache with table 1 pages
-        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page, 100);
+        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 100);
         assert_eq!(page.id(), 0);
-        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page, 100);
+        drop(page);
+        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 100);
         assert_eq!(page.id(), 1);
-        let page = pager.new_page(fd1, PageKind::Heap).unwrap();
-        fill_page(page, 100);
+        drop(page);
+        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        fill_page(&mut page, 100);
         assert_eq!(page.id(), 2);
+        drop(page);
         // check properties
         assert_eq!(pager.pages.len(), 3);
         assert_eq!(pager.page_locations.len(), 3);
