@@ -221,7 +221,9 @@ impl Pager {
         // NOTE: This code is copied in evict_page_and_replace_with, so changes to this code should
         // be duplicated there
         let location = self.clock_cache.advance_to_next_evictable_location();
-        let mut page = self.pages.get_mut(location).unwrap().borrow_mut();
+        let page_ref = self.pages.get(location).unwrap();
+        assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to evict a page");
+        let mut page = page_ref.borrow_mut();
 
         // handle old page, which may not actually be in use yet
         if self.location_fd_mapping.contains_key(&location) {
@@ -244,7 +246,6 @@ impl Pager {
     ) -> Result<Rc<RefCell<Page>>, PagerError> {
         let location = self.evict_page()?;
         let page_ref = self.pages.get(location).unwrap();
-        assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to evict a page");
 
         let mut page = page_ref.borrow_mut();
 
@@ -263,7 +264,7 @@ impl Pager {
         &mut self,
         fd: Fd,
         kind: PageKind,
-    ) -> Result<&RefCell<Page>, PagerError> {
+    ) -> Result<Rc<RefCell<Page>>, PagerError> {
         let page_id = self
             .next_page_ids
             .iter_mut()
@@ -272,14 +273,14 @@ impl Pager {
             .use_id();
 
         let location = self.evict_page()?;
-        let page_ref = self.pages.get_mut(location).unwrap();
+        let page_ref = self.pages.get(location).unwrap();
         let mut page = page_ref.borrow_mut();
         page.reset(page_id, kind);
         self.page_locations
             .insert((fd.as_raw_fd(), page_id), location);
         self.location_fd_mapping.insert(location, fd.as_raw_fd());
         self.clock_cache.set_use_bit(location);
-        Ok(page_ref)
+        Ok(page_ref.clone())
     }
 }
 
@@ -339,45 +340,58 @@ mod tests {
         let mut pager = Pager::new(vec![table0, table1, table2]);
 
         // set up table 0
-        let mut page0 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        let page0_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page0 = page0_ref.borrow_mut();
         fill_page(&mut page0, 0);
         assert_eq!(page0.id(), 0);
-        drop(page0);
-        let mut page1 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        let page1_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page1 = page1_ref.borrow_mut();
         fill_page(&mut page1, 0);
         assert_eq!(page1.id(), 1);
-        drop(page1);
-        let mut page2 = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        let page2_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page2 = page2_ref.borrow_mut();
         fill_page(&mut page2, 0);
         assert_eq!(page2.id(), 2);
+
+        drop(page0);
+        drop(page1);
         drop(page2);
 
         // set up table 1
-        let mut page0 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        let page0_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page0 = page0_ref.borrow_mut();
         fill_page(&mut page0, 100);
         assert_eq!(page0.id(), 0);
-        drop(page0);
-        let mut page1 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        let page1_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page1 = page1_ref.borrow_mut();
         fill_page(&mut page1, 100);
         assert_eq!(page1.id(), 1);
-        drop(page1);
-        let mut page2 = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        let page2_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page2 = page2_ref.borrow_mut();
         fill_page(&mut page2, 100);
         assert_eq!(page2.id(), 2);
+
+        drop(page0);
+        drop(page1);
         drop(page2);
 
         // set up table 2
-        let mut page0 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        let page0_ref = pager.new_page(fd2, PageKind::Heap).unwrap();
+        let mut page0 = page0_ref.borrow_mut();
         fill_page(&mut page0, 200);
         assert_eq!(page0.id(), 0);
-        drop(page0);
-        let mut page1 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        let page1_ref = pager.new_page(fd2, PageKind::Heap).unwrap();
+        let mut page1 = page1_ref.borrow_mut();
         fill_page(&mut page1, 200);
         assert_eq!(page1.id(), 1);
-        drop(page1);
-        let mut page2 = pager.new_page(fd2, PageKind::Heap).unwrap().borrow_mut();
+        let page2_ref = pager.new_page(fd2, PageKind::Heap).unwrap();
+        let mut page2 = page2_ref.borrow_mut();
         fill_page(&mut page2, 200);
         assert_eq!(page2.id(), 2);
+
+        // drop borrowed pages
+        drop(page0);
+        drop(page1);
         drop(page2);
 
         // out of order checks on all pages
@@ -456,18 +470,24 @@ mod tests {
          * - get a table0 page, check properties
          */
         // fill cache with table 0 pages
-        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        let page_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 0);
         assert_eq!(page.id(), 0);
         drop(page);
-        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        drop(page_ref);
+        let page_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 0);
         assert_eq!(page.id(), 1);
         drop(page);
-        let mut page = pager.new_page(fd0, PageKind::Heap).unwrap().borrow_mut();
+        drop(page_ref);
+        let page_ref = pager.new_page(fd0, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 0);
         assert_eq!(page.id(), 2);
         drop(page);
+        drop(page_ref);
         // check properties
         assert_eq!(pager.pages.len(), 3);
         assert_eq!(pager.page_locations.len(), 3);
@@ -475,18 +495,24 @@ mod tests {
         assert_eq!(count_pages_in_cache_from_fd(&pager, fd0), 3);
 
         // fill cache with table 1 pages
-        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        let page_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 100);
         assert_eq!(page.id(), 0);
         drop(page);
-        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        drop(page_ref);
+        let page_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 100);
         assert_eq!(page.id(), 1);
         drop(page);
-        let mut page = pager.new_page(fd1, PageKind::Heap).unwrap().borrow_mut();
+        drop(page_ref);
+        let page_ref = pager.new_page(fd1, PageKind::Heap).unwrap();
+        let mut page = page_ref.borrow_mut();
         fill_page(&mut page, 100);
         assert_eq!(page.id(), 2);
         drop(page);
+        drop(page_ref);
         // check properties
         assert_eq!(pager.pages.len(), 3);
         assert_eq!(pager.page_locations.len(), 3);

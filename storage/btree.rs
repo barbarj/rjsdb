@@ -118,7 +118,6 @@ impl BTreeCursor {
     where
         K: Ord + Deserialize<ExtraInfo = ()>,
     {
-        // TODO: Test this!
         if page.cell_count() == 0 {
             return Ok(SearchResult::NotFound(0));
         }
@@ -204,6 +203,29 @@ impl BTreeCursor {
         assert!(matches!(page.kind(), PageKind::Heap));
         let cell_bytes = page.get_cell(position);
         Ok(cell_bytes)
+    }
+
+    fn make_new_root(
+        &mut self,
+        fd: RawFd,
+        first_cell: &[u8],
+        second_cell: &[u8],
+    ) -> Result<(), BTreeCursorError> {
+        let new_root_ref = self.pager.new_page(fd, PageKind::BTreeNode)?;
+        let mut new_root = new_root_ref.borrow_mut();
+        new_root.insert_cell(0, first_cell)?;
+        new_root.insert_cell(1, second_cell)?;
+        let mut new_root_page_id_bytes = Vec::new();
+        new_root.id().write_to_bytes(&mut new_root_page_id_bytes)?;
+
+        let meta_root_ref = self.pager.get_page(fd, 0)?;
+        let mut meta_root_page = meta_root_ref.borrow_mut();
+        //remove old id
+        meta_root_page.remove_cell(METAROOT_ROOT_PTR_LOCATION);
+        //add new id
+        meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &new_root_page_id_bytes)?;
+
+        Ok(())
     }
 
     fn get_root_page_id(&mut self, fd: RawFd) -> Result<PageId, BTreeCursorError> {
@@ -308,6 +330,130 @@ impl BTreeCursor {
         Ok(bytes)
     }
 
+    // TODO: Test this!!!
+    fn split_location(page: &Page, insert_location: u16, insert_data_size: u16) -> u16 {
+        assert!(page.cell_count() > 0);
+        let mut left_sum = 0;
+        let mut left_loc = 0;
+        let mut right_sum = 0;
+        let mut right_loc = page.cell_count() - 1;
+        let mut used_insert = false;
+
+        while left_loc <= right_loc {
+            // try left side first
+            if left_sum <= right_sum {
+                if left_loc == insert_location && !used_insert {
+                    left_sum += insert_data_size;
+                    used_insert = true;
+                } else {
+                    left_sum += page.cell_size(left_loc);
+                    left_loc += 1;
+                }
+            // otherwise use right
+            } else if right_loc == insert_location && !used_insert {
+                right_sum += insert_data_size;
+                used_insert = true;
+            } else {
+                right_sum += page.cell_size(right_loc);
+                right_loc -= 1;
+            }
+        }
+        right_loc
+    }
+
+    fn split_page_after(
+        &mut self,
+        fd: RawFd,
+        page: &mut Page,
+        split_location: u16,
+    ) -> Result<Rc<RefCell<Page>>, BTreeCursorError> {
+        let new_page_ref = self.pager.new_page(fd, page.kind())?;
+        let mut new_page = new_page_ref.borrow_mut();
+        // copy cells to new page
+        for idx in split_location + 1..page.cell_count() {
+            let cell = page.get_cell(idx);
+            let new_pos = idx - (split_location + 1);
+            new_page.insert_cell(new_pos, &cell).unwrap();
+        }
+        // remove cells from this one
+        for idx in page.cell_count() - 1..split_location {
+            page.remove_cell(idx);
+        }
+        drop(new_page);
+        Ok(new_page_ref)
+    }
+
+    fn split<K>(
+        &mut self,
+        traversal_res: TraversalResult,
+        fd: RawFd,
+        insert_location: u16,
+        key: &K,
+        data: &[u8],
+    ) -> Result<(), BTreeCursorError>
+    where
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
+    {
+        let mut traversal_res = traversal_res;
+        let mut orig_page = traversal_res.leaf.borrow_mut();
+        let split_location =
+            BTreeCursor::split_location(&orig_page, insert_location, data.len() as u16);
+        let new_page_ref = self.split_page_after(fd, &mut orig_page, split_location)?;
+        let mut new_page = new_page_ref.borrow_mut();
+        // insert new data
+        if insert_location <= split_location {
+            orig_page.insert_cell(insert_location, data)?;
+        } else {
+            let loc = insert_location - split_location;
+            new_page.insert_cell(loc, data)?;
+        }
+        // now add new split key to the parent
+        let orig_page_key =
+            BTreeCursor::get_key_from_cell::<K>(&orig_page, orig_page.cell_count() - 1)?;
+        let orig_page_id = orig_page.id();
+        let orig_page_cell = BTreeCursor::make_node_cell(&orig_page_key, orig_page_id)?;
+
+        let new_page_key =
+            BTreeCursor::get_key_from_cell::<K>(&new_page, new_page.cell_count() - 1)?;
+        let new_page_id = new_page.id();
+        let new_page_cell = BTreeCursor::make_node_cell(&new_page_key, new_page_id)?;
+
+        // dont need these any more
+        drop(orig_page);
+        drop(new_page);
+
+        if let Some(parent_page_ref) = traversal_res.breadcrumbs.pop() {
+            let mut parent_page = parent_page_ref.borrow_mut();
+            let search_key_location = match BTreeCursor::binary_search_page(&parent_page, key)? {
+                SearchResult::Found(pos) => pos,
+                SearchResult::NotFound(pos) => pos,
+            };
+            // remove the old key, replace it with one that contains the correct split key for the
+            // orig page
+            parent_page.remove_cell(search_key_location);
+            parent_page.insert_cell(search_key_location, &orig_page_cell)?;
+
+            // now try inserting the new cell
+            match parent_page.insert_cell(search_key_location + 1, &new_page_cell) {
+                Err(PageError::NotEnoughSpace) => {
+                    drop(parent_page);
+                    traversal_res.leaf = parent_page_ref;
+                    self.split(
+                        traversal_res,
+                        fd,
+                        search_key_location + 1,
+                        &new_page_key,
+                        &new_page_cell,
+                    )
+                }
+                Err(err) => Err(BTreeCursorError::Page(err)),
+                Ok(_) => Ok(()),
+            }
+        } else {
+            self.make_new_root(fd, &orig_page_cell, &new_page_cell)
+        }
+    }
+
     pub fn insert<K>(
         &mut self,
         fd: RawFd,
@@ -328,19 +474,8 @@ impl BTreeCursor {
         let data = BTreeCursor::make_leaf_cell(key, insertion_data)?;
         match leaf_page.insert_cell(location, &data) {
             Err(PageError::NotEnoughSpace) => {
-                /* Splitting:
-                 * - find cell position to split on such that each resulting page is roughly the
-                 * same size (including the size of the to-be-inserted cell)
-                 * - make new page
-                 * - For all cell locations at or greater than split location, copy those cells to
-                 * the new page
-                 * - After all cells copied, delete cells in reverse order (to avoid uneccessary
-                 * pointer movement)
-                 * - insert new cell into the correct page.
-                 * - write the node cell containing this page id and it's new rightmost key, and
-                 * update the next cell up to point at the new page.
-                 *
-                 */
+                drop(leaf_page);
+                self.split(traversal_res, fd, location, key, &data)?;
                 Ok(())
             }
             Err(err) => Err(BTreeCursorError::from(err)),
@@ -445,6 +580,13 @@ mod tests {
             let res = BTreeCursor::binary_search_page(&page, &search_for).unwrap();
             assert_eq!(res, SearchResult::NotFound(*v));
         }
+    }
+
+    #[test]
+    fn binary_search_empty_page() {
+        let page = Page::new(0, PageKind::BTreeNode);
+        let res = BTreeCursor::binary_search_page(&page, &43).unwrap();
+        assert_eq!(res, SearchResult::NotFound(0));
     }
 
     #[test]

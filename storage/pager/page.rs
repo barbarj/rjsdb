@@ -441,6 +441,11 @@ impl Page {
         CellPointer::from_bytes(&mut pointer_slice, &()).unwrap()
     }
 
+    pub fn cell_size(&self, position: u16) -> u16 {
+        let ptr = self.get_cell_pointer(position);
+        ptr.size
+    }
+
     pub fn get_cell(&self, cell_position: u16) -> Vec<u8> {
         assert!(cell_position < self.header.cell_count);
         let pointer = self.get_cell_pointer(cell_position);
