@@ -171,7 +171,7 @@ pub struct Pager {
     fd_to_file_mapping: HashMap<RawFd, File>,
 }
 impl Pager {
-    fn new(file_refs: Vec<File>) -> Self {
+    pub fn new(file_refs: Vec<File>) -> Self {
         Self::with_page_count(file_refs, MAX_PAGE_COUNT)
     }
 
@@ -199,6 +199,13 @@ impl Pager {
         Ok(size / PAGE_SIZE as u64)
     }
 
+    pub fn flush_all(&mut self) -> Result<(), PagerError> {
+        for location in 0..self.pages.len() {
+            self.flush_page(location)?;
+        }
+        Ok(())
+    }
+
     pub fn get_page<Fd: AsRawFd>(
         &mut self,
         fd: Fd,
@@ -216,10 +223,23 @@ impl Pager {
         }
     }
 
+    fn flush_page(&mut self, location: usize) -> Result<(), PagerError> {
+        // only flush a page location if it's actually and dirty
+        if self.location_fd_mapping.contains_key(&location) {
+            let page_ref = self.pages.get(location).unwrap();
+            assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to flush a page");
+            let mut page = page_ref.borrow_mut();
+            let fd = self.location_fd_mapping.get(&location).unwrap();
+            let file = self.fd_to_file_mapping.get_mut(fd).unwrap();
+            if page.is_dirty() {
+                page.write_to_disk(file)?;
+            }
+        }
+        Ok(())
+    }
+
     // evicts a page and returns the location of that now usable page
     fn evict_page(&mut self) -> Result<usize, PagerError> {
-        // NOTE: This code is copied in evict_page_and_replace_with, so changes to this code should
-        // be duplicated there
         let location = self.clock_cache.advance_to_next_evictable_location();
         let page_ref = self.pages.get(location).unwrap();
         assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to evict a page");
@@ -281,6 +301,10 @@ impl Pager {
         self.location_fd_mapping.insert(location, fd.as_raw_fd());
         self.clock_cache.set_use_bit(location);
         Ok(page_ref.clone())
+    }
+
+    pub fn file_from_fd(&self, fd: RawFd) -> Option<&File> {
+        self.fd_to_file_mapping.get(&fd)
     }
 }
 

@@ -781,12 +781,13 @@ mod tests {
 
     #[test]
     fn test_replace_contents() {
+        let filename = "replace_contents.test";
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .read(true)
             .write(true)
-            .open("replace_contents.test")
+            .open(filename)
             .unwrap();
 
         // add cells
@@ -812,6 +813,9 @@ mod tests {
         let read_cells = get_all_cells(&replaced_page);
         assert_eq!(cells, read_cells);
         assert_eq!(page, replaced_page);
+
+        drop(file);
+        fs::remove_file(filename).unwrap();
     }
 
     #[test]
