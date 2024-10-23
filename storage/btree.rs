@@ -314,7 +314,14 @@ impl BTree {
             let page = page_ref.borrow();
             let position = match BTree::binary_search_page(&page, key)? {
                 SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => pos,
+                SearchResult::NotFound(pos) => {
+                    // if the key is greater than our rightmost, go-down the rightmost path anyways
+                    if pos == page.cell_count() {
+                        pos - 1
+                    } else {
+                        pos
+                    }
+                }
             };
             let page_id = BTree::get_page_id_from_node_cell(&page, position)?;
             drop(page);
@@ -428,7 +435,7 @@ impl BTree {
             new_page.insert_cell(new_pos, &cell).unwrap();
         }
         // remove cells from this one
-        for idx in page.cell_count() - 1..split_location {
+        for idx in (split_location + 1..page.cell_count()).rev() {
             page.remove_cell(idx);
         }
         drop(new_page);
@@ -445,6 +452,7 @@ impl BTree {
     where
         K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
     {
+        println!("splitting");
         let mut orig_page = traversal_res.leaf.borrow_mut();
 
         let split_location = BTree::split_location(&orig_page, insert_location, data.len() as u16);
@@ -455,7 +463,7 @@ impl BTree {
         if insert_location <= split_location {
             orig_page.insert_cell(insert_location, data)?;
         } else {
-            let loc = insert_location - split_location;
+            let loc = insert_location - split_location - 1;
             new_page.insert_cell(loc, data)?;
         }
 
@@ -474,7 +482,8 @@ impl BTree {
         let mut traversal_res = traversal_res;
         if let Some(parent_page_ref) = traversal_res.breadcrumbs.pop() {
             let mut parent_page = parent_page_ref.borrow_mut();
-            let search_key_location = match BTree::binary_search_page(&parent_page, key)? {
+            let search_key_location = match BTree::binary_search_page(&parent_page, &orig_page_key)?
+            {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => pos,
             };
@@ -501,6 +510,32 @@ impl BTree {
         } else {
             self.make_new_root(&orig_page_cell, &new_page_cell)
         }
+    }
+
+    fn fix_right_keys<K>(
+        &mut self,
+        new_key: &K,
+        traversal_res: TraversalResult,
+    ) -> Result<(), BTreeError>
+    where
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
+    {
+        let mut traversal_res = traversal_res;
+        while let Some(node_page_ref) = traversal_res.breadcrumbs.pop() {
+            let mut node_page = node_page_ref.borrow_mut();
+            let right_pos = node_page.cell_count() - 1;
+            let right_key = BTree::get_key_from_cell::<K>(&node_page, right_pos)?;
+            if right_key < *new_key {
+                // update key
+                let child_id = BTree::get_page_id_from_node_cell(&node_page, right_pos)?;
+                node_page.remove_cell(right_pos);
+                let new_cell = BTree::make_node_cell(new_key, child_id)?;
+                node_page.insert_cell(right_pos, &new_cell)?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub fn insert<K>(
@@ -530,7 +565,10 @@ impl BTree {
                 Ok(())
             }
             Err(err) => Err(BTreeError::from(err)),
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                drop(leaf_page);
+                self.fix_right_keys(key, traversal_res)
+            }
         }
     }
 
@@ -554,7 +592,6 @@ impl BTree {
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Ref,
         fs::{File, OpenOptions},
         os::fd::AsRawFd,
     };
@@ -734,31 +771,55 @@ mod tests {
         assert_eq!(lookup_res, Some(data));
     }
 
-    /*
     #[test]
     fn insert_and_split() {
         // calc how many u64s will fit in a cell
         let example_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
-        let cell_capacity = PAGE_BUFFER_SIZE / (example_cell.len() as u16 + CELL_POINTER_SIZE);
+        let cell_capacity =
+            PAGE_BUFFER_SIZE as u64 / (example_cell.len() as u64 + CELL_POINTER_SIZE as u64);
 
         let filename = "btree_insert_and_split.test";
         let file = open_test_file(filename);
         let fd = file.as_raw_fd();
         let pager = Rc::new(RefCell::new(Pager::new(vec![file])));
-        let mut btree = BTree::new(pager, fd);
-        insert_values(&mut btree, 0..cell_capacity as u64);
-        let retrieved_vals = lookup_values(&btree, 0..cell_capacity as u64);
-        assert_eq!(
-            (0..cell_capacity as u64).collect::<Vec<u64>>(),
-            retrieved_vals
-        );
+        let mut btree = BTree::init(pager, fd).unwrap();
 
-        // test inserts go to right place
+        // test inserts work
+        insert_values(&mut btree, 0..cell_capacity);
         // test lookups work
+        let retrieved_vals = lookup_values(&btree, 0..cell_capacity);
+        assert_eq!((0..cell_capacity).collect::<Vec<u64>>(), retrieved_vals);
+
         // test split root works when full
+        insert_values(&mut btree, cell_capacity..cell_capacity + 1);
+        let single_split_root_id = btree.get_root_page_id().unwrap();
+        assert!(
+            single_split_root_id > 1,
+            "Prove that root was split, so we have a new root"
+        );
         // test lookups work
+        let retrieved_vals = lookup_values(&btree, 0..cell_capacity + 1);
+        assert_eq!((0..cell_capacity + 1).collect::<Vec<u64>>(), retrieved_vals);
+        // prove some things about the root page
+        let mut pager = btree.pager.borrow_mut();
+        let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
+        let root_page = root_page_ref.borrow();
+        assert_eq!(root_page.cell_count(), 2);
+        let high_key = BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap();
+        assert_eq!(high_key, cell_capacity);
+        drop(root_page);
+        drop(pager);
+
+        let required_inserts_to_split_root = (cell_capacity * cell_capacity) / 2;
+
+        // show that this is the required amount
+        insert_values(
+            &mut btree,
+            cell_capacity + 1..required_inserts_to_split_root - 1,
+        );
+        assert_eq!(btree.get_root_page_id().unwrap(), single_split_root_id);
+
         // test situation where leaf and parent node split
         // test lookups work
     }
-    */
 }
