@@ -286,7 +286,7 @@ impl Pager {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::OpenOptions;
+    use std::fs::{self, OpenOptions};
 
     use crate::serialize::{Deserialize, Serialize};
 
@@ -331,9 +331,12 @@ mod tests {
 
     #[test]
     fn basics() {
-        let table0 = open_test_file("pager_basics_t0.test");
-        let table1 = open_test_file("pager_basics_t1.test");
-        let table2 = open_test_file("pager_basics_t2.test");
+        let file0 = "pager_basics_t0.test";
+        let file1 = "pager_basics_t1.test";
+        let file2 = "pager_basics_t2.test";
+        let table0 = open_test_file(file0);
+        let table1 = open_test_file(file1);
+        let table2 = open_test_file(file2);
         let fd0 = table0.as_raw_fd();
         let fd1 = table1.as_raw_fd();
         let fd2 = table2.as_raw_fd();
@@ -445,6 +448,11 @@ mod tests {
             vec![220, 220, 220],
             get_first_cell_from_page(&mut pager, fd2, 2)
         );
+
+        drop(pager);
+        fs::remove_file(file0).unwrap();
+        fs::remove_file(file1).unwrap();
+        fs::remove_file(file2).unwrap();
     }
 
     fn count_pages_in_cache_from_fd(pager: &Pager, fd: RawFd) -> usize {
@@ -457,8 +465,10 @@ mod tests {
 
     #[test]
     fn cache_eviction() {
-        let table0 = open_test_file("cache_eviction_t0.test");
-        let table1 = open_test_file("cache_eviction_t1.test");
+        let file0 = "cache_eviction_t0.test";
+        let file1 = "cache_eviction_t1.test";
+        let table0 = open_test_file(file0);
+        let table1 = open_test_file(file1);
         let fd0 = table0.as_raw_fd();
         let fd1 = table1.as_raw_fd();
         let mut pager = Pager::with_page_count(vec![table0, table1], 3);
@@ -558,5 +568,9 @@ mod tests {
         assert_eq!(pager.location_fd_mapping.get(&0), Some(&fd0));
         assert_eq!(pager.location_fd_mapping.get(&1), Some(&fd1));
         assert_eq!(pager.location_fd_mapping.get(&2), Some(&fd0));
+
+        drop(pager);
+        fs::remove_file(file0).unwrap();
+        fs::remove_file(file1).unwrap();
     }
 }

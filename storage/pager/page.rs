@@ -497,7 +497,10 @@ impl Deserialize for CellPointer {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, mem};
+    use std::{
+        fs::{self, OpenOptions},
+        mem,
+    };
 
     use super::*;
 
@@ -813,12 +816,13 @@ mod tests {
 
     #[test]
     fn to_from_disk_basics() {
+        let filename = "to_from_disk_basics.test";
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .read(true)
             .write(true)
-            .open("to_from_disk_basics.test")
+            .open(filename)
             .unwrap();
 
         // add cells
@@ -843,16 +847,20 @@ mod tests {
         let read_cells = get_all_cells(&read_page);
         assert_eq!(cells, read_cells);
         assert_eq!(page, read_page);
+
+        drop(file);
+        fs::remove_file(filename).unwrap();
     }
 
     #[test]
     fn to_from_disk_multiple_pages() {
+        let filename = "to_from_disk_multiple_pages.test";
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .read(true)
             .write(true)
-            .open("to_from_disk_multiple_pages.test")
+            .open(filename)
             .unwrap();
 
         let mut page0 = Page::new(0, PageKind::Heap);
@@ -897,5 +905,8 @@ mod tests {
         let read_page0 = Page::from_disk(&file, 0).unwrap();
         assert_eq!(page0, read_page0);
         assert_eq!(cells0, get_all_cells(&read_page0));
+
+        drop(file);
+        fs::remove_file(filename).unwrap();
     }
 }
