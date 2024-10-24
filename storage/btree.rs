@@ -169,7 +169,7 @@ impl BTree {
     /// key would belong at if inserted into the page.
     fn binary_search_page<K>(page: &Page, key: &K) -> Result<SearchResult, BTreeError>
     where
-        K: Ord + Deserialize<ExtraInfo = ()>,
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         if page.cell_count() == 0 {
             return Ok(SearchResult::NotFound(0));
@@ -222,7 +222,7 @@ impl BTree {
             PageKind::BTreeNode => &cell_bytes[NODE_CELL_KEY_OFFSET..],
             PageKind::BTreeLeafHeap => &cell_bytes[LEAF_HEAP_CELL_KEY_OFFSET..],
             PageKind::BTreeLeafNotHeap => todo!(),
-            PageKind::Heap | PageKind::BTreeMetaRoot => unreachable!(),
+            PageKind::Heap | PageKind::BTreeMetaRoot | PageKind::Unitialized => unreachable!(),
         };
         Ok(K::from_bytes(&mut reader, &())?)
     }
@@ -283,7 +283,7 @@ impl BTree {
 
     pub fn contains_key<K>(&self, key: &K) -> Result<bool, BTreeError>
     where
-        K: Ord + Deserialize<ExtraInfo = ()>,
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
         let leaf_page = traversal_res.leaf.borrow();
@@ -302,7 +302,7 @@ struct TraversalResult {
 impl BTree {
     fn traverse_to_leaf<K>(&self, key: &K) -> Result<TraversalResult, BTreeError>
     where
-        K: Ord + Deserialize<ExtraInfo = ()>,
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let root_page_id = self.get_root_page_id()?;
         let mut pager = self.pager.borrow_mut();
@@ -339,7 +339,7 @@ impl BTree {
 
     pub fn lookup_value<K>(&self, key: &K) -> Result<Option<HeapInsertionData>, BTreeError>
     where
-        K: Ord + Deserialize<ExtraInfo = ()>,
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
         let leaf = traversal_res.leaf.borrow();
@@ -446,13 +446,11 @@ impl BTree {
         &mut self,
         traversal_res: TraversalResult,
         insert_location: u16,
-        key: &K,
         data: &[u8],
     ) -> Result<(), BTreeError>
     where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
-        println!("splitting");
         let mut orig_page = traversal_res.leaf.borrow_mut();
 
         let split_location = BTree::split_location(&orig_page, insert_location, data.len() as u16);
@@ -485,7 +483,10 @@ impl BTree {
             let search_key_location = match BTree::binary_search_page(&parent_page, &orig_page_key)?
             {
                 SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => pos,
+                SearchResult::NotFound(pos) => {
+                    assert!(pos < parent_page.cell_count());
+                    pos
+                }
             };
             // remove the old key, replace it with one that contains the correct split key for the
             // orig page
@@ -497,12 +498,7 @@ impl BTree {
                 Err(PageError::NotEnoughSpace) => {
                     drop(parent_page);
                     traversal_res.leaf = parent_page_ref;
-                    self.split(
-                        traversal_res,
-                        search_key_location + 1,
-                        &new_page_key,
-                        &new_page_cell,
-                    )
+                    self.split::<K>(traversal_res, search_key_location + 1, &new_page_cell)
                 }
                 Err(err) => Err(BTreeError::Page(err)),
                 Ok(_) => Ok(()),
@@ -518,19 +514,20 @@ impl BTree {
         traversal_res: TraversalResult,
     ) -> Result<(), BTreeError>
     where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
         let mut traversal_res = traversal_res;
         while let Some(node_page_ref) = traversal_res.breadcrumbs.pop() {
             let mut node_page = node_page_ref.borrow_mut();
             let right_pos = node_page.cell_count() - 1;
             let right_key = BTree::get_key_from_cell::<K>(&node_page, right_pos)?;
-            if right_key < *new_key {
+            if let Ordering::Less = right_key.cmp(new_key) {
                 // update key
                 let child_id = BTree::get_page_id_from_node_cell(&node_page, right_pos)?;
                 node_page.remove_cell(right_pos);
                 let new_cell = BTree::make_node_cell(new_key, child_id)?;
                 node_page.insert_cell(right_pos, &new_cell)?;
+                drop(node_page);
             } else {
                 break;
             }
@@ -544,7 +541,7 @@ impl BTree {
         insertion_data: &HeapInsertionData,
     ) -> Result<(), BTreeError>
     where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
         let mut leaf_page = traversal_res.leaf.borrow_mut();
@@ -561,7 +558,7 @@ impl BTree {
         match leaf_page.insert_cell(location, &data) {
             Err(PageError::NotEnoughSpace) => {
                 drop(leaf_page);
-                self.split(traversal_res, location, key, &data)?;
+                self.split::<K>(traversal_res, location, &data)?;
                 Ok(())
             }
             Err(err) => Err(BTreeError::from(err)),
@@ -574,7 +571,7 @@ impl BTree {
 
     pub fn delete<K>(&mut self, key: &K) -> Result<(), BTreeError>
     where
-        K: Ord + Deserialize<ExtraInfo = ()>,
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
         let mut leaf_page = traversal_res.leaf.borrow_mut();
@@ -800,23 +797,89 @@ mod tests {
         // test lookups work
         let retrieved_vals = lookup_values(&btree, 0..cell_capacity + 1);
         assert_eq!((0..cell_capacity + 1).collect::<Vec<u64>>(), retrieved_vals);
+
         // prove some things about the root page
         let mut pager = btree.pager.borrow_mut();
         let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
         let root_page = root_page_ref.borrow();
         assert_eq!(root_page.cell_count(), 2);
+        let mid_key = BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap();
+        assert_eq!(mid_key, (cell_capacity / 2) - 1);
         let high_key = BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap();
         assert_eq!(high_key, cell_capacity);
+        let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
+        let right_page_id = BTree::get_page_id_from_node_cell(&root_page, 1).unwrap();
         drop(root_page);
+
+        // prove some things about the now split pages
+        let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
+        let left_page = left_page_ref.borrow();
+        let right_page_ref = pager.get_page(fd, right_page_id).unwrap();
+        let right_page = right_page_ref.borrow();
+        // prove we have the expected number of cells in each node, and that the counts are about
+        // even
+        assert_eq!(
+            (right_page.cell_count() as i64 - left_page.cell_count() as i64).abs(),
+            1
+        );
+        assert!((right_page.cell_count() as i64 - (cell_capacity / 2) as i64).abs() <= 1);
+        drop(left_page);
+        drop(right_page);
         drop(pager);
 
-        let required_inserts_to_split_root = (cell_capacity * cell_capacity) / 2;
-
-        // show that this is the required amount
+        // insert enough values to make the right leaf split
         insert_values(
             &mut btree,
-            cell_capacity + 1..required_inserts_to_split_root - 1,
+            (0..(cell_capacity / 2)).map(|x| x + cell_capacity + 1),
         );
+        let vals = 0..(cell_capacity + 1 + (cell_capacity / 2));
+        let retrieved_vals = lookup_values(&btree, vals.clone());
+        assert_eq!(vals.collect::<Vec<u64>>(), retrieved_vals);
+
+        // examine nodes
+        let mut pager = btree.pager.borrow_mut();
+        let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
+        let root_page = root_page_ref.borrow();
+        assert_eq!(
+            BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap(),
+            (cell_capacity / 2) - 1
+        );
+        assert_eq!(
+            BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap(),
+            cell_capacity - 1
+        );
+        let high_page_key = BTree::get_key_from_cell::<u64>(&root_page, 2).unwrap();
+        assert_eq!(high_page_key, cell_capacity + (cell_capacity / 2));
+        let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
+        let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
+        let left_page = left_page_ref.borrow();
+        let mid_page_id = BTree::get_page_id_from_node_cell(&root_page, 1).unwrap();
+        let mid_page_ref = pager.get_page(fd, mid_page_id).unwrap();
+        let mid_page = mid_page_ref.borrow();
+        let high_page_id = BTree::get_page_id_from_node_cell(&root_page, 2).unwrap();
+        let high_page_ref = pager.get_page(fd, high_page_id).unwrap();
+        let high_page = high_page_ref.borrow();
+
+        let min = left_page
+            .cell_count()
+            .min(mid_page.cell_count())
+            .min(high_page.cell_count());
+        let max = left_page
+            .cell_count()
+            .max(mid_page.cell_count())
+            .max(high_page.cell_count());
+        assert!(max - min <= 1);
+        drop(root_page);
+        drop(high_page);
+        drop(mid_page);
+        drop(left_page);
+        drop(pager);
+
+        // fill up until just before root split
+        let required_inserts_to_split_root = (cell_capacity * cell_capacity) / 2;
+        let insertion_range = high_page_key + 1..required_inserts_to_split_root;
+        // show that this is the required amount
+        insert_values(&mut btree, insertion_range);
         assert_eq!(btree.get_root_page_id().unwrap(), single_split_root_id);
 
         // test situation where leaf and parent node split

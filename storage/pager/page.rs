@@ -123,6 +123,7 @@ pub enum PageKind {
     BTreeNode,
     BTreeLeafHeap,
     BTreeLeafNotHeap,
+    Unitialized,
 }
 
 // TODO: Add CRC check in addition to the checksum
@@ -307,6 +308,11 @@ impl Page {
         Ok(())
     }
 
+    // TODO: Remove
+    pub fn free_space_end(&self) -> u16 {
+        self.header.free_space_end
+    }
+
     pub fn insert_cell(
         &mut self,
         cell_position: u16, // must be <= cell count
@@ -394,6 +400,7 @@ impl Page {
 
             dest_end -= pointer.size;
         }
+        self.data.write_to(0, &tmp_buffer.data[..])?;
         self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
         Ok(())
@@ -433,7 +440,7 @@ impl Page {
         self.data.data.copy_within(start..end, dest);
     }
 
-    fn get_cell_pointer(&self, position: u16) -> CellPointer {
+    pub fn get_cell_pointer(&self, position: u16) -> CellPointer {
         assert!(position < self.header.cell_count);
         let offset_start = (position * CELL_POINTER_SIZE) as usize;
         let offset_size = CELL_POINTER_SIZE as usize;
@@ -472,7 +479,7 @@ fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
 }
 
 #[derive(Debug)]
-struct CellPointer {
+pub struct CellPointer {
     end_position: PageBufferOffset,
     size: PageBufferOffset,
 }
@@ -682,12 +689,13 @@ mod tests {
 
         // add two more to trigger defrag
         page.insert_cell(idx, &bytes10s[..]).unwrap();
-        page.insert_cell(idx + 1, &bytes10s[..]).unwrap();
+        page.insert_cell(idx + 1, &bytes20s[..]).unwrap();
         cell_count += 2;
         let read_cells = get_all_cells(&page);
-        for c in read_cells {
-            assert_eq!(cell10s, c);
+        for c in &read_cells[0..=idx as usize] {
+            assert_eq!(cell10s, *c);
         }
+        assert_eq!(read_cells[(idx + 1) as usize], cell20s);
         let free_space_start = free_space_start + CELL_POINTER_SIZE + CELL_POINTER_SIZE;
         let free_space_end = PAGE_BUFFER_SIZE - (cell_count * cell_size);
         let total_free_space = free_space_end - free_space_start;
@@ -697,7 +705,6 @@ mod tests {
         assert_eq!(cell_count, page.header.cell_count);
         assert!(page.header.flags.is_dirty());
         assert!(!page.header.flags.is_compactible());
-        // TODO: check that pointers have changed appropriately
     }
 
     #[test]

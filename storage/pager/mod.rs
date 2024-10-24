@@ -178,7 +178,7 @@ impl Pager {
     fn with_page_count(file_refs: Vec<File>, page_count: usize) -> Self {
         Pager {
             pages: (0..page_count)
-                .map(|_| Rc::new(RefCell::new(Page::new(0, PageKind::Heap))))
+                .map(|_| Rc::new(RefCell::new(Page::new(0, PageKind::Unitialized))))
                 .collect(),
             page_locations: HashMap::with_capacity(page_count),
             location_fd_mapping: HashMap::with_capacity(page_count),
@@ -245,7 +245,7 @@ impl Pager {
         assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to evict a page");
         let mut page = page_ref.borrow_mut();
 
-        // handle old page, which may not actually be in use yet
+        // handle old page, which may already be in use yet
         if self.location_fd_mapping.contains_key(&location) {
             let fd = self.location_fd_mapping.get(&location).unwrap();
             let file = self.fd_to_file_mapping.get_mut(fd).unwrap();
@@ -261,8 +261,8 @@ impl Pager {
 
     fn evict_page_and_replace_with<Fd: AsRawFd>(
         &mut self,
-        new_fd: Fd,
-        page_id: PageId,
+        replacement_fd: Fd,
+        replacement_page_id: PageId,
     ) -> Result<Rc<RefCell<Page>>, PagerError> {
         let location = self.evict_page()?;
         let page_ref = self.pages.get(location).unwrap();
@@ -270,12 +270,15 @@ impl Pager {
         let mut page = page_ref.borrow_mut();
 
         // replace with new page
-        let file = self.fd_to_file_mapping.get(&new_fd.as_raw_fd()).unwrap();
-        page.replace_contents(file, page_id)?;
+        let file = self
+            .fd_to_file_mapping
+            .get(&replacement_fd.as_raw_fd())
+            .unwrap();
+        page.replace_contents(file, replacement_page_id)?;
         self.location_fd_mapping
-            .insert(location, new_fd.as_raw_fd());
+            .insert(location, replacement_fd.as_raw_fd());
         self.page_locations
-            .insert((new_fd.as_raw_fd(), page_id), location);
+            .insert((replacement_fd.as_raw_fd(), replacement_page_id), location);
         self.clock_cache.set_use_bit(location);
         Ok(page_ref.clone())
     }
