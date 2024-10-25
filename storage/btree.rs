@@ -389,7 +389,6 @@ impl BTree {
         Ok(bytes)
     }
 
-    // TODO: Test this!!!
     fn split_location(page: &Page, insert_location: u16, insert_data_size: u16) -> u16 {
         assert!(page.cell_count() > 0);
         let mut left_sum = 0;
@@ -484,7 +483,7 @@ impl BTree {
             {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => {
-                    assert!(pos < parent_page.cell_count());
+                    assert!(pos < parent_page.cell_count(), "The orig_key is always smaller than the prior right-most key, so this should always be true");
                     pos
                 }
             };
@@ -549,8 +548,6 @@ impl BTree {
             SearchResult::NotFound(loc) => loc,
             SearchResult::Found(_) => return Err(BTreeError::KeyAlreadyExists),
         };
-        // TODO: Handle case where parent-node's rightmost value needs to be updated (will be the
-        // case if location == leaf_page.cell_count() )
         let data = BTree::make_leaf_cell(key, insertion_data)?;
         if data.len() > self.max_cell_size.into() {
             return Err(BTreeError::KeyTooLarge);
@@ -563,8 +560,11 @@ impl BTree {
             }
             Err(err) => Err(BTreeError::from(err)),
             Ok(_) => {
-                drop(leaf_page);
-                self.fix_right_keys(key, traversal_res)
+                if location == leaf_page.cell_count() - 1 {
+                    drop(leaf_page);
+                    self.fix_right_keys(key, traversal_res)?;
+                }
+                Ok(())
             }
         }
     }
@@ -770,10 +770,10 @@ mod tests {
 
     #[test]
     fn insert_and_split() {
-        // calc how many u64s will fit in a cell
-        let example_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
+        // calc how many cells will fit in a leaf
+        let leaf_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
         let leaf_capacity =
-            PAGE_BUFFER_SIZE as u64 / (example_cell.len() as u64 + CELL_POINTER_SIZE as u64);
+            PAGE_BUFFER_SIZE as u64 / (leaf_cell.len() as u64 + CELL_POINTER_SIZE as u64);
 
         let filename = "btree_insert_and_split.test";
         let file = open_test_file(filename);
@@ -836,7 +836,7 @@ mod tests {
         let retrieved_vals = lookup_values(&btree, vals.clone());
         assert_eq!(vals.collect::<Vec<u64>>(), retrieved_vals);
 
-        // examine nodes
+        // examine the root
         let mut pager = btree.pager.borrow_mut();
         let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
         let root_page = root_page_ref.borrow();
@@ -850,6 +850,8 @@ mod tests {
         );
         let high_page_key = BTree::get_key_from_cell::<u64>(&root_page, 2).unwrap();
         assert_eq!(high_page_key, leaf_capacity + (leaf_capacity / 2));
+
+        // examine the pages
         let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
         let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
         let left_page = left_page_ref.borrow();
@@ -860,6 +862,7 @@ mod tests {
         let high_page_ref = pager.get_page(fd, high_page_id).unwrap();
         let high_page = high_page_ref.borrow();
 
+        // prove that all of the leaf occupancies are within 1 of each other
         let min = left_page
             .cell_count()
             .min(mid_page.cell_count())
@@ -875,7 +878,7 @@ mod tests {
         drop(left_page);
         drop(pager);
 
-        // fill up until just before root split
+        // Insert just enough to be 1 entry short of splitting the root again
         let node_cell = BTree::make_node_cell(&42u64, 23).unwrap();
         let node_capacity =
             PAGE_BUFFER_SIZE as u64 / (CELL_POINTER_SIZE as u64 + node_cell.len() as u64);
@@ -889,12 +892,12 @@ mod tests {
             (0..required_inserts_to_split_root).collect::<Vec<u64>>(),
             retrieved_vals
         );
+
         // now add one more and prove root is split
         insert_values(
             &mut btree,
             required_inserts_to_split_root..required_inserts_to_split_root + 1,
         );
-
         assert_ne!(btree.get_root_page_id().unwrap(), single_split_root_id);
         let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root + 1);
         assert_eq!(
