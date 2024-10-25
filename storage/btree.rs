@@ -772,7 +772,7 @@ mod tests {
     fn insert_and_split() {
         // calc how many u64s will fit in a cell
         let example_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
-        let cell_capacity =
+        let leaf_capacity =
             PAGE_BUFFER_SIZE as u64 / (example_cell.len() as u64 + CELL_POINTER_SIZE as u64);
 
         let filename = "btree_insert_and_split.test";
@@ -782,21 +782,21 @@ mod tests {
         let mut btree = BTree::init(pager, fd).unwrap();
 
         // test inserts work
-        insert_values(&mut btree, 0..cell_capacity);
+        insert_values(&mut btree, 0..leaf_capacity);
         // test lookups work
-        let retrieved_vals = lookup_values(&btree, 0..cell_capacity);
-        assert_eq!((0..cell_capacity).collect::<Vec<u64>>(), retrieved_vals);
+        let retrieved_vals = lookup_values(&btree, 0..leaf_capacity);
+        assert_eq!((0..leaf_capacity).collect::<Vec<u64>>(), retrieved_vals);
 
         // test split root works when full
-        insert_values(&mut btree, cell_capacity..cell_capacity + 1);
+        insert_values(&mut btree, leaf_capacity..leaf_capacity + 1);
         let single_split_root_id = btree.get_root_page_id().unwrap();
         assert!(
             single_split_root_id > 1,
             "Prove that root was split, so we have a new root"
         );
         // test lookups work
-        let retrieved_vals = lookup_values(&btree, 0..cell_capacity + 1);
-        assert_eq!((0..cell_capacity + 1).collect::<Vec<u64>>(), retrieved_vals);
+        let retrieved_vals = lookup_values(&btree, 0..leaf_capacity + 1);
+        assert_eq!((0..leaf_capacity + 1).collect::<Vec<u64>>(), retrieved_vals);
 
         // prove some things about the root page
         let mut pager = btree.pager.borrow_mut();
@@ -804,9 +804,9 @@ mod tests {
         let root_page = root_page_ref.borrow();
         assert_eq!(root_page.cell_count(), 2);
         let mid_key = BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap();
-        assert_eq!(mid_key, (cell_capacity / 2) - 1);
+        assert_eq!(mid_key, (leaf_capacity / 2) - 1);
         let high_key = BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap();
-        assert_eq!(high_key, cell_capacity);
+        assert_eq!(high_key, leaf_capacity);
         let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
         let right_page_id = BTree::get_page_id_from_node_cell(&root_page, 1).unwrap();
         drop(root_page);
@@ -822,7 +822,7 @@ mod tests {
             (right_page.cell_count() as i64 - left_page.cell_count() as i64).abs(),
             1
         );
-        assert!((right_page.cell_count() as i64 - (cell_capacity / 2) as i64).abs() <= 1);
+        assert!((right_page.cell_count() as i64 - (leaf_capacity / 2) as i64).abs() <= 1);
         drop(left_page);
         drop(right_page);
         drop(pager);
@@ -830,9 +830,9 @@ mod tests {
         // insert enough values to make the right leaf split
         insert_values(
             &mut btree,
-            (0..(cell_capacity / 2)).map(|x| x + cell_capacity + 1),
+            (0..(leaf_capacity / 2)).map(|x| x + leaf_capacity + 1),
         );
-        let vals = 0..(cell_capacity + 1 + (cell_capacity / 2));
+        let vals = 0..(leaf_capacity + 1 + (leaf_capacity / 2));
         let retrieved_vals = lookup_values(&btree, vals.clone());
         assert_eq!(vals.collect::<Vec<u64>>(), retrieved_vals);
 
@@ -842,14 +842,14 @@ mod tests {
         let root_page = root_page_ref.borrow();
         assert_eq!(
             BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap(),
-            (cell_capacity / 2) - 1
+            (leaf_capacity / 2) - 1
         );
         assert_eq!(
             BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap(),
-            cell_capacity - 1
+            leaf_capacity - 1
         );
         let high_page_key = BTree::get_key_from_cell::<u64>(&root_page, 2).unwrap();
-        assert_eq!(high_page_key, cell_capacity + (cell_capacity / 2));
+        assert_eq!(high_page_key, leaf_capacity + (leaf_capacity / 2));
         let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
         let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
         let left_page = left_page_ref.borrow();
@@ -876,13 +876,30 @@ mod tests {
         drop(pager);
 
         // fill up until just before root split
-        let required_inserts_to_split_root = (cell_capacity * cell_capacity) / 2;
+        let node_cell = BTree::make_node_cell(&42u64, 23).unwrap();
+        let node_capacity =
+            PAGE_BUFFER_SIZE as u64 / (CELL_POINTER_SIZE as u64 + node_cell.len() as u64);
+        let required_inserts_to_split_root = (node_capacity + 1) * (leaf_capacity / 2);
         let insertion_range = high_page_key + 1..required_inserts_to_split_root;
         // show that this is the required amount
         insert_values(&mut btree, insertion_range);
         assert_eq!(btree.get_root_page_id().unwrap(), single_split_root_id);
+        let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root);
+        assert_eq!(
+            (0..required_inserts_to_split_root).collect::<Vec<u64>>(),
+            retrieved_vals
+        );
+        // now add one more and prove root is split
+        insert_values(
+            &mut btree,
+            required_inserts_to_split_root..required_inserts_to_split_root + 1,
+        );
 
-        // test situation where leaf and parent node split
-        // test lookups work
+        assert_ne!(btree.get_root_page_id().unwrap(), single_split_root_id);
+        let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root + 1);
+        assert_eq!(
+            (0..required_inserts_to_split_root + 1).collect::<Vec<u64>>(),
+            retrieved_vals
+        );
     }
 }
