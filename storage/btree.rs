@@ -67,6 +67,10 @@ const MAX_BTREE_CELL_SIZE: u16 = PAGE_BUFFER_SIZE / MIN_FANOUT_FACTOR;
 
 const METAROOT_ROOT_PTR_LOCATION: u16 = 0;
 
+const SIBLING_LEFT_PTR_LOCATION: u16 = 0;
+const SIBLING_RIGHT_PTR_LOCATION: u16 = 1;
+const BTREE_FIRST_CELL_LOCATION: u16 = 2;
+
 #[derive(Debug, PartialEq)]
 enum SearchResult {
     Found(u16),
@@ -103,6 +107,252 @@ impl From<IoError> for BTreeError {
     }
 }
 
+struct BTreeNode {
+    page_ref: Rc<RefCell<Page>>,
+}
+impl BTreeNode {
+    fn build(page_ref: Rc<RefCell<Page>>) -> Result<Self, BTreeError> {
+        let mut page = page_ref.borrow_mut();
+
+        let mut left_ptr_bytes = Vec::with_capacity(8);
+        page.id().write_to_bytes(&mut left_ptr_bytes)?;
+        let mut right_ptr_bytes = Vec::with_capacity(8);
+        page.id().write_to_bytes(&mut right_ptr_bytes)?;
+
+        // NOTE: This should _probably_ happen elsewhere, likey by seperating construction of nodes
+        // from "initialized" and "uninitialized" pages
+        // TODO: Fix this
+        if page.cell_count() == 0 {
+            // If this is the first use of this page in the tree, set up the sibling pointers
+            page.insert_cell(SIBLING_LEFT_PTR_LOCATION, &left_ptr_bytes)?;
+            page.insert_cell(SIBLING_RIGHT_PTR_LOCATION, &right_ptr_bytes)?;
+        }
+        drop(page);
+
+        Ok(BTreeNode { page_ref })
+    }
+
+    fn page_id(&self) -> PageId {
+        let page = self.page_ref.borrow();
+        page.id()
+    }
+
+    fn total_free_space(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        page.total_free_space()
+    }
+
+    fn member_count(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        page.cell_count() - BTREE_FIRST_CELL_LOCATION
+    }
+
+    fn left_sibling(&self) -> Result<Option<PageId>, BTreeError> {
+        let page = self.page_ref.borrow();
+        let cell = page.get_cell(SIBLING_LEFT_PTR_LOCATION);
+        let mut reader = &cell[..];
+        let sibling_id = PageId::from_bytes(&mut reader, &())?;
+        if sibling_id != self.page_id() {
+            Ok(Some(sibling_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn right_sibling(&self) -> Result<Option<PageId>, BTreeError> {
+        let page = self.page_ref.borrow();
+        let cell = page.get_cell(SIBLING_RIGHT_PTR_LOCATION);
+        let mut reader = &cell[..];
+        let sibling_id = PageId::from_bytes(&mut reader, &())?;
+        if sibling_id != self.page_id() {
+            Ok(Some(sibling_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn kind(&self) -> NodeKind {
+        let page = self.page_ref.borrow();
+        match page.kind() {
+            PageKind::BTreeNode => NodeKind::Node,
+            PageKind::BTreeLeafNotHeap => NodeKind::NonHeapLeaf,
+            PageKind::BTreeLeafHeap => NodeKind::HeapLeaf,
+            PageKind::Heap | PageKind::Unitialized | PageKind::BTreeMetaRoot => unreachable!(),
+        }
+    }
+
+    fn key_from_cell<K>(&self, position: u16) -> Result<K, BTreeError>
+    where
+        K: Deserialize<ExtraInfo = ()>,
+    {
+        let page = self.page_ref.borrow();
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        assert!(position < page.cell_count());
+        assert!(!matches!(
+            page.kind(),
+            PageKind::Heap | PageKind::BTreeMetaRoot
+        ));
+
+        let cell_bytes = page.get_cell(position);
+        let mut reader = match page.kind() {
+            PageKind::BTreeNode => &cell_bytes[NODE_CELL_KEY_OFFSET..],
+            PageKind::BTreeLeafHeap => &cell_bytes[LEAF_HEAP_CELL_KEY_OFFSET..],
+            PageKind::BTreeLeafNotHeap => todo!(),
+            PageKind::Heap | PageKind::BTreeMetaRoot | PageKind::Unitialized => unreachable!(),
+        };
+        Ok(K::from_bytes(&mut reader, &())?)
+    }
+
+    fn rightmost_key<K>(&self) -> Result<K, BTreeError>
+    where
+        K: Deserialize<ExtraInfo = ()>,
+    {
+        self.key_from_cell::<K>(self.member_count() - 1)
+    }
+
+    fn page_id_from_cell(&self, position: u16) -> Result<PageId, BTreeError> {
+        assert!(position < self.member_count());
+        assert!(matches!(self.kind(), NodeKind::Node));
+
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        let page = self.page_ref.borrow();
+        let cell_bytes = page.get_cell(position);
+        let mut reader = &cell_bytes[0..];
+        Ok(PageId::from_bytes(&mut reader, &())?)
+    }
+
+    fn heap_insertion_data_from_leaf_cell(
+        &self,
+        position: u16,
+    ) -> Result<HeapInsertionData, BTreeError> {
+        assert!(position < self.member_count());
+        assert!(matches!(self.kind(), NodeKind::HeapLeaf));
+
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        let page = self.page_ref.borrow();
+        let cell_bytes = page.get_cell(position);
+        let mut reader = &cell_bytes[..];
+        let heap_page_id = PageId::from_bytes(&mut reader, &())?;
+        let page_position = u16::from_bytes(&mut reader, &())?;
+        Ok(HeapInsertionData {
+            page_id: heap_page_id,
+            cell_position: page_position,
+        })
+    }
+
+    fn insert_cell(&mut self, position: u16, data: &[u8]) -> Result<(), BTreeError> {
+        let mut page = self.page_ref.borrow_mut();
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        page.insert_cell(position, data)?;
+        Ok(())
+    }
+
+    fn get_cell(&self, position: u16) -> Vec<u8> {
+        assert!(position < self.member_count());
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        let page = self.page_ref.borrow();
+        page.get_cell(position)
+    }
+
+    fn remove_cell(&mut self, position: u16) {
+        assert!(position < self.member_count());
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        let mut page = self.page_ref.borrow_mut();
+        page.remove_cell(position);
+    }
+
+    fn cell_size(&self, position: u16) -> u16 {
+        assert!(position < self.member_count());
+        let position = position + BTREE_FIRST_CELL_LOCATION;
+        let page = self.page_ref.borrow();
+        page.cell_size(position)
+    }
+
+    fn update_sibling_pointer(
+        &mut self,
+        direction: SiblingPointerDirection,
+        new_page_id: PageId,
+    ) -> Result<(), BTreeError> {
+        let update_loc = match direction {
+            SiblingPointerDirection::Left => SIBLING_LEFT_PTR_LOCATION,
+            SiblingPointerDirection::Right => SIBLING_RIGHT_PTR_LOCATION,
+        };
+        let mut page = self.page_ref.borrow_mut();
+        page.remove_cell(update_loc);
+
+        let mut cell_bytes = Vec::with_capacity(8);
+        new_page_id.write_to_bytes(&mut cell_bytes)?;
+
+        page.insert_cell(update_loc, &cell_bytes)?;
+        Ok(())
+    }
+
+    /// Searches the page. If the page contains the key (i.e., this is a data page and the key is
+    /// present, or is not a data page, but happens to have a split key matching the key), return
+    /// a SearchResult::Found containing the cell location the key was found in.
+    /// If the key was not found, return a SearchResult::NotFound containing the location that the
+    /// key would belong at if inserted into the page.
+    fn binary_search_for_key<K>(&self, key: &K) -> Result<SearchResult, BTreeError>
+    where
+        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
+    {
+        if self.member_count() == 0 {
+            return Ok(SearchResult::NotFound(0));
+        }
+        let mut bottom = 0;
+        let mut top = self.member_count() - 1;
+        let mut pos = (top - bottom) / 2;
+        while bottom < top {
+            let pos_key = self.key_from_cell::<K>(pos)?;
+            match key.cmp(&pos_key) {
+                Ordering::Less => {
+                    if pos == bottom {
+                        break;
+                    }
+                    top = pos - 1;
+                }
+                Ordering::Greater => {
+                    bottom = pos + 1;
+                }
+                Ordering::Equal => return Ok(SearchResult::Found(pos)),
+            }
+            pos = bottom + ((top - bottom) / 2);
+        }
+        let pos_key = self.key_from_cell::<K>(pos)?;
+        match key.cmp(&pos_key) {
+            Ordering::Equal => Ok(SearchResult::Found(pos)),
+            Ordering::Greater => Ok(SearchResult::NotFound(pos + 1)),
+            Ordering::Less => {
+                if bottom == 0 {
+                    Ok(SearchResult::NotFound(0))
+                } else {
+                    Ok(SearchResult::NotFound(pos))
+                }
+            }
+        }
+    }
+}
+
+enum SiblingPointerDirection {
+    Left,
+    Right,
+}
+
+enum NodeKind {
+    Node,
+    HeapLeaf,
+    NonHeapLeaf,
+}
+impl NodeKind {
+    fn into_page_kind(self) -> PageKind {
+        match self {
+            Self::Node => PageKind::BTreeNode,
+            Self::HeapLeaf => PageKind::BTreeLeafHeap,
+            Self::NonHeapLeaf => PageKind::BTreeLeafNotHeap,
+        }
+    }
+}
+
 pub struct BTree {
     pager: Rc<RefCell<Pager>>,
     max_cell_size: u16,
@@ -127,6 +377,13 @@ impl BTree {
         Ok(btree)
     }
 
+    fn new_node(&mut self, kind: NodeKind) -> Result<BTreeNode, BTreeError> {
+        let mut pager = self.pager.borrow_mut();
+        let new_page_ref = pager.new_page(self.fd, kind.into_page_kind())?;
+        let node = BTreeNode::build(new_page_ref)?;
+        Ok(node)
+    }
+
     fn init_meta_root(&mut self) -> Result<(), BTreeError> {
         let mut pager = self.pager.borrow_mut();
 
@@ -135,14 +392,15 @@ impl BTree {
         let mut meta_root_page = meta_root_page_ref.borrow_mut();
         assert_eq!(meta_root_page.id(), 0);
 
+        // say that page 1 is the root
         let mut id_bytes = Vec::new();
         1u64.write_to_bytes(&mut id_bytes)?;
         meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &id_bytes)?;
 
-        // init new root page
-        let root_page_ref = pager.new_page(self.fd, PageKind::BTreeLeafHeap)?;
-        let roog_page = root_page_ref.borrow();
-        assert_eq!(roog_page.id(), 1);
+        // init new root page (with id of 1)
+        drop(pager);
+        let root_node = self.new_node(NodeKind::HeapLeaf)?;
+        assert_eq!(root_node.page_id(), 1);
 
         Ok(())
     }
@@ -162,105 +420,18 @@ impl BTree {
         Ok(())
     }
 
-    /// Searches the page. If the page contains the key (i.e., this is a data page and the key is
-    /// present, or is not a data page, but happens to have a split key matching the key), return
-    /// a SearchResult::Found containing the cell location the key was found in.
-    /// If the key was not found, return a SearchResult::NotFound containing the location that the
-    /// key would belong at if inserted into the page.
-    fn binary_search_page<K>(page: &Page, key: &K) -> Result<SearchResult, BTreeError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        if page.cell_count() == 0 {
-            return Ok(SearchResult::NotFound(0));
-        }
-        let mut bottom = 0;
-        let mut top = page.cell_count() - 1;
-        let mut pos = (top - bottom) / 2;
-        while bottom < top {
-            let pos_key = BTree::get_key_from_cell::<K>(page, pos)?;
-            match key.cmp(&pos_key) {
-                Ordering::Less => {
-                    if pos == bottom {
-                        break;
-                    }
-                    top = pos - 1;
-                }
-                Ordering::Greater => {
-                    bottom = pos + 1;
-                }
-                Ordering::Equal => return Ok(SearchResult::Found(pos)),
-            }
-            pos = bottom + ((top - bottom) / 2);
-        }
-        let pos_key = BTree::get_key_from_cell::<K>(page, pos)?;
-        match key.cmp(&pos_key) {
-            Ordering::Equal => Ok(SearchResult::Found(pos)),
-            Ordering::Greater => Ok(SearchResult::NotFound(pos + 1)),
-            Ordering::Less => {
-                if bottom == 0 {
-                    Ok(SearchResult::NotFound(0))
-                } else {
-                    Ok(SearchResult::NotFound(pos))
-                }
-            }
-        }
-    }
-
-    fn get_key_from_cell<K: Deserialize<ExtraInfo = ()>>(
-        page: &Page,
-        position: u16,
-    ) -> Result<K, BTreeError> {
-        assert!(position < page.cell_count());
-        assert!(!matches!(
-            page.kind(),
-            PageKind::Heap | PageKind::BTreeMetaRoot
-        ));
-
-        let cell_bytes = page.get_cell(position);
-        let mut reader = match page.kind() {
-            PageKind::BTreeNode => &cell_bytes[NODE_CELL_KEY_OFFSET..],
-            PageKind::BTreeLeafHeap => &cell_bytes[LEAF_HEAP_CELL_KEY_OFFSET..],
-            PageKind::BTreeLeafNotHeap => todo!(),
-            PageKind::Heap | PageKind::BTreeMetaRoot | PageKind::Unitialized => unreachable!(),
-        };
-        Ok(K::from_bytes(&mut reader, &())?)
-    }
-
-    fn get_page_id_from_node_cell(page: &Page, position: u16) -> Result<PageId, BTreeError> {
-        assert!(position < page.cell_count());
-        assert!(matches!(page.kind(), PageKind::BTreeNode));
-        let cell_bytes = page.get_cell(position);
-        let mut reader = &cell_bytes[0..];
-        Ok(PageId::from_bytes(&mut reader, &())?)
-    }
-
-    fn get_heap_insertion_data_from_leaf_cell(
-        page: &Page,
-        position: u16,
-    ) -> Result<HeapInsertionData, BTreeError> {
-        assert!(position < page.cell_count());
-        assert!(matches!(page.kind(), PageKind::BTreeLeafHeap));
-        let cell_bytes = page.get_cell(position);
-        let mut reader = &cell_bytes[..];
-        let heap_page_id = PageId::from_bytes(&mut reader, &())?;
-        let page_position = u16::from_bytes(&mut reader, &())?;
-        Ok(HeapInsertionData {
-            page_id: heap_page_id,
-            cell_position: page_position,
-        })
-    }
-
     fn make_new_root(&mut self, first_cell: &[u8], second_cell: &[u8]) -> Result<(), BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-
-        let new_root_ref = pager.new_page(self.fd, PageKind::BTreeNode)?;
-        let mut new_root = new_root_ref.borrow_mut();
-        new_root.insert_cell(0, first_cell)?;
-        new_root.insert_cell(1, second_cell)?;
+        // set up new root
+        let mut new_root_node = self.new_node(NodeKind::Node)?;
+        new_root_node.insert_cell(0, first_cell)?;
+        new_root_node.insert_cell(1, second_cell)?;
         let mut new_root_page_id_bytes = Vec::new();
-        new_root.id().write_to_bytes(&mut new_root_page_id_bytes)?;
+        new_root_node
+            .page_id()
+            .write_to_bytes(&mut new_root_page_id_bytes)?;
 
+        // update meta root page
+        let mut pager = self.pager.borrow_mut();
         let meta_root_ref = pager.get_page(self.fd, 0)?;
         let mut meta_root_page = meta_root_ref.borrow_mut();
         //remove old id
@@ -269,6 +440,13 @@ impl BTree {
         meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &new_root_page_id_bytes)?;
 
         Ok(())
+    }
+
+    fn get_root_node(&self) -> Result<BTreeNode, BTreeError> {
+        let page_id = self.get_root_page_id()?;
+        let mut pager = self.pager.borrow_mut();
+        let page_ref = pager.get_page(self.fd, page_id)?;
+        BTreeNode::build(page_ref)
     }
 
     fn get_root_page_id(&self) -> Result<PageId, BTreeError> {
@@ -286,8 +464,7 @@ impl BTree {
         K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
-        let leaf_page = traversal_res.leaf.borrow();
-        match BTree::binary_search_page(&leaf_page, key)? {
+        match traversal_res.leaf.binary_search_for_key(key)? {
             SearchResult::Found(_) => Ok(true),
             SearchResult::NotFound(_) => Ok(false),
         }
@@ -295,8 +472,8 @@ impl BTree {
 }
 
 struct TraversalResult {
-    leaf: Rc<RefCell<Page>>,
-    breadcrumbs: Vec<Rc<RefCell<Page>>>,
+    leaf: BTreeNode,
+    breadcrumbs: Vec<BTreeNode>,
 }
 
 impl BTree {
@@ -304,35 +481,28 @@ impl BTree {
     where
         K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
-        let root_page_id = self.get_root_page_id()?;
+        let mut node = self.get_root_node()?;
         let mut pager = self.pager.borrow_mut();
-        // load root page (unmutably)
-        let mut page_ref = pager.get_page(self.fd, root_page_id)?;
         let mut breadcrumbs = Vec::new();
         // traverse until we hit a leaf page
-        while !matches!(page_ref.borrow().kind(), PageKind::BTreeLeafHeap) {
-            let page = page_ref.borrow();
-            let position = match BTree::binary_search_page(&page, key)? {
+        while !matches!(node.kind(), NodeKind::HeapLeaf) {
+            let position = match node.binary_search_for_key(key)? {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => {
                     // if the key is greater than our rightmost, go-down the rightmost path anyways
-                    if pos == page.cell_count() {
+                    if pos == node.member_count() {
                         pos - 1
                     } else {
                         pos
                     }
                 }
             };
-            let page_id = BTree::get_page_id_from_node_cell(&page, position)?;
-            drop(page);
-            breadcrumbs.push(page_ref);
-            page_ref = pager.get_page(self.fd, page_id)?;
+            let page_id = node.page_id_from_cell(position)?;
+            breadcrumbs.push(node);
+            node = BTreeNode::build(pager.get_page(self.fd, page_id)?)?;
         }
-        // now re-get that page mutably
-        let page_id = page_ref.borrow().id();
-        let page_ref = pager.get_page(self.fd, page_id)?;
         Ok(TraversalResult {
-            leaf: page_ref,
+            leaf: node,
             breadcrumbs,
         })
     }
@@ -342,13 +512,11 @@ impl BTree {
         K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
         let traversal_res = self.traverse_to_leaf(key)?;
-        let leaf = traversal_res.leaf.borrow();
-        let search_result = BTree::binary_search_page(&leaf, key)?;
-        match search_result {
+        match traversal_res.leaf.binary_search_for_key(key)? {
             SearchResult::NotFound(_) => Ok(None),
-            SearchResult::Found(pos) => Ok(Some(BTree::get_heap_insertion_data_from_leaf_cell(
-                &leaf, pos,
-            )?)),
+            SearchResult::Found(pos) => Ok(Some(
+                traversal_res.leaf.heap_insertion_data_from_leaf_cell(pos)?,
+            )),
         }
     }
 }
@@ -389,12 +557,12 @@ impl BTree {
         Ok(bytes)
     }
 
-    fn split_location(page: &Page, insert_location: u16, insert_data_size: u16) -> u16 {
-        assert!(page.cell_count() > 0);
+    fn split_location(node: &BTreeNode, insert_location: u16, insert_data_size: u16) -> u16 {
+        assert!(node.member_count() > 0);
         let mut left_sum = 0;
         let mut left_loc = 0;
         let mut right_sum = 0;
-        let mut right_loc = page.cell_count() - 1;
+        let mut right_loc = node.member_count() - 1;
         let mut used_insert = false;
 
         while left_loc <= right_loc {
@@ -404,7 +572,7 @@ impl BTree {
                     left_sum += insert_data_size;
                     used_insert = true;
                 } else {
-                    left_sum += page.cell_size(left_loc);
+                    left_sum += node.cell_size(left_loc);
                     left_loc += 1;
                 }
             // otherwise use right
@@ -412,33 +580,33 @@ impl BTree {
                 right_sum += insert_data_size;
                 used_insert = true;
             } else {
-                right_sum += page.cell_size(right_loc);
+                right_sum += node.cell_size(right_loc);
                 right_loc -= 1;
             }
         }
         right_loc
     }
 
-    fn split_page_after(
+    fn split_node_after(
         &mut self,
-        page: &mut Page,
+        node: &mut BTreeNode,
         split_location: u16,
-    ) -> Result<Rc<RefCell<Page>>, BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-        let new_page_ref = pager.new_page(self.fd, page.kind())?;
-        let mut new_page = new_page_ref.borrow_mut();
+    ) -> Result<BTreeNode, BTreeError> {
+        let mut new_node = self.new_node(node.kind())?;
         // copy cells to new page
-        for idx in split_location + 1..page.cell_count() {
-            let cell = page.get_cell(idx);
+        for idx in split_location + 1..node.member_count() {
+            let cell = node.get_cell(idx);
             let new_pos = idx - (split_location + 1);
-            new_page.insert_cell(new_pos, &cell).unwrap();
+            new_node.insert_cell(new_pos, &cell).unwrap();
         }
         // remove cells from this one
-        for idx in (split_location + 1..page.cell_count()).rev() {
-            page.remove_cell(idx);
+        for idx in (split_location + 1..node.member_count()).rev() {
+            node.remove_cell(idx);
         }
-        drop(new_page);
-        Ok(new_page_ref)
+        // update pointers
+        node.update_sibling_pointer(SiblingPointerDirection::Right, new_node.page_id())?;
+        new_node.update_sibling_pointer(SiblingPointerDirection::Left, node.page_id())?;
+        Ok(new_node)
     }
 
     fn split<K>(
@@ -450,60 +618,53 @@ impl BTree {
     where
         K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
-        let mut orig_page = traversal_res.leaf.borrow_mut();
+        let mut traversal_res = traversal_res;
+        let mut orig_node = traversal_res.leaf;
 
-        let split_location = BTree::split_location(&orig_page, insert_location, data.len() as u16);
-        let new_page_ref = self.split_page_after(&mut orig_page, split_location)?;
-        let mut new_page = new_page_ref.borrow_mut();
+        let split_location = BTree::split_location(&orig_node, insert_location, data.len() as u16);
+        let mut new_node = self.split_node_after(&mut orig_node, split_location)?;
 
         // insert new data
         if insert_location <= split_location {
-            orig_page.insert_cell(insert_location, data)?;
+            orig_node.insert_cell(insert_location, data)?;
         } else {
             let loc = insert_location - split_location - 1;
-            new_page.insert_cell(loc, data)?;
+            new_node.insert_cell(loc, data)?;
         }
 
-        let orig_page_key = BTree::get_key_from_cell::<K>(&orig_page, orig_page.cell_count() - 1)?;
-        let orig_page_id = orig_page.id();
-        let orig_page_cell = BTree::make_node_cell(&orig_page_key, orig_page_id)?;
+        let orig_node_key = orig_node.rightmost_key::<K>()?;
+        let orig_node_id = orig_node.page_id();
+        let orig_node_cell = BTree::make_node_cell(&orig_node_key, orig_node_id)?;
 
-        let new_page_key = BTree::get_key_from_cell::<K>(&new_page, new_page.cell_count() - 1)?;
-        let new_page_id = new_page.id();
-        let new_page_cell = BTree::make_node_cell(&new_page_key, new_page_id)?;
+        let new_node_key = new_node.rightmost_key::<K>()?;
+        let new_node_id = new_node.page_id();
+        let new_node_cell = BTree::make_node_cell(&new_node_key, new_node_id)?;
 
-        // dont need these any more
-        drop(orig_page);
-        drop(new_page);
-
-        let mut traversal_res = traversal_res;
-        if let Some(parent_page_ref) = traversal_res.breadcrumbs.pop() {
-            let mut parent_page = parent_page_ref.borrow_mut();
-            let search_key_location = match BTree::binary_search_page(&parent_page, &orig_page_key)?
-            {
+        if let Some(parent_node) = traversal_res.breadcrumbs.pop() {
+            let mut parent_node = parent_node;
+            let search_key_location = match parent_node.binary_search_for_key(&orig_node_key)? {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => {
-                    assert!(pos < parent_page.cell_count(), "The orig_key is always smaller than the prior right-most key, so this should always be true");
+                    assert!(pos < parent_node.member_count(), "The orig_key is always smaller than the prior right-most key, so this should always be true");
                     pos
                 }
             };
             // remove the old key, replace it with one that contains the correct split key for the
             // orig page
-            parent_page.remove_cell(search_key_location);
-            parent_page.insert_cell(search_key_location, &orig_page_cell)?;
+            parent_node.remove_cell(search_key_location);
+            parent_node.insert_cell(search_key_location, &orig_node_cell)?;
 
             // now try inserting the new cell
-            match parent_page.insert_cell(search_key_location + 1, &new_page_cell) {
-                Err(PageError::NotEnoughSpace) => {
-                    drop(parent_page);
-                    traversal_res.leaf = parent_page_ref;
-                    self.split::<K>(traversal_res, search_key_location + 1, &new_page_cell)
+            match parent_node.insert_cell(search_key_location + 1, &new_node_cell) {
+                Err(BTreeError::Page(PageError::NotEnoughSpace)) => {
+                    traversal_res.leaf = parent_node;
+                    self.split::<K>(traversal_res, search_key_location + 1, &new_node_cell)
                 }
-                Err(err) => Err(BTreeError::Page(err)),
+                Err(err) => Err(err),
                 Ok(_) => Ok(()),
             }
         } else {
-            self.make_new_root(&orig_page_cell, &new_page_cell)
+            self.make_new_root(&orig_node_cell, &new_node_cell)
         }
     }
 
@@ -516,17 +677,15 @@ impl BTree {
         K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
         let mut traversal_res = traversal_res;
-        while let Some(node_page_ref) = traversal_res.breadcrumbs.pop() {
-            let mut node_page = node_page_ref.borrow_mut();
-            let right_pos = node_page.cell_count() - 1;
-            let right_key = BTree::get_key_from_cell::<K>(&node_page, right_pos)?;
+        while let Some(mut node) = traversal_res.breadcrumbs.pop() {
+            let right_pos = node.member_count() - 1;
+            let right_key = node.rightmost_key::<K>()?;
             if let Ordering::Less = right_key.cmp(new_key) {
                 // update key
-                let child_id = BTree::get_page_id_from_node_cell(&node_page, right_pos)?;
-                node_page.remove_cell(right_pos);
+                let child_id = node.page_id_from_cell(right_pos)?;
+                node.remove_cell(right_pos);
                 let new_cell = BTree::make_node_cell(new_key, child_id)?;
-                node_page.insert_cell(right_pos, &new_cell)?;
-                drop(node_page);
+                node.insert_cell(right_pos, &new_cell)?;
             } else {
                 break;
             }
@@ -542,9 +701,9 @@ impl BTree {
     where
         K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
     {
-        let traversal_res = self.traverse_to_leaf(key)?;
-        let mut leaf_page = traversal_res.leaf.borrow_mut();
-        let location = match BTree::binary_search_page(&leaf_page, key)? {
+        let mut traversal_res = self.traverse_to_leaf(key)?;
+        let leaf_node = &mut traversal_res.leaf;
+        let location = match leaf_node.binary_search_for_key(key)? {
             SearchResult::NotFound(loc) => loc,
             SearchResult::Found(_) => return Err(BTreeError::KeyAlreadyExists),
         };
@@ -552,16 +711,14 @@ impl BTree {
         if data.len() > self.max_cell_size.into() {
             return Err(BTreeError::KeyTooLarge);
         }
-        match leaf_page.insert_cell(location, &data) {
-            Err(PageError::NotEnoughSpace) => {
-                drop(leaf_page);
+        match leaf_node.insert_cell(location, &data) {
+            Err(BTreeError::Page(PageError::NotEnoughSpace)) => {
                 self.split::<K>(traversal_res, location, &data)?;
                 Ok(())
             }
-            Err(err) => Err(BTreeError::from(err)),
+            Err(err) => Err(err),
             Ok(_) => {
-                if location == leaf_page.cell_count() - 1 {
-                    drop(leaf_page);
+                if location == leaf_node.member_count() - 1 {
                     self.fix_right_keys(key, traversal_res)?;
                 }
                 Ok(())
@@ -573,13 +730,21 @@ impl BTree {
     where
         K: Ord + Deserialize<ExtraInfo = ()> + Debug,
     {
-        let traversal_res = self.traverse_to_leaf(key)?;
-        let mut leaf_page = traversal_res.leaf.borrow_mut();
-        let location = match BTree::binary_search_page(&leaf_page, key)? {
+        let mut traversal_res = self.traverse_to_leaf(key)?;
+        let leaf_node = &mut traversal_res.leaf;
+        let location = match leaf_node.binary_search_for_key(key)? {
             SearchResult::Found(loc) => loc,
             SearchResult::NotFound(_) => return Ok(()),
         };
-        leaf_page.remove_cell(location);
+        leaf_node.remove_cell(location);
+        /*
+         * If page free space is greater than half:
+         *  - Check left and right sibling pages to see if they are also under-filled.
+         *  - Copy data from right page to left page.
+         *  - Update parent pointers:
+         *      - Remove right pointer
+         *      - Update left pointer with new rightmost key
+         */
         // TODO: Handle merge case
         // TODO: Handle case where parent-node's rightmost value needs to be updated
         unimplemented!();
@@ -603,16 +768,39 @@ mod tests {
         assert_eq!(PAGE_BUFFER_SIZE % MAX_BTREE_CELL_SIZE, 0);
     }
 
+    fn make_empty_tree_node() -> BTreeNode {
+        let page_ref = Rc::new(RefCell::new(Page::new(0, PageKind::BTreeNode)));
+        BTreeNode::build(page_ref).unwrap()
+    }
+
+    fn make_empty_leaf_node() -> BTreeNode {
+        let page_ref = Rc::new(RefCell::new(Page::new(0, PageKind::BTreeLeafHeap)));
+        BTreeNode::build(page_ref).unwrap()
+    }
+
     #[test]
-    fn get_key_from_cell_works() {
+    fn btree_node_initialization() {
+        let node = make_empty_leaf_node();
+        let page = node.page_ref.borrow();
+        assert_eq!(page.cell_count(), 2); // 2 sibling pointers present
+        drop(page);
+
+        assert_eq!(node.member_count(), 0);
+        assert_eq!(node.left_sibling().unwrap(), None);
+        assert_eq!(node.right_sibling().unwrap(), None);
+    }
+
+    #[test]
+    fn key_from_cell_works() {
         let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)];
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
+
         for (k, v) in kv_pairs.iter() {
             let cell = BTree::make_node_cell(k, *v).unwrap();
-            page.insert_cell(*k, &cell).unwrap();
+            node.insert_cell(*k, &cell).unwrap();
         }
         for (k, _) in kv_pairs.iter() {
-            let read_key: u16 = BTree::get_key_from_cell(&page, *k).unwrap();
+            let read_key: u16 = node.key_from_cell(*k).unwrap();
             assert_eq!(read_key, *k);
         }
     }
@@ -620,13 +808,13 @@ mod tests {
     #[test]
     fn binary_search_odd_cell_count() {
         let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)];
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
         for (k, v) in kv_pairs.iter() {
             let cell = BTree::make_node_cell(k, *v).unwrap();
-            page.insert_cell(*k, &cell).unwrap();
+            node.insert_cell(*k, &cell).unwrap();
         }
         for (k, _) in kv_pairs.iter() {
-            let res = BTree::binary_search_page(&page, k).unwrap();
+            let res = node.binary_search_for_key(k).unwrap();
             assert_eq!(res, SearchResult::Found(*k));
         }
     }
@@ -634,13 +822,13 @@ mod tests {
     #[test]
     fn binary_search_even_cell_count() {
         let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)];
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
         for (k, v) in kv_pairs.iter() {
             let cell = BTree::make_node_cell(k, *v).unwrap();
-            page.insert_cell(*k, &cell).unwrap();
+            node.insert_cell(*k, &cell).unwrap();
         }
         for (k, _) in kv_pairs.iter() {
-            let res = BTree::binary_search_page(&page, k).unwrap();
+            let res = node.binary_search_for_key(k).unwrap();
             assert_eq!(res, SearchResult::Found(*k));
         }
     }
@@ -648,14 +836,14 @@ mod tests {
     #[test]
     fn binary_search_not_found_should_insert_right() {
         let kv_pairs: Vec<(u16, u16)> = vec![(0, 0), (2, 1), (4, 2), (6, 3), (8, 4), (10, 5)];
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
         for (k, v) in kv_pairs.iter() {
             let cell = BTree::make_node_cell(k, *v as PageId).unwrap();
-            page.insert_cell(*v, &cell).unwrap();
+            node.insert_cell(*v, &cell).unwrap();
         }
         for (k, v) in kv_pairs.iter() {
             let search_for = *k + 1;
-            let res = BTree::binary_search_page(&page, &search_for).unwrap();
+            let res = node.binary_search_for_key(&search_for).unwrap();
             assert_eq!(res, SearchResult::NotFound(*v + 1));
         }
     }
@@ -663,54 +851,51 @@ mod tests {
     #[test]
     fn binary_search_not_found_should_insert_left() {
         let kv_pairs: Vec<(u16, u16)> = vec![(3, 0), (5, 0), (7, 1), (9, 2), (11, 3), (13, 4)];
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
         for (idx, (k, v)) in kv_pairs.iter().enumerate() {
             let cell = BTree::make_node_cell(k, *v as PageId).unwrap();
-            page.insert_cell(idx as u16, &cell).unwrap();
+            node.insert_cell(idx as u16, &cell).unwrap();
         }
         for (k, v) in kv_pairs.iter() {
             let search_for = *k - 3;
-            let res = BTree::binary_search_page(&page, &search_for).unwrap();
+            let res = node.binary_search_for_key(&search_for).unwrap();
             assert_eq!(res, SearchResult::NotFound(*v));
         }
     }
 
     #[test]
     fn binary_search_empty_page() {
-        let page = Page::new(0, PageKind::BTreeNode);
-        let res = BTree::binary_search_page(&page, &43).unwrap();
+        let node = make_empty_tree_node();
+        let res = node.binary_search_for_key(&43).unwrap();
         assert_eq!(res, SearchResult::NotFound(0));
     }
 
     #[test]
     fn node_cell_construction() {
-        let mut page = Page::new(0, PageKind::BTreeNode);
+        let mut node = make_empty_tree_node();
         let page_id = 42;
         let key = String::from("foo");
         let cell = BTree::make_node_cell(&key, page_id).unwrap();
-        page.insert_cell(0, &cell).unwrap();
+        node.insert_cell(0, &cell).unwrap();
 
-        assert_eq!(key, BTree::get_key_from_cell::<String>(&page, 0).unwrap());
-        assert_eq!(
-            page_id,
-            BTree::get_page_id_from_node_cell(&page, 0).unwrap()
-        );
+        assert_eq!(key, node.key_from_cell::<String>(0).unwrap(),);
+        assert_eq!(page_id, node.page_id_from_cell(0).unwrap(),);
     }
 
     #[test]
     fn leaf_cell_construction() {
-        let mut page = Page::new(0, PageKind::BTreeLeafHeap);
+        let mut node = make_empty_leaf_node();
         let page_id = 42;
         let page_location = 43;
         let key = String::from("foo");
         let heap_data = HeapInsertionData::new(page_id, page_location);
         let cell = BTree::make_leaf_cell(&key, &heap_data).unwrap();
-        page.insert_cell(0, &cell).unwrap();
+        node.insert_cell(0, &cell).unwrap();
 
-        assert_eq!(key, BTree::get_key_from_cell::<String>(&page, 0).unwrap());
+        assert_eq!(key, node.key_from_cell::<String>(0).unwrap(),);
         assert_eq!(
             heap_data,
-            BTree::get_heap_insertion_data_from_leaf_cell(&page, 0).unwrap()
+            node.heap_insertion_data_from_leaf_cell(0).unwrap(),
         );
     }
 
@@ -749,7 +934,13 @@ mod tests {
 
         // new btree test
         let mut btree = BTree::init(pager.clone(), fd).unwrap();
-        assert_eq!(btree.get_root_page_id().unwrap(), 1);
+        let root_node = btree.get_root_node().unwrap();
+        assert_eq!(root_node.page_id(), 1);
+        let page = root_node.page_ref.borrow();
+        assert_eq!(page.cell_count(), 2);
+        drop(page);
+        assert_eq!(root_node.member_count(), 0);
+        drop(root_node);
 
         // add cell to btree
         let data = HeapInsertionData::new(42, 43);
@@ -770,11 +961,28 @@ mod tests {
 
     #[test]
     fn insert_and_split() {
-        // calc how many cells will fit in a leaf
+        let empty_node = make_empty_tree_node();
         let leaf_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
-        let leaf_capacity =
-            PAGE_BUFFER_SIZE as u64 / (leaf_cell.len() as u64 + CELL_POINTER_SIZE as u64);
+        let leaf_capacity = empty_node.total_free_space() as u64
+            / (leaf_cell.len() as u64 + CELL_POINTER_SIZE as u64);
+        println!("capacity: {leaf_capacity}");
 
+        let expected_rightmost_after_splits = |page_count: u64| -> u64 {
+            let half_page_size = if leaf_capacity % 2 == 0 {
+                leaf_capacity / 2
+            } else {
+                (leaf_capacity / 2) + 1
+            };
+
+            let mut rightmost = leaf_capacity / 2;
+            for _ in 2..=page_count {
+                rightmost += half_page_size;
+            }
+            rightmost
+        };
+
+        // calc how many cells will fit in a leaf
+        // setup btree
         let filename = "btree_insert_and_split.test";
         let file = open_test_file(filename);
         let fd = file.as_raw_fd();
@@ -787,6 +995,10 @@ mod tests {
         let retrieved_vals = lookup_values(&btree, 0..leaf_capacity);
         assert_eq!((0..leaf_capacity).collect::<Vec<u64>>(), retrieved_vals);
 
+        // prove we haven't split yet
+        let root_node = btree.get_root_node().unwrap();
+        assert_eq!(root_node.page_id(), 1);
+
         // test split root works when full
         insert_values(&mut btree, leaf_capacity..leaf_capacity + 1);
         let single_split_root_id = btree.get_root_page_id().unwrap();
@@ -796,95 +1008,94 @@ mod tests {
         );
         // test lookups work
         let retrieved_vals = lookup_values(&btree, 0..leaf_capacity + 1);
-        assert_eq!((0..leaf_capacity + 1).collect::<Vec<u64>>(), retrieved_vals);
+        assert_eq!(
+            (0..expected_rightmost_after_splits(2) + 1).collect::<Vec<u64>>(),
+            retrieved_vals
+        );
 
         // prove some things about the root page
-        let mut pager = btree.pager.borrow_mut();
-        let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
-        let root_page = root_page_ref.borrow();
-        assert_eq!(root_page.cell_count(), 2);
-        let mid_key = BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap();
-        assert_eq!(mid_key, (leaf_capacity / 2) - 1);
-        let high_key = BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap();
-        assert_eq!(high_key, leaf_capacity);
-        let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
-        let right_page_id = BTree::get_page_id_from_node_cell(&root_page, 1).unwrap();
-        drop(root_page);
+        let root_node = btree.get_root_node().unwrap();
+        assert_eq!(root_node.member_count(), 2);
+        assert_eq!(
+            root_node.key_from_cell::<u64>(0).unwrap(),
+            expected_rightmost_after_splits(1)
+        );
+        assert_eq!(
+            root_node.key_from_cell::<u64>(1).unwrap(),
+            expected_rightmost_after_splits(2)
+        );
+        let left_page_id = root_node.page_id_from_cell(0).unwrap();
+        let right_page_id = root_node.page_id_from_cell(1).unwrap();
 
         // prove some things about the now split pages
+        let mut pager = btree.pager.borrow_mut();
         let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
-        let left_page = left_page_ref.borrow();
+        let left_node = BTreeNode::build(left_page_ref).unwrap();
         let right_page_ref = pager.get_page(fd, right_page_id).unwrap();
-        let right_page = right_page_ref.borrow();
+        let right_node = BTreeNode::build(right_page_ref).unwrap();
         // prove we have the expected number of cells in each node, and that the counts are about
         // even
-        assert_eq!(
-            (right_page.cell_count() as i64 - left_page.cell_count() as i64).abs(),
-            1
-        );
-        assert!((right_page.cell_count() as i64 - (leaf_capacity / 2) as i64).abs() <= 1);
-        drop(left_page);
-        drop(right_page);
+        assert!((right_node.member_count() as i64 - left_node.member_count() as i64).abs() <= 1);
+        assert!((right_node.member_count() as i64 - (leaf_capacity / 2) as i64).abs() <= 1);
         drop(pager);
 
         // insert enough values to make the right leaf split
         insert_values(
             &mut btree,
-            (0..(leaf_capacity / 2)).map(|x| x + leaf_capacity + 1),
+            expected_rightmost_after_splits(2) + 1..expected_rightmost_after_splits(3) + 1,
         );
-        let vals = 0..(leaf_capacity + 1 + (leaf_capacity / 2));
+        let vals = 0..expected_rightmost_after_splits(3) + 1;
         let retrieved_vals = lookup_values(&btree, vals.clone());
         assert_eq!(vals.collect::<Vec<u64>>(), retrieved_vals);
 
         // examine the root
-        let mut pager = btree.pager.borrow_mut();
-        let root_page_ref = pager.get_page(fd, single_split_root_id).unwrap();
-        let root_page = root_page_ref.borrow();
+        let root_node = btree.get_root_node().unwrap();
+        assert_eq!(root_node.member_count(), 3);
         assert_eq!(
-            BTree::get_key_from_cell::<u64>(&root_page, 0).unwrap(),
-            (leaf_capacity / 2) - 1
+            root_node.key_from_cell::<u64>(0).unwrap(),
+            expected_rightmost_after_splits(1)
         );
         assert_eq!(
-            BTree::get_key_from_cell::<u64>(&root_page, 1).unwrap(),
-            leaf_capacity - 1
+            root_node.key_from_cell::<u64>(1).unwrap(),
+            expected_rightmost_after_splits(2),
         );
-        let high_page_key = BTree::get_key_from_cell::<u64>(&root_page, 2).unwrap();
-        assert_eq!(high_page_key, leaf_capacity + (leaf_capacity / 2));
+        assert_eq!(
+            root_node.key_from_cell::<u64>(2).unwrap(),
+            expected_rightmost_after_splits(3),
+        );
 
         // examine the pages
-        let left_page_id = BTree::get_page_id_from_node_cell(&root_page, 0).unwrap();
-        let left_page_ref = pager.get_page(fd, left_page_id).unwrap();
-        let left_page = left_page_ref.borrow();
-        let mid_page_id = BTree::get_page_id_from_node_cell(&root_page, 1).unwrap();
-        let mid_page_ref = pager.get_page(fd, mid_page_id).unwrap();
-        let mid_page = mid_page_ref.borrow();
-        let high_page_id = BTree::get_page_id_from_node_cell(&root_page, 2).unwrap();
-        let high_page_ref = pager.get_page(fd, high_page_id).unwrap();
-        let high_page = high_page_ref.borrow();
+        let mut pager = btree.pager.borrow_mut();
+        let left_page_id = root_node.page_id_from_cell(0).unwrap();
+        let left_node = BTreeNode::build(pager.get_page(fd, left_page_id).unwrap()).unwrap();
+        let mid_page_id = root_node.page_id_from_cell(1).unwrap();
+        let mid_node = BTreeNode::build(pager.get_page(fd, mid_page_id).unwrap()).unwrap();
+        let high_page_id = root_node.page_id_from_cell(2).unwrap();
+        let high_node = BTreeNode::build(pager.get_page(fd, high_page_id).unwrap()).unwrap();
 
         // prove that all of the leaf occupancies are within 1 of each other
-        let min = left_page
-            .cell_count()
-            .min(mid_page.cell_count())
-            .min(high_page.cell_count());
-        let max = left_page
-            .cell_count()
-            .max(mid_page.cell_count())
-            .max(high_page.cell_count());
+        let min = left_node
+            .member_count()
+            .min(mid_node.member_count())
+            .min(high_node.member_count());
+        let max = left_node
+            .member_count()
+            .max(mid_node.member_count())
+            .max(high_node.member_count());
         assert!(max - min <= 1);
-        drop(root_page);
-        drop(high_page);
-        drop(mid_page);
-        drop(left_page);
         drop(pager);
 
         // Insert just enough to be 1 entry short of splitting the root again
         let node_cell = BTree::make_node_cell(&42u64, 23).unwrap();
-        let node_capacity =
-            PAGE_BUFFER_SIZE as u64 / (CELL_POINTER_SIZE as u64 + node_cell.len() as u64);
-        let required_inserts_to_split_root = (node_capacity + 1) * (leaf_capacity / 2);
-        let insertion_range = high_page_key + 1..required_inserts_to_split_root;
-        // show that this is the required amount
+        let node_capacity = empty_node.total_free_space() as u64
+            / (CELL_POINTER_SIZE as u64 + node_cell.len() as u64);
+        println!("node_capacity: {node_capacity}");
+        let required_inserts_to_split_root = expected_rightmost_after_splits(node_capacity + 1);
+        println!("required_inserts_to_split_root: {required_inserts_to_split_root}");
+        let insertion_range =
+            expected_rightmost_after_splits(3) + 1..required_inserts_to_split_root;
+
+        // to show that required amount is actually what caused the split, not sooner
         insert_values(&mut btree, insertion_range);
         assert_eq!(btree.get_root_page_id().unwrap(), single_split_root_id);
         let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root);
