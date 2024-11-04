@@ -238,6 +238,11 @@ impl Pager {
         Ok(())
     }
 
+    /// Marks a page for deletion by garbage collection at a later point
+    pub fn delete_page<Fd: AsRawFd>(&mut self, fd: Fd, page_id: PageId) -> Result<(), PagerError> {
+        unimplemented!()
+    }
+
     // evicts a page and returns the location of that now usable page
     fn evict_page(&mut self) -> Result<usize, PagerError> {
         let location = self.clock_cache.advance_to_next_evictable_location();
