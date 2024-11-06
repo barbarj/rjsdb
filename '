@@ -740,18 +740,9 @@ impl BTree {
     }
 }
 
-#[derive(Debug)]
 enum MergeLeafPosition {
     Left,
     Right,
-}
-impl MergeLeafPosition {
-    fn invert(&self) -> Self {
-        match self {
-            Self::Left => Self::Right,
-            Self::Right => Self::Left,
-        }
-    }
 }
 
 impl BTree {
@@ -768,33 +759,11 @@ impl BTree {
     fn get_right_sibling(&mut self, node: &BTreeNode) -> Result<Option<BTreeNode>, BTreeError> {
         if let Some(id) = node.right_sibling_id()? {
             let right_sibling = self.node_from_page_id(id)?;
-            assert_eq!(right_sibling.left_sibling_id()?, Some(node.page_id()));
+            assert_eq!(right_sibling.right_sibling_id()?, Some(node.page_id()));
             Ok(Some(right_sibling))
         } else {
             Ok(None)
         }
-    }
-
-    fn promote_to_root(&mut self, node: BTreeNode) -> Result<(), BTreeError> {
-        let current_root = self.get_root_node()?;
-        assert_eq!(current_root.member_count(), 1);
-        assert_eq!(current_root.page_id_from_cell(0)?, node.page_id());
-
-        let mut new_root_ptr_cell = Vec::with_capacity(8);
-        node.page_id().write_to_bytes(&mut new_root_ptr_cell)?;
-
-        let mut pager = self.pager.borrow_mut();
-        let meta_root_ref = pager.get_page(self.fd, 0)?;
-        let mut meta_root_page = meta_root_ref.borrow_mut();
-        meta_root_page.remove_cell(METAROOT_ROOT_PTR_LOCATION);
-        meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &new_root_ptr_cell)?;
-        drop(meta_root_page);
-
-        let old_root_id = current_root.page_id();
-        drop(current_root);
-        pager.delete_page(self.fd, old_root_id)?;
-
-        Ok(())
     }
 
     fn merge<K>(
@@ -827,7 +796,6 @@ impl BTree {
                 SearchResult::Found(pos) => pos,
                 SearchResult::NotFound(pos) => pos,
             };
-        assert_eq!(left_node_pos, right_node_pos - 1);
 
         // remove parent ptr cells
         parent.remove_cell(right_node_pos);
@@ -847,20 +815,13 @@ impl BTree {
 
         // delete right page
         let mut pager = self.pager.borrow_mut();
-        let right_page_id = right_node.page_id();
-        drop(right_node);
-        pager.delete_page(self.fd, right_page_id)?;
+        pager.delete_page(self.fd, right_node.page_id())?;
         drop(pager);
 
         // if pages remaining above 'leaf', recurse
         if !traversal_res.breadcrumbs.is_empty() {
             traversal_res.leaf = parent;
             self.merge_if_needed::<K>(traversal_res)
-        } else if parent.member_count() == 1 {
-            // if no breadcrumbs (so parent is root) and this parent only has one member, then we can
-            // promot this node to root,
-            drop(parent);
-            self.promote_to_root(left_node)
         } else {
             Ok(())
         }
@@ -871,7 +832,7 @@ impl BTree {
         K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
     {
         let leaf_node = &traversal_res.leaf;
-        if leaf_node.total_free_space() > (PAGE_BUFFER_SIZE / 2) {
+        if leaf_node.total_free_space() < (PAGE_BUFFER_SIZE / 2) {
             if let Some(left_node) = self.get_left_sibling(leaf_node)? {
                 let is_same_parent = {
                     let parent = traversal_res
@@ -883,7 +844,6 @@ impl BTree {
                 };
                 // if same parent and under-filled
                 if is_same_parent && left_node.total_free_space() < (PAGE_BUFFER_SIZE / 2) {
-                    drop(left_node);
                     self.merge::<K>(traversal_res, MergeLeafPosition::Right)?;
                     return Ok(());
                 }
@@ -898,7 +858,6 @@ impl BTree {
                 };
                 // if same parent and under-filled
                 if is_same_parent && right_node.total_free_space() < (PAGE_BUFFER_SIZE / 2) {
-                    drop(right_node);
                     self.merge::<K>(traversal_res, MergeLeafPosition::Left)?;
                     return Ok(());
                 }
@@ -909,7 +868,7 @@ impl BTree {
 
     pub fn delete<K>(&mut self, key: &K) -> Result<(), BTreeError>
     where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
+        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
     {
         let mut traversal_res = self.traverse_to_leaf(key)?;
         let leaf_node = &mut traversal_res.leaf;
@@ -918,7 +877,9 @@ impl BTree {
             SearchResult::NotFound(_) => return Ok(()),
         };
         leaf_node.remove_cell(location);
-        self.merge_if_needed::<K>(traversal_res)?;
+        let leaf_rightmost_key = leaf_node.rightmost_key::<K>()?;
+        self.merge_if_needed::<K>(traversal_res.clone())?;
+        self.fix_right_keys(&leaf_rightmost_key, traversal_res)?;
         Ok(())
     }
 }
@@ -972,44 +933,6 @@ mod tests {
         fn current(&self) -> &BTreeNode {
             &self.traversal_res.leaf
         }
-    }
-
-    /// Works for up to a 3-level tree
-    fn visualize_tree(btree: &BTree) {
-        println!("------------------------------------------");
-        let mut cursor = BTreeCursor::new(btree);
-        let root_id = cursor.current().page_id();
-        if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-            println!("{root_id}");
-            return;
-        }
-        cursor.down(0);
-        if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-            cursor.up();
-            let node = cursor.current();
-            let children: Vec<PageId> = (0..node.member_count())
-                .map(|x| node.page_id_from_cell(x).unwrap())
-                .collect();
-            println!("{root_id} -> {children:?}");
-        } else {
-            cursor.up();
-            for i in 0..cursor.current().member_count() {
-                cursor.down(i);
-                let node_id = cursor.current().page_id();
-                if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-                    println!("{root_id} -> {node_id}");
-                } else {
-                    let node = cursor.current();
-                    let children: Vec<PageId> = (0..node.member_count())
-                        .map(|x| node.page_id_from_cell(x).unwrap())
-                        .collect();
-                    println!("{root_id} -> {node_id} -> {children:?}");
-                }
-                cursor.up();
-                println!("----");
-            }
-        }
-        println!("------------------------------------------");
     }
 
     #[test]
@@ -1157,6 +1080,7 @@ mod tests {
 
     fn delete_values(btree: &mut BTree, values: impl Iterator<Item = u64>) {
         for v in values {
+            println!("deleting {v}");
             btree.delete(&v).unwrap();
         }
     }
@@ -1349,9 +1273,6 @@ mod tests {
             .max(mid_node.member_count())
             .max(high_node.member_count());
         assert!(max - min <= 1);
-        drop(left_node);
-        drop(mid_node);
-        drop(high_node);
         drop(cursor);
 
         // Insert just enough to be 1 entry short of splitting the root again
@@ -1378,43 +1299,46 @@ mod tests {
             &mut btree,
             required_inserts_to_split_root..required_inserts_to_split_root + 1,
         );
-        let post_root_split_root_id = btree.get_root_page_id().unwrap();
-        assert_ne!(post_root_split_root_id, single_split_root_id);
+        assert_ne!(btree.get_root_page_id().unwrap(), single_split_root_id);
         let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root + 1);
         assert_eq!(
             (0..required_inserts_to_split_root + 1).collect::<Vec<u64>>(),
             retrieved_vals
         );
 
-        visualize_tree(&btree);
-
         // now for deletion and merge
+        // delete every other value from the first two leafs to cause a merge
+        let to_delete = (0..expected_rightmost_after_splits(2)).filter(|x| x % 2 == 0);
+        delete_values(&mut btree, to_delete);
+        let expected_vals = (0..expected_rightmost_after_splits(2)).filter(|x| x % 2 == 1);
+        let retrieved_vals = lookup_values(&btree, expected_vals.clone());
+        assert_eq!(expected_vals.clone().collect::<Vec<u64>>(), retrieved_vals);
+
+        // show merge happened
         let mut cursor = BTreeCursor::new(&btree);
+        assert_eq!(
+            cursor.current().member_count(),
+            2,
+            "The root should still have two children"
+        );
         cursor.down(0);
-        let post_merge_root_id = cursor.current().page_id();
-        cursor.down(1);
-        assert_eq!(cursor.current().page_id(), 2);
-        let expected_first_key_after_merge = cursor.current().rightmost_key::<u64>().unwrap();
-        drop(cursor);
-
-        // delete a single key, which should be enough to cause a merge at both the leaves, and the
-        // parents, promoting the merged parent to root.
-        btree.delete::<u64>(&0).unwrap();
-        visualize_tree(&btree);
-        let mut expected_vals = vec![None];
-        expected_vals.extend((1..expected_rightmost_after_splits(2)).map(Some));
-        let retrieved_vals = lookup_values_options(&btree, 0..expected_rightmost_after_splits(2));
-        assert_eq!(expected_vals, retrieved_vals);
-
-        // show merge happened, all the way up to root
-        let cursor = BTreeCursor::new(&btree);
-        assert_eq!(post_merge_root_id, post_merge_root_id);
-        assert_eq!(cursor.current().member_count(), node_capacity as u16);
         let left_key = cursor.current().key_from_cell::<u64>(0).unwrap();
         assert_eq!(
-            expected_first_key_after_merge, left_key,
+            expected_vals.last().unwrap(),
+            left_key,
             "Leftmost key is now the high key of the cell that was formerly in position 1"
         );
-        assert_eq!(cursor.current().member_count(), node_capacity as u16);
+
+        /*
+         * Delete and merge test plan:
+         * - delete every other value from first two leafs.
+         *   - show that values are deleted
+         *   - somehow show that merge happens
+         * - delete every other value from last two leafs
+         *   - show that values are deleted
+         *   - somehow show that merge happens
+         *   - show that node merge happens and that root is now the former node
+         *
+         */
     }
 }

@@ -240,7 +240,11 @@ impl Pager {
 
     /// Marks a page for deletion by garbage collection at a later point
     pub fn delete_page<Fd: AsRawFd>(&mut self, fd: Fd, page_id: PageId) -> Result<(), PagerError> {
-        unimplemented!()
+        let location = self.page_locations.get(&(fd.as_raw_fd(), page_id)).unwrap();
+        let page_ref = self.pages.get(*location).unwrap();
+        assert_eq!(Rc::strong_count(page_ref), 1, "The reference owned by the pager should be the only reference that exists when we are about to delete a page");
+        // TODO: Somehow mark for deletion or whatever
+        Ok(())
     }
 
     // evicts a page and returns the location of that now usable page
