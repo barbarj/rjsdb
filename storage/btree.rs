@@ -926,7 +926,7 @@ impl BTree {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{File, OpenOptions},
+        fs::{self, File, OpenOptions},
         os::fd::AsRawFd,
     };
 
@@ -1222,6 +1222,8 @@ mod tests {
 
         let lookup_res = btree.lookup_value(&key).unwrap();
         assert_eq!(lookup_res, Some(data));
+        drop(btree);
+        fs::remove_file(filename).unwrap();
     }
 
     #[test]
@@ -1416,5 +1418,7 @@ mod tests {
             "Leftmost key is now the high key of the cell that was formerly in position 1"
         );
         assert_eq!(cursor.current().member_count(), node_capacity as u16);
+        drop(btree);
+        fs::remove_file(filename).unwrap();
     }
 }
