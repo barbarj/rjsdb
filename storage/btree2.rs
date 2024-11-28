@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::fmt::Debug;
+
 #[cfg(not(test))]
 const FANOUT_FACTOR: usize = 512;
 #[cfg(test)]
@@ -34,7 +36,7 @@ struct BTreeNode<K: Ord + Clone, V: Clone> {
     keys: Vec<K>,
     children: Vec<Child<K, V>>,
 }
-impl<K: Ord + Clone, V: Clone> BTreeNode<K, V> {
+impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
     fn new() -> Self {
         BTreeNode {
             keys: Vec::with_capacity(FANOUT_FACTOR),
@@ -51,6 +53,21 @@ impl<K: Ord + Clone, V: Clone> BTreeNode<K, V> {
             keys,
             children: Vec::new(),
         }
+    }
+
+    fn from_leaves(leaves: Vec<BTreeLeaf<K, V>>) -> Self {
+        assert!(leaves.len() > 1);
+        let keys = leaves[1..]
+            .iter()
+            .map(|leaf| &leaf.items[0].0)
+            .cloned()
+            .collect();
+        let children = leaves
+            .into_iter()
+            .map(|leaf| Child::Leaf(Box::new(leaf)))
+            .collect();
+
+        BTreeNode { keys, children }
     }
 
     /// returns the newly created node, representing the right side of the split
@@ -87,7 +104,11 @@ impl<K: Ord + Clone, V: Clone> BTreeNode<K, V> {
                 let mut new_node = self.split();
                 if self.keys.last().unwrap() < &split_key {
                     // insert into new node (right one)
-                    let pos = position - self.keys.len();
+                    println!("{split_key:?}");
+                    let pos = match self.binary_search_for_key(&split_key) {
+                        Ok(pos) => pos,
+                        Err(pos) => pos,
+                    };
                     new_node.keys.insert(pos, split_key);
                     new_node.children.insert(pos + 1, new_child_node);
                 } else {
@@ -217,6 +238,11 @@ mod tests {
 
     #[test]
     fn leaf_insert_and_split() {
+        assert_eq!(
+            FANOUT_FACTOR, 8,
+            "This test needs updated if the test fanout factor changes"
+        );
+
         let mut keys_iter = (0..).filter(|x| x % 2 == 1);
         let mut items: Vec<i32> = keys_iter.by_ref().take(FANOUT_FACTOR).collect();
         let mut leaf = BTreeLeaf::new();
@@ -254,5 +280,84 @@ mod tests {
             assert_eq!(new_leaf.get(num), Some(num * 10));
             assert!(leaf.get(num).is_none());
         }
+    }
+
+    #[test]
+    fn node_insert_and_split() {
+        //100, 200, 300, 400, 500, 600, 700, 800 // fill leaf
+        //100, 200, 300, 400 || 500, 600, 700, 800, 900 // add one to split
+        //100, 200, 300, 400 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill right leaf to split
+        //100, 200, 300, 400 || 410, 420, 430, 440, 450 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill first leaf to split
+        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill interior leaf so it splits
+        // add enough to right side to cause node to split
+        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, 944 // 6 leaves
+        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947, 948 // 7 leaves
+        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947 || 948, 949, 950, 951, 952 // 8 leaves
+        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947 || 948, 949, 950, 951, 952, 953, 954, 955 // fill last leaf
+        // insert one more to cause node split
+        // confirm resulting nodes constructed correctly
+
+        let insertion_done: InsertionResult<i32, i32> = InsertionResult::Done;
+        let mut keys_present: Vec<i32> = Vec::new();
+
+        // split first leaf
+        let mut insertion_order = 0;
+        let mut first_leaf = BTreeLeaf::new();
+        for i in 1..=8 {
+            println!("{i}");
+            first_leaf.insert(i * 100, insertion_order);
+            insertion_order += 1;
+            keys_present.push(i * 100);
+        }
+        let new_leaf = match first_leaf.insert(900, 9) {
+            InsertionResult::Split(Child::Leaf(new_leaf)) => new_leaf,
+            _ => panic!(),
+        };
+        let mut node = BTreeNode::from_leaves(vec![first_leaf, *new_leaf]);
+
+        // fill right leaf to split
+        for i in [910, 920, 930, 940].iter() {
+            println!("{i}");
+            let _res = node.insert(*i, insertion_order);
+            assert!(matches!(&insertion_done, _res));
+            insertion_order += 1;
+            keys_present.push(*i);
+        }
+
+        // fill left leaf to split
+        for i in [410, 420, 430, 440, 450].iter() {
+            println!("{i}");
+            let _res = node.insert(*i, insertion_order);
+            assert!(matches!(&insertion_done, _res));
+            insertion_order += 1;
+            keys_present.push(*i);
+        }
+
+        // fill interior leaf to split
+        for i in [451, 452, 453, 454].iter() {
+            println!("{i}");
+            let _res = node.insert(*i, insertion_order);
+            assert!(matches!(&insertion_done, _res));
+            insertion_order += 1;
+            keys_present.push(*i);
+        }
+
+        // fill leaves to the right to fill this node
+        for i in 941..=955 {
+            println!("{i}");
+            let _res = node.insert(i, insertion_order);
+            assert!(matches!(&insertion_done, _res));
+            insertion_order += 1;
+            keys_present.push(i);
+        }
+
+        // insert one more, node splits
+        println!("956");
+        let new_node = match node.insert(956, insertion_order) {
+            InsertionResult::Split(Child::Node(new_node)) => new_node,
+            _ => panic!("Should have split into a new node"),
+        };
+        assert_eq!(node.keys, vec![410, 450, 500]);
+        assert_eq!(new_node.keys, vec![940, 944, 948]);
     }
 }
