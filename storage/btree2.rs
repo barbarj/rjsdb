@@ -5,7 +5,7 @@ use std::fmt::Debug;
 #[cfg(not(test))]
 const FANOUT_FACTOR: usize = 512;
 #[cfg(test)]
-const FANOUT_FACTOR: usize = 8;
+const FANOUT_FACTOR: usize = 5;
 
 struct BTree<K: Ord + Clone, V: Clone> {
     root: Child<K, V>,
@@ -39,8 +39,8 @@ struct BTreeNode<K: Ord + Clone, V: Clone> {
 impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
     fn new() -> Self {
         BTreeNode {
-            keys: Vec::with_capacity(FANOUT_FACTOR),
-            children: Vec::with_capacity(FANOUT_FACTOR + 1),
+            keys: Vec::with_capacity(FANOUT_FACTOR - 1),
+            children: Vec::with_capacity(FANOUT_FACTOR),
         }
     }
 
@@ -55,11 +55,24 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         }
     }
 
+    #[cfg(test)]
+    fn child_sizes(&self) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        for child in self.children.iter() {
+            let size = match child {
+                Child::Node(node) => node.children.len(),
+                Child::Leaf(leaf) => leaf.items.len(),
+            };
+            sizes.push(size);
+        }
+        sizes
+    }
+
     fn from_leaves(leaves: Vec<BTreeLeaf<K, V>>) -> Self {
         assert!(leaves.len() > 1);
-        let keys = leaves[1..]
+        let keys = leaves[..leaves.len() - 1]
             .iter()
-            .map(|leaf| &leaf.items[0].0)
+            .map(|leaf| &leaf.items.last().unwrap().0)
             .cloned()
             .collect();
         let children = leaves
@@ -104,8 +117,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
                 let mut new_node = self.split();
                 if self.keys.last().unwrap() < &split_key {
                     // insert into new node (right one)
-                    println!("{split_key:?}");
-                    let pos = match self.binary_search_for_key(&split_key) {
+                    let pos = match new_node.binary_search_for_key(&split_key) {
                         Ok(pos) => pos,
                         Err(pos) => pos,
                     };
@@ -124,6 +136,17 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
             }
         };
         InsertionResult::Done
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        let position = match self.binary_search_for_key(key) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+        match &self.children[position] {
+            Child::Node(node) => node.get(key),
+            Child::Leaf(leaf) => leaf.get(key),
+        }
     }
 
     fn remove(&mut self, _key: &K) {
@@ -238,11 +261,6 @@ mod tests {
 
     #[test]
     fn leaf_insert_and_split() {
-        assert_eq!(
-            FANOUT_FACTOR, 8,
-            "This test needs updated if the test fanout factor changes"
-        );
-
         let mut keys_iter = (0..).filter(|x| x % 2 == 1);
         let mut items: Vec<i32> = keys_iter.by_ref().take(FANOUT_FACTOR).collect();
         let mut leaf = BTreeLeaf::new();
@@ -284,80 +302,125 @@ mod tests {
 
     #[test]
     fn node_insert_and_split() {
-        //100, 200, 300, 400, 500, 600, 700, 800 // fill leaf
-        //100, 200, 300, 400 || 500, 600, 700, 800, 900 // add one to split
-        //100, 200, 300, 400 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill right leaf to split
-        //100, 200, 300, 400 || 410, 420, 430, 440, 450 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill first leaf to split
-        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930, 940 // fill interior leaf so it splits
-        // add enough to right side to cause node to split
-        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, 944 // 6 leaves
-        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947, 948 // 7 leaves
-        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947 || 948, 949, 950, 951, 952 // 8 leaves
-        //100, 200, 300, 400 || 410, 420, 430, 440 || 450, 451, 452, 453, 454 || 500, 600, 700, 800 || 900, 910, 920, 930 || 940, 941, 942, 943, || 944, 945, 946, 947 || 948, 949, 950, 951, 952, 953, 954, 955 // fill last leaf
-        // insert one more to cause node split
-        // confirm resulting nodes constructed correctly
+        // TODO: update
+        assert_eq!(
+            FANOUT_FACTOR, 5,
+            "This test needs updated if the test fanout factor changes"
+        );
 
+        let first_leaf_items = [100, 200, 300, 400, 500, 600];
+        let split_right_leaf_items = [700, 800];
+        let split_left_leaf_items = [110, 120, 130, 140];
+        let split_interior_leaf_items = [310, 320, 330, 340];
+        let fill_right_leaf_items = [900];
+        // effects of insertions:
+        // 100, 200, 300, 400, 500 // fill leaf
+        // 100, 200 || 300, 400, 500, 600 // add one to split
+        // 100, 200 || 300, 400 || 500, 600, 700, 800 // fill right leaf to split
+        // 100, 110 || 120, 130, 140, 200 || 300, 400 || 500, 600, 700, 800 // fill left leaf to split
+        // 100, 110 || 120, 130, 140, 200 || 300, 310 || 320, 330, 340, 400 || 500, 600, 700, 800 // fill interior leaf to split
+        // 100, 110 || 120, 130, 140, 200 || 300, 310 || 320, 330, 340, 400 || 500, 600, 700, 800, 900 // fill one more leaf
+
+        // add one more to right leaf to cause leaf split + node split
+        // verify resulting nodes are correctly constructed
+        //
         let insertion_done: InsertionResult<i32, i32> = InsertionResult::Done;
         let mut keys_present: Vec<i32> = Vec::new();
+        let mut insertion_order = 0;
 
         // split first leaf
-        let mut insertion_order = 0;
         let mut first_leaf = BTreeLeaf::new();
-        for i in 1..=8 {
-            println!("{i}");
-            first_leaf.insert(i * 100, insertion_order);
-            insertion_order += 1;
-            keys_present.push(i * 100);
-        }
-        let new_leaf = match first_leaf.insert(900, 9) {
-            InsertionResult::Split(Child::Leaf(new_leaf)) => new_leaf,
-            _ => panic!(),
-        };
-        let mut node = BTreeNode::from_leaves(vec![first_leaf, *new_leaf]);
-
-        // fill right leaf to split
-        for i in [910, 920, 930, 940].iter() {
-            println!("{i}");
-            let _res = node.insert(*i, insertion_order);
+        for num in first_leaf_items[0..first_leaf_items.len() - 1].iter() {
+            // all but last
+            let _res = first_leaf.insert(*num, insertion_order);
             assert!(matches!(&insertion_done, _res));
             insertion_order += 1;
-            keys_present.push(*i);
+            keys_present.push(*num);
+        }
+        let second_leaf =
+            match first_leaf.insert(*first_leaf_items.last().unwrap(), insertion_order) {
+                InsertionResult::Split(Child::Leaf(new_leaf)) => new_leaf,
+                _ => panic!("Should have split and made a leaf"),
+            };
+        insertion_order += 1;
+        keys_present.push(*first_leaf_items.last().unwrap());
+
+        assert_eq!(first_leaf.last_key(), Some(&200));
+
+        let mut node = BTreeNode::from_leaves(vec![first_leaf, *second_leaf]);
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.keys, vec![200]);
+        assert_eq!(node.child_sizes(), vec![2, 4]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            assert_eq!(node.get(key), Some(idx));
         }
 
-        // fill left leaf to split
-        for i in [410, 420, 430, 440, 450].iter() {
-            println!("{i}");
-            let _res = node.insert(*i, insertion_order);
-            assert!(matches!(&insertion_done, _res));
+        // split right leaf
+        for num in split_right_leaf_items {
+            node.insert(num, insertion_order);
             insertion_order += 1;
-            keys_present.push(*i);
+            keys_present.push(num);
+        }
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.keys, vec![200, 400]);
+        assert_eq!(node.child_sizes(), vec![2, 2, 4]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            assert_eq!(node.get(key), Some(idx));
         }
 
-        // fill interior leaf to split
-        for i in [451, 452, 453, 454].iter() {
-            println!("{i}");
-            let _res = node.insert(*i, insertion_order);
-            assert!(matches!(&insertion_done, _res));
+        // split left leaf
+        for num in split_left_leaf_items {
+            node.insert(num, insertion_order);
             insertion_order += 1;
-            keys_present.push(*i);
+            keys_present.push(num);
+        }
+        assert_eq!(node.children.len(), 4);
+        assert_eq!(node.keys, vec![110, 200, 400]);
+        assert_eq!(node.child_sizes(), vec![2, 4, 2, 4]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            assert_eq!(node.get(key), Some(idx));
         }
 
-        // fill leaves to the right to fill this node
-        for i in 941..=955 {
-            println!("{i}");
-            let _res = node.insert(i, insertion_order);
-            assert!(matches!(&insertion_done, _res));
+        // split interior leaf
+        for num in split_interior_leaf_items {
+            node.insert(num, insertion_order);
             insertion_order += 1;
-            keys_present.push(i);
+            keys_present.push(num);
+        }
+        assert_eq!(node.children.len(), 5);
+        assert_eq!(node.keys, vec![110, 200, 310, 400]);
+        assert_eq!(node.child_sizes(), vec![2, 4, 2, 4, 4]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            assert_eq!(node.get(key), Some(idx));
         }
 
-        // insert one more, node splits
-        println!("956");
-        let new_node = match node.insert(956, insertion_order) {
+        // fill right leaf
+        for num in fill_right_leaf_items {
+            node.insert(num, insertion_order);
+            insertion_order += 1;
+            keys_present.push(num);
+        }
+        assert_eq!(node.child_sizes(), vec![2, 4, 2, 4, 5]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            assert_eq!(node.get(key), Some(idx));
+        }
+
+        // add one more item to the full leaf on the right to cause leaf split then node split
+        let new_node = match node.insert(910, insertion_order) {
             InsertionResult::Split(Child::Node(new_node)) => new_node,
             _ => panic!("Should have split into a new node"),
         };
-        assert_eq!(node.keys, vec![410, 450, 500]);
-        assert_eq!(new_node.keys, vec![940, 944, 948]);
+        keys_present.push(910);
+        // the new leaf will have ended up on the right node after the split
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.keys, vec![110]);
+        assert_eq!(new_node.children.len(), 4);
+        assert_eq!(new_node.keys, vec![310, 400, 600]);
+        for (idx, key) in keys_present.iter().enumerate() {
+            let found_in_either = node.get(key).or(new_node.get(key));
+            assert_eq!(found_in_either, Some(idx));
+        }
+        assert_eq!(node.child_sizes(), vec![2, 4]);
+        assert_eq!(new_node.child_sizes(), vec![2, 4, 2, 4]);
     }
 }
