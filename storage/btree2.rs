@@ -26,6 +26,42 @@ enum Child<K: Ord + Clone, V: Clone> {
     Node(Box<BTreeNode<K, V>>),
     Leaf(Box<BTreeLeaf<K, V>>),
 }
+impl<K: Ord + Clone, V: Clone> Child<K, V> {
+    fn node(&self) -> &BTreeNode<K, V> {
+        match self {
+            Child::Node(node) => node,
+            Child::Leaf(_) => unreachable!(),
+        }
+    }
+
+    fn node_mut(&mut self) -> &BTreeNode<K, V> {
+        match self {
+            Child::Node(node) => node,
+            Child::Leaf(_) => unreachable!(),
+        }
+    }
+
+    fn leaf(&self) -> &BTreeLeaf<K, V> {
+        match self {
+            Child::Node(_) => unreachable!(),
+            Child::Leaf(leaf) => leaf,
+        }
+    }
+
+    fn leaf_mut(&mut self) -> &BTreeLeaf<K, V> {
+        match self {
+            Child::Node(_) => unreachable!(),
+            Child::Leaf(leaf) => leaf,
+        }
+    }
+
+    fn member_count(&self) -> usize {
+        match self {
+            Child::Node(node) => node.children.len(),
+            Child::Leaf(leaf) => leaf.items.len(),
+        }
+    }
+}
 
 enum InsertionResult<K: Ord + Clone, V: Clone> {
     Done,
@@ -149,8 +185,49 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         }
     }
 
-    fn remove(&mut self, _key: &K) {
-        unimplemented!();
+    fn merge_children(&mut self, left_pos: usize, right_pos: usize) {
+        assert_eq!(left_pos + 1, right_pos);
+        let (left, right) = self.children.split_at_mut(right_pos);
+        let left_child = &mut left[left_pos];
+        let right_child = &mut right[0];
+
+        match (left_child, right_child) {
+            (Child::Node(left), Child::Node(right)) => {
+                left.keys.append(&mut right.keys);
+                left.children.append(&mut right.children);
+            }
+            (Child::Leaf(left), Child::Leaf(right)) => {
+                left.items.append(&mut right.items);
+            }
+            _ => unreachable!(),
+        }
+        self.children.remove(right_pos);
+        self.keys.remove(left_pos);
+    }
+
+    fn remove(&mut self, key: &K) {
+        let position = match self.binary_search_for_key(key) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+        let child_node = &mut self.children[position];
+        match child_node {
+            Child::Node(child_node) => {
+                child_node.remove(key);
+            }
+            Child::Leaf(leaf) => {
+                leaf.remove(key);
+            }
+        };
+        if child_node.member_count() <= (FANOUT_FACTOR / 3) {
+            if position > 0 && self.children[position - 1].member_count() <= (FANOUT_FACTOR / 3) {
+                self.merge_children(position - 1, position);
+            } else if position < self.children.len() - 2
+                && self.children[position + 1].member_count() <= (FANOUT_FACTOR / 3)
+            {
+                self.merge_children(position, position + 1);
+            };
+        }
     }
 
     fn binary_search_for_key(&self, key: &K) -> Result<usize, usize> {
