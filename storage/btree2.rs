@@ -1,19 +1,52 @@
 #![allow(dead_code)]
 
-use std::fmt::Debug;
-
 #[cfg(not(test))]
 const FANOUT_FACTOR: usize = 512;
 #[cfg(test)]
 const FANOUT_FACTOR: usize = 5;
 
 struct BTree<K: Ord + Clone, V: Clone> {
-    root: Child<K, V>,
+    root: Option<Child<K, V>>,
 }
 impl<K: Ord + Clone, V: Clone> BTree<K, V> {
     fn new() -> Self {
         BTree {
-            root: Child::Leaf(Box::new(BTreeLeaf::new())),
+            root: Some(Child::Leaf(Box::new(BTreeLeaf::new()))),
+        }
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        let result = match self.root.as_mut().unwrap() {
+            Child::Leaf(leaf) => leaf.insert(key, value),
+            Child::Node(node) => node.insert(key, value),
+        };
+        match result {
+            InsertionResult::Done => (),
+            InsertionResult::Split(new_child) => match (self.root.take().unwrap(), new_child) {
+                (Child::Leaf(leaf), Child::Leaf(new_leaf)) => {
+                    let new_root = BTreeNode::from_leaves(vec![*leaf, *new_leaf]);
+                    self.root = Some(Child::Node(Box::new(new_root)));
+                }
+                (Child::Node(old_root), Child::Node(new_node)) => {
+                    let new_root = BTreeNode::from_nodes(vec![*old_root, *new_node]);
+                    self.root = Some(Child::Node(Box::new(new_root)));
+                }
+                _ => unreachable!(),
+            },
+        }
+    }
+
+    fn remove(&mut self, key: &K) {
+        match self.root.as_mut().unwrap() {
+            Child::Leaf(leaf) => leaf.remove(key),
+            Child::Node(node) => node.remove(key),
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        match self.root.as_ref().unwrap() {
+            Child::Leaf(leaf) => leaf.get(key),
+            Child::Node(node) => node.get(key),
         }
     }
 }
@@ -27,31 +60,45 @@ enum Child<K: Ord + Clone, V: Clone> {
     Leaf(Box<BTreeLeaf<K, V>>),
 }
 impl<K: Ord + Clone, V: Clone> Child<K, V> {
-    fn node(&self) -> &BTreeNode<K, V> {
+    fn as_node(&self) -> &BTreeNode<K, V> {
         match self {
             Child::Node(node) => node,
             Child::Leaf(_) => unreachable!(),
         }
     }
 
-    fn node_mut(&mut self) -> &BTreeNode<K, V> {
+    fn as_node_mut(&mut self) -> &mut BTreeNode<K, V> {
         match self {
             Child::Node(node) => node,
             Child::Leaf(_) => unreachable!(),
         }
     }
 
-    fn leaf(&self) -> &BTreeLeaf<K, V> {
+    fn as_leaf(&self) -> &BTreeLeaf<K, V> {
         match self {
             Child::Node(_) => unreachable!(),
             Child::Leaf(leaf) => leaf,
         }
     }
 
-    fn leaf_mut(&mut self) -> &BTreeLeaf<K, V> {
+    fn as_leaf_mut(&mut self) -> &mut BTreeLeaf<K, V> {
         match self {
             Child::Node(_) => unreachable!(),
             Child::Leaf(leaf) => leaf,
+        }
+    }
+
+    fn into_node(self) -> BTreeNode<K, V> {
+        match self {
+            Child::Node(node) => *node,
+            Child::Leaf(_) => unreachable!(),
+        }
+    }
+
+    fn into_leaf(self) -> BTreeLeaf<K, V> {
+        match self {
+            Child::Node(_) => unreachable!(),
+            Child::Leaf(leaf) => *leaf,
         }
     }
 
@@ -72,7 +119,7 @@ struct BTreeNode<K: Ord + Clone, V: Clone> {
     keys: Vec<K>,
     children: Vec<Child<K, V>>,
 }
-impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
+impl<K: Ord + Clone, V: Clone> BTreeNode<K, V> {
     fn new() -> Self {
         BTreeNode {
             keys: Vec::with_capacity(FANOUT_FACTOR - 1),
@@ -102,6 +149,21 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
             sizes.push(size);
         }
         sizes
+    }
+
+    fn from_nodes(nodes: Vec<BTreeNode<K, V>>) -> Self {
+        assert!(nodes.len() > 1);
+        let keys = nodes[..nodes.len() - 1]
+            .iter()
+            .map(|node| node.keys.last().unwrap())
+            .cloned()
+            .collect();
+        let children = nodes
+            .into_iter()
+            .map(|node| Child::Node(Box::new(node)))
+            .collect();
+
+        BTreeNode { keys, children }
     }
 
     fn from_leaves(leaves: Vec<BTreeLeaf<K, V>>) -> Self {
@@ -203,6 +265,13 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         }
         self.children.remove(right_pos);
         self.keys.remove(left_pos);
+
+        if self.children.len() == 1 {
+            if let Child::Node(lone_child) = self.children.pop().unwrap() {
+                self.keys = lone_child.keys;
+                self.children = lone_child.children;
+            }
+        }
     }
 
     fn remove(&mut self, key: &K) {
