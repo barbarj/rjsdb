@@ -2,18 +2,13 @@
 
 use std::fmt::Debug;
 
-#[cfg(not(test))]
-const FANOUT_FACTOR: usize = 512;
-#[cfg(test)]
-const FANOUT_FACTOR: usize = 5;
-
 struct BTree<K: Ord + Clone + Debug, V: Clone> {
     root: Option<Child<K, V>>,
 }
 impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
-    fn new() -> Self {
+    fn new(fanout_factor: usize) -> Self {
         BTree {
-            root: Some(Child::Leaf(Box::new(BTreeLeaf::new()))),
+            root: Some(Child::Leaf(Box::new(BTreeLeaf::new(fanout_factor)))),
         }
     }
 
@@ -131,12 +126,14 @@ enum InsertionResult<K: Ord + Clone + Debug, V: Clone> {
 struct BTreeNode<K: Ord + Clone + Debug, V: Clone> {
     keys: Vec<K>,
     children: Vec<Child<K, V>>,
+    fanout_factor: usize,
 }
 impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
-    fn new() -> Self {
+    fn new(fanout_factor: usize) -> Self {
         BTreeNode {
-            keys: Vec::with_capacity(FANOUT_FACTOR - 1),
-            children: Vec::with_capacity(FANOUT_FACTOR),
+            keys: Vec::with_capacity(fanout_factor - 1),
+            children: Vec::with_capacity(fanout_factor),
+            fanout_factor,
         }
     }
 
@@ -144,10 +141,11 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
     /// only depends on keys. Technically this constructs an invalid node. This
     /// is convenient for some tests though.
     #[cfg(test)]
-    fn with_keys_only(keys: Vec<K>) -> Self {
+    fn with_keys_only(keys: Vec<K>, fanout_factor: usize) -> Self {
         BTreeNode {
             keys,
             children: Vec::new(),
+            fanout_factor,
         }
     }
 
@@ -166,22 +164,32 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
 
     fn from_nodes(nodes: Vec<BTreeNode<K, V>>, keys: Vec<K>) -> Self {
         assert!(nodes.len() > 1);
+        let fanout_factor = nodes[0].fanout_factor;
         let children = nodes
             .into_iter()
             .map(|node| Child::Node(Box::new(node)))
             .collect();
 
-        BTreeNode { keys, children }
+        BTreeNode {
+            keys,
+            children,
+            fanout_factor,
+        }
     }
 
     fn from_leaves(leaves: Vec<BTreeLeaf<K, V>>, keys: Vec<K>) -> Self {
         assert!(leaves.len() > 1);
+        let fanout_factor = leaves[0].fanout_factor;
         let children = leaves
             .into_iter()
             .map(|leaf| Child::Leaf(Box::new(leaf)))
             .collect();
 
-        BTreeNode { keys, children }
+        BTreeNode {
+            keys,
+            children,
+            fanout_factor,
+        }
     }
 
     /// returns the newly created node, representing the right side of the split
@@ -196,6 +204,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
             BTreeNode {
                 keys: new_keys,
                 children: new_children,
+                fanout_factor: self.fanout_factor,
             },
             split_key,
         )
@@ -217,7 +226,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
             key: split_key,
         } = insertion_res
         {
-            if self.children.len() >= FANOUT_FACTOR {
+            if self.children.len() >= self.fanout_factor {
                 let (mut new_node, new_split_key) = self.split();
                 if self.keys.last().unwrap() < &split_key {
                     // insert into new node (right one)
@@ -309,11 +318,13 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         if child_node.member_count() == 0 {
             self.children.remove(position);
             self.keys.remove(position);
-        } else if child_node.member_count() <= (FANOUT_FACTOR / 3) {
-            if position > 0 && self.children[position - 1].member_count() <= (FANOUT_FACTOR / 3) {
+        } else if child_node.member_count() <= (self.fanout_factor / 3) {
+            if position > 0
+                && self.children[position - 1].member_count() <= (self.fanout_factor / 3)
+            {
                 self.merge_children(position - 1, position);
             } else if position < self.children.len() - 1
-                && self.children[position + 1].member_count() <= (FANOUT_FACTOR / 3)
+                && self.children[position + 1].member_count() <= (self.fanout_factor / 3)
             {
                 self.merge_children(position, position + 1);
             };
@@ -331,18 +342,23 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
 
 struct BTreeLeaf<K: Ord + Clone + Debug, V: Clone> {
     items: Vec<(K, V)>,
+    fanout_factor: usize,
 }
 impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
-    fn new() -> Self {
+    fn new(fanout_factor: usize) -> Self {
         BTreeLeaf {
-            items: Vec::with_capacity(FANOUT_FACTOR),
+            items: Vec::with_capacity(fanout_factor),
+            fanout_factor,
         }
     }
 
     fn split(&mut self) -> (BTreeLeaf<K, V>, K) {
         let right_items = self.items.split_off(self.items.len() / 2);
         (
-            BTreeLeaf { items: right_items },
+            BTreeLeaf {
+                items: right_items,
+                fanout_factor: self.fanout_factor,
+            },
             self.last_key().unwrap().clone(),
         )
     }
@@ -353,7 +369,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
 
     fn insert(&mut self, key: K, value: V) -> InsertionResult<K, V> {
         // TODO: Requirements about item size
-        if self.items.len() >= FANOUT_FACTOR {
+        if self.items.len() >= self.fanout_factor {
             let (mut new_node, split_key) = self.split();
             // resulting split key will be the last key in the left (not new) cell
             if key > *self.last_key().unwrap() {
@@ -399,12 +415,17 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
 mod tests {
     use std::fmt::Debug;
 
-    use super::{BTree, BTreeLeaf, BTreeNode, Child, InsertionResult, FANOUT_FACTOR};
+    use super::{BTree, BTreeLeaf, BTreeNode, Child, InsertionResult};
+
+    const FANOUT_FACTOR: usize = 5;
 
     #[test]
     fn leaf_binary_search() {
         let items = vec![(1, 10), (3, 30), (5, 50), (7, 70), (9, 90)];
-        let leaf = BTreeLeaf { items };
+        let leaf = BTreeLeaf {
+            items,
+            fanout_factor: 5,
+        };
 
         assert_eq!(leaf.binary_search_for_key(&0), Err(0));
         assert_eq!(leaf.binary_search_for_key(&1), Ok(0));
@@ -422,7 +443,7 @@ mod tests {
     #[test]
     fn node_binary_search() {
         let items = vec![1, 3, 5, 7, 9];
-        let node: BTreeNode<i32, ()> = BTreeNode::with_keys_only(items);
+        let node: BTreeNode<i32, ()> = BTreeNode::with_keys_only(items, FANOUT_FACTOR);
 
         assert_eq!(node.binary_search_for_key(&0), Err(0));
         assert_eq!(node.binary_search_for_key(&1), Ok(0));
@@ -441,7 +462,7 @@ mod tests {
     fn leaf_insert_and_split() {
         let mut keys_iter = (0..).filter(|x| x % 2 == 1);
         let mut items: Vec<i32> = keys_iter.by_ref().take(FANOUT_FACTOR).collect();
-        let mut leaf = BTreeLeaf::new();
+        let mut leaf = BTreeLeaf::new(FANOUT_FACTOR);
 
         let insertion_done: InsertionResult<i32, i32> = InsertionResult::Done;
         // insert up to fanout factor
@@ -510,7 +531,7 @@ mod tests {
         let mut insertion_order = 0;
 
         // split first leaf
-        let mut first_leaf = BTreeLeaf::new();
+        let mut first_leaf = BTreeLeaf::new(FANOUT_FACTOR);
         for num in first_leaf_items[0..first_leaf_items.len() - 1].iter() {
             // all but last
             let _res = first_leaf.insert(*num, insertion_order);
@@ -621,7 +642,7 @@ mod tests {
         let leaves: Vec<_> = entries
             .iter()
             .map(|leaf_entries| {
-                let mut leaf = BTreeLeaf::new();
+                let mut leaf = BTreeLeaf::new(FANOUT_FACTOR);
                 for e in leaf_entries {
                     leaf.insert(e.0, e.1);
                 }
@@ -668,7 +689,7 @@ mod tests {
 
     #[test]
     fn full_tree_splits_and_merges() {
-        let mut tree = BTree::new();
+        let mut tree = BTree::new(FANOUT_FACTOR);
         // fill up with enough to make root a node with 5 leaves
         // leaves end up like:
         // (10, 20), (30, 40), (50, 60), (70, 80), (90, 100, 110, 120, 130)
