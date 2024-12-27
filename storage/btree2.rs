@@ -340,6 +340,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
     }
 }
 
+#[derive(Debug)]
 struct BTreeLeaf<K: Ord + Clone + Debug, V: Clone> {
     items: Vec<(K, V)>,
     fanout_factor: usize,
@@ -414,6 +415,8 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
+
+    use proptest::prelude::*;
 
     use super::{BTree, BTreeLeaf, BTreeNode, Child, InsertionResult};
 
@@ -778,5 +781,51 @@ mod tests {
             leaf_keys(tree.root.as_ref().unwrap().as_leaf()),
             vec![30, 140]
         );
+    }
+
+    // add test for leaf showing that inserting an existing key updates the value
+
+    fn kv_pairs(len: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {
+        prop::collection::vec((any::<i32>(), any::<i32>()), len)
+    }
+
+    prop_compose! {
+        fn arbitrary_leaf_with_keys(size: usize)(fanout_factor in (size..1000), pairs in kv_pairs(size)) -> (BTreeLeaf<i32, i32>, Vec<i32>) {
+            let mut leaf = BTreeLeaf::new(fanout_factor);
+            for (key, value) in pairs.iter() {
+                leaf.insert(*key, *value);
+            }
+            let keys = pairs.into_iter().map(|p| p.0).collect();
+            (leaf, keys)
+        }
+    }
+
+    fn leaf_keys_are_ordered(leaf: &BTreeLeaf<i32, i32>) -> bool {
+        let keys: Vec<_> = leaf.items.iter().map(|i| i.0).collect();
+        let mut sorted_keys = keys.clone();
+        sorted_keys.sort();
+        sorted_keys == keys
+    }
+
+    proptest! {
+        #[test]
+        fn leaf_insert(pairs in kv_pairs(10)) {
+            let mut leaf = BTreeLeaf::new(10);
+            for (key, val) in pairs.iter() {
+                leaf.insert(*key, *val);
+                assert!(leaf_keys_are_ordered(&leaf));
+                assert_eq!(leaf.get(key), Some(*val));
+            }
+        }
+
+        #[test]
+        fn leaf_deletion((mut leaf, keys) in arbitrary_leaf_with_keys(20)) {
+            for k in keys {
+                leaf.remove(&k).unwrap();
+                assert!(leaf_keys_are_ordered(&leaf));
+                assert!(leaf.get(&k).is_none());
+            }
+        }
+
     }
 }
