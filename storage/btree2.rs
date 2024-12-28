@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::fmt::Debug;
+use std::{fmt::Debug, slice::Iter};
 
 struct BTree<K: Ord + Clone + Debug, V: Clone> {
     root: Option<Child<K, V>>,
@@ -55,6 +55,65 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
             Child::Leaf(leaf) => leaf.get(key),
             Child::Node(node) => node.get(key),
         }
+    }
+
+    fn iter(&self) -> BTreeIterator<K, V> {
+        let mut node_stack = Vec::new();
+        let mut idx_stack = Vec::new();
+        let mut current = self.root.as_ref().unwrap();
+        while !current.is_leaf() {
+            let node = current.as_node();
+            node_stack.push(node);
+            current = &node.children[0];
+            idx_stack.push(0);
+        }
+        let leaf_iter = current.as_leaf().items.iter();
+        BTreeIterator {
+            node_stack,
+            idx_stack,
+            leaf_iter,
+        }
+    }
+}
+
+struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
+    node_stack: Vec<&'a BTreeNode<K, V>>,
+    idx_stack: Vec<usize>,
+    leaf_iter: Iter<'a, (K, V)>,
+}
+impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> {
+    type Item = &'a (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(pair) = self.leaf_iter.next() {
+            return Some(pair);
+        }
+        while !self.idx_stack.is_empty()
+            && !self.node_stack.is_empty()
+            && (*self.idx_stack.last().unwrap() + 1)
+                == self.node_stack.last().map(|n| n.children.len()).unwrap()
+        {
+            self.node_stack.pop();
+            self.idx_stack.pop();
+        }
+        if self.node_stack.is_empty() {
+            return None;
+        }
+        let last_idx = self.idx_stack.last_mut().unwrap();
+        *last_idx += 1;
+        let mut current = self
+            .node_stack
+            .last()
+            .map(|n| &n.children[*last_idx])
+            .unwrap();
+        while !current.is_leaf() {
+            let node = current.as_node();
+            self.node_stack.push(node);
+            current = &node.children[0];
+            self.idx_stack.push(0);
+        }
+        self.leaf_iter = current.as_leaf().items.iter();
+        self.leaf_iter.next()
     }
 }
 
@@ -115,6 +174,14 @@ impl<K: Ord + Clone + Debug, V: Clone> Child<K, V> {
             Child::Node(node) => node.children.len(),
             Child::Leaf(leaf) => leaf.items.len(),
         }
+    }
+
+    fn is_leaf(&self) -> bool {
+        matches!(self, Child::Leaf(_))
+    }
+
+    fn is_node(&self) -> bool {
+        matches!(self, Child::Node(_))
     }
 }
 
@@ -691,6 +758,18 @@ mod tests {
     }
 
     #[test]
+    fn tree_iter_check() {
+        let mut tree = BTree::new(FANOUT_FACTOR);
+        let kv_pairs: Vec<(i32, i32)> = (0..50).map(|v| (v, v)).collect();
+        for (k, v) in kv_pairs.iter() {
+            tree.insert(*k, *v);
+        }
+
+        let collected_iter: Vec<(i32, i32)> = tree.iter().cloned().collect();
+        assert_eq!(collected_iter, kv_pairs);
+    }
+
+    #[test]
     fn full_tree_splits_and_merges() {
         let mut tree = BTree::new(FANOUT_FACTOR);
         // fill up with enough to make root a node with 5 leaves
@@ -826,6 +905,17 @@ mod tests {
                 assert!(leaf.get(&k).is_none());
             }
         }
-
     }
+
+    /*
+     * Properties to verify after every tree operation:
+     * - Keys are ordered across all leaves (need leaf traversal for this)
+     * - Every node's keys are ordered.
+     * - All keys of subnodes are ordered relative to this node's keys
+     * - Every inserted value is retrievable
+     * - All nodes are within fanout factor.
+     * - No empty nodes
+     * - No mergeable nodes
+     * -
+     */
 }
