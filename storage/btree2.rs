@@ -436,25 +436,25 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
     }
 
     fn insert(&mut self, key: K, value: V) -> InsertionResult<K, V> {
-        // TODO: Requirements about item size
-        if self.items.len() >= self.fanout_factor {
-            let (mut new_node, split_key) = self.split();
-            // resulting split key will be the last key in the left (not new) cell
-            if key > *self.last_key().unwrap() {
-                let _res = new_node.insert(key, value);
-                let typed_done: InsertionResult<K, V> = InsertionResult::Done;
-                assert!(matches!(typed_done, _res));
-                return InsertionResult::Split {
-                    child: Child::Leaf(Box::new(new_node)),
-                    key: split_key,
-                };
+        match self.binary_search_for_key(&key) {
+            Ok(pos) => self.items[pos].1 = value,
+            Err(pos) => {
+                if self.items.len() >= self.fanout_factor {
+                    let (mut new_node, split_key) = self.split();
+                    // resulting split key will be the last key in the left (not new) cell
+                    if key > *self.last_key().unwrap() {
+                        let _res = new_node.insert(key, value);
+                        let typed_done: InsertionResult<K, V> = InsertionResult::Done;
+                        assert!(matches!(typed_done, _res));
+                        return InsertionResult::Split {
+                            child: Child::Leaf(Box::new(new_node)),
+                            key: split_key,
+                        };
+                    }
+                }
+                self.items.insert(pos, (key, value));
             }
         }
-        let position = match self.binary_search_for_key(&key) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
-        self.items.insert(position, (key, value));
         InsertionResult::Done
     }
 
@@ -481,11 +481,11 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
+    use std::{collections::HashMap, fmt::Debug};
 
     use proptest::prelude::*;
 
-    use super::{BTree, BTreeLeaf, BTreeNode, Child, InsertionResult};
+    use super::{BTree, BTreeError, BTreeLeaf, BTreeNode, Child, InsertionResult};
 
     const FANOUT_FACTOR: usize = 5;
 
@@ -907,15 +907,257 @@ mod tests {
         }
     }
 
-    /*
-     * Properties to verify after every tree operation:
-     * - Keys are ordered across all leaves (need leaf traversal for this)
-     * - Every node's keys are ordered.
-     * - All keys of subnodes are ordered relative to this node's keys
-     * - Every inserted value is retrievable
-     * - All nodes are within fanout factor.
-     * - No empty nodes
-     * - No mergeable nodes
-     * -
-     */
+    #[derive(Debug)]
+    enum TreeOperation {
+        Insert(i32, i32),
+        Remove(i32),
+        Get(i32),
+    }
+
+    fn tree_operation() -> impl Strategy<Value = TreeOperation> {
+        prop_oneof![
+            (any::<i32>(), any::<i32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+            any::<i32>().prop_map(TreeOperation::Remove),
+            any::<i32>().prop_map(TreeOperation::Get),
+        ]
+    }
+
+    fn tree_operations(count: usize) -> impl Strategy<Value = Vec<TreeOperation>> {
+        prop::collection::vec(tree_operation(), count)
+    }
+
+    fn tree_keys_fully_ordered(tree: &BTree<i32, i32>) -> bool {
+        let keys: Vec<_> = tree.iter().collect();
+        let mut sorted_keys = keys.clone();
+        sorted_keys.sort();
+        keys == sorted_keys
+    }
+
+    fn all_node_keys_ordered(root: &Child<i32, i32>) -> bool {
+        match root {
+            Child::Leaf(leaf) => {
+                let keys: Vec<_> = leaf.items.iter().map(|x| x.0).collect();
+                let mut sorted_keys = keys.clone();
+                sorted_keys.sort();
+                keys == sorted_keys
+            }
+            Child::Node(node) => {
+                let mut sorted_keys = node.keys.clone();
+                sorted_keys.sort();
+                sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered)
+            }
+        }
+    }
+
+    fn all_keys_in_range(node: &Child<i32, i32>, min: i32, max: i32) -> bool {
+        let keys: Vec<_> = match node {
+            Child::Leaf(leaf) => leaf.items.iter().map(|x| x.0).collect(),
+            Child::Node(node) => node.keys.clone(),
+        };
+        keys.iter().all(|k| (min..=max).contains(k))
+    }
+
+    fn all_subnode_keys_ordered_relative_to_node_keys(root: &Child<i32, i32>) -> bool {
+        if root.is_leaf() {
+            return true;
+        }
+        let node = root.as_node();
+        let mut min_key = i32::MIN;
+        for (idx, k) in node.keys.iter().enumerate() {
+            let max_key = *k;
+            if !all_keys_in_range(&node.children[idx], min_key, max_key) {
+                return false;
+            }
+            min_key = k + 1;
+        }
+        all_keys_in_range(&node.children[node.keys.len()], min_key, i32::MAX)
+    }
+
+    fn all_inserted_values_are_retrievable(
+        tree: &BTree<i32, i32>,
+        kv_lookup: &HashMap<i32, i32>,
+    ) -> bool {
+        kv_lookup.iter().all(|(k, v)| tree.get(k) == Some(*v))
+    }
+
+    fn all_nodes_with_fanout_factor(root: &Child<i32, i32>) -> bool {
+        match root {
+            Child::Leaf(leaf) => leaf.items.len() <= leaf.fanout_factor,
+            Child::Node(node) => {
+                node.children.len() <= node.fanout_factor
+                    && node.children.iter().all(all_nodes_with_fanout_factor)
+            }
+        }
+    }
+
+    fn no_empty_nodes(tree: &BTree<i32, i32>, root: &Child<i32, i32>) -> bool {
+        match root {
+            Child::Leaf(leaf) => {
+                !leaf.items.is_empty() || tree.root.as_ref().unwrap().member_count() == 0
+            }
+            Child::Node(node) => {
+                !node.children.is_empty()
+                    && node
+                        .children
+                        .iter()
+                        .all(|child| no_empty_nodes(tree, child))
+            }
+        }
+    }
+
+    fn no_mergeable_nodes(root: &Child<i32, i32>) -> bool {
+        match root {
+            Child::Leaf(_) => true,
+            Child::Node(node) => {
+                for i in 1..node.children.len() - 1 {
+                    if node.children[i].member_count() <= node.fanout_factor / 3
+                        && (node.children[i - 1].member_count() <= node.fanout_factor / 3
+                            || node.children[i + 1].member_count() <= node.fanout_factor / 3)
+                    {
+                        return false;
+                    }
+                }
+                node.children.iter().all(no_mergeable_nodes)
+            }
+        }
+    }
+
+    //#[test]
+    fn failing_check() {
+        use TreeOperation::*;
+
+        let ops = [
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(-1, 0),
+            Insert(0, 0),
+            Insert(-359134783, 0),
+            Insert(1, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(-359134784, 0),
+            Insert(128243536, 0),
+            Remove(0),
+            Insert(0, 0),
+            Insert(128243536, 0),
+            Insert(2, 0),
+            Insert(0, 0),
+        ];
+        let tree = proccess_ops(5, &ops);
+        let root = &tree.root.unwrap();
+        println!("{:?}", root.as_node().keys);
+        println!("<-: {:?}", root.as_node().children[0].as_leaf().items);
+        println!("->: {:?}", root.as_node().children[1].as_leaf().items);
+    }
+
+    fn proccess_ops(fanout_factor: usize, ops: &[TreeOperation]) -> BTree<i32, i32> {
+        let mut tree: BTree<i32, i32> = BTree::new(fanout_factor);
+        let mut kv_lookup = HashMap::new();
+        for op in ops {
+            match op {
+                TreeOperation::Get(k) => {
+                    let res = tree.get(k);
+                    let expected = kv_lookup.get(k).copied();
+                    assert_eq!(res, expected);
+                }
+                TreeOperation::Insert(k, v) => {
+                    kv_lookup.insert(*k, *v);
+                    tree.insert(*k, *v);
+                }
+                TreeOperation::Remove(k) => {
+                    kv_lookup.remove(k);
+                    /*
+                     * Here, I'm matching tree.remove exhaustively, because if we add other
+                     * error types to BTreeError in the future, I want this to fail to compile.
+                     * Only these two states are expected. Anything else is a bug.
+                     */
+                    match tree.remove(k) {
+                        Ok(()) => (),
+                        Err(BTreeError::KeyNotFound) => (),
+                    }
+                }
+            }
+            assert!(tree_keys_fully_ordered(&tree));
+            assert!(all_inserted_values_are_retrievable(&tree, &kv_lookup));
+            let root = tree.root.as_ref().unwrap();
+            assert!(all_node_keys_ordered(root));
+            assert!(all_subnode_keys_ordered_relative_to_node_keys(root));
+            assert!(all_nodes_with_fanout_factor(root));
+            assert!(no_empty_nodes(&tree, root));
+            assert!(no_mergeable_nodes(root));
+        }
+
+        tree
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            max_shrink_iters: 8192, .. ProptestConfig::default()
+        })]
+        #[test]
+        fn full_tree_test(fanout_factor in (5usize..100), ops in tree_operations(100)) {
+            let _ = proccess_ops(fanout_factor, &ops);
+        }
+    }
 }
