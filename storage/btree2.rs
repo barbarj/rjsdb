@@ -384,7 +384,12 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         };
         if child_node.member_count() == 0 {
             self.children.remove(position);
-            self.keys.remove(position);
+            if position == self.keys.len() {
+                assert!(!self.keys.is_empty());
+                self.keys.remove(position - 1);
+            } else {
+                self.keys.remove(position);
+            }
         } else if child_node.member_count() <= (self.fanout_factor / 3) {
             if position > 0
                 && self.children[position - 1].member_count() <= (self.fanout_factor / 3)
@@ -483,11 +488,12 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fmt::Debug};
+    use std::{collections::BTreeMap, fmt::Debug};
 
     use proptest::prelude::*;
+    use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
 
-    use super::{BTree, BTreeError, BTreeLeaf, BTreeNode, Child, InsertionResult};
+    use super::{BTree, BTreeLeaf, BTreeNode, Child, InsertionResult};
 
     const FANOUT_FACTOR: usize = 5;
 
@@ -769,13 +775,10 @@ mod tests {
     #[test]
     fn tree_iter_check() {
         let mut tree = BTree::new(FANOUT_FACTOR);
-        let kv_pairs: Vec<(i32, i32)> = (0..14).map(|v| (v, v)).collect();
+        let kv_pairs: Vec<(i32, i32)> = (0..50).map(|v| (v, v)).collect();
         for (k, v) in kv_pairs.iter() {
             tree.insert(*k, *v);
         }
-        let root = tree.root.as_ref().unwrap();
-        println!("{:?}", descendent_leaf_keys(root, vec![1, 2]));
-        println!("{:?}", descendent_leaf_keys(root, vec![1, 3]));
 
         let collected_iter: Vec<(i32, i32)> = tree.iter().cloned().collect();
         assert_eq!(collected_iter, kv_pairs);
@@ -919,23 +922,107 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    enum TreeOperation {
+    #[derive(Debug, Clone)]
+    pub struct ReferenceBTree {
+        ref_tree: BTreeMap<i32, i32>,
+        fanout_factor: usize,
+    }
+    impl ReferenceStateMachine for ReferenceBTree {
+        type State = Self;
+        type Transition = TreeOperation;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            (5usize..50)
+                .prop_map(|x| ReferenceBTree {
+                    ref_tree: BTreeMap::new(),
+                    fanout_factor: x,
+                })
+                .boxed()
+        }
+
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            if !state.ref_tree.is_empty() {
+                let keys: Vec<_> = state.ref_tree.keys().cloned().collect();
+                let removal_key = proptest::sample::select(keys);
+                prop_oneof![
+                    (any::<i32>(), any::<i32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+                    removal_key.prop_map(TreeOperation::Remove)
+                ]
+                .boxed()
+            } else {
+                (any::<i32>(), any::<i32>())
+                    .prop_map(|(k, v)| TreeOperation::Insert(k, v))
+                    .boxed()
+            }
+        }
+
+        fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
+            match transition {
+                TreeOperation::Insert(k, v) => state.ref_tree.insert(*k, *v),
+                TreeOperation::Remove(k) => state.ref_tree.remove(k),
+            };
+            state
+        }
+
+        fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+            match transition {
+                TreeOperation::Insert(_, _) => true,
+                TreeOperation::Remove(k) => state.ref_tree.contains_key(k),
+            }
+        }
+    }
+
+    impl StateMachineTest for BTree<i32, i32> {
+        type SystemUnderTest = Self;
+        type Reference = ReferenceBTree;
+
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            Self::new(ref_state.fanout_factor)
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            transition: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            match transition {
+                TreeOperation::Remove(k) => {
+                    let res = state.remove(&k);
+                    assert!(res.is_ok());
+                    assert!(state.get(&k).is_none());
+                }
+                TreeOperation::Insert(k, v) => {
+                    state.insert(k, v);
+                    assert_eq!(state.get(&k), Some(v));
+                }
+            };
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert!(tree_keys_fully_ordered(state));
+            assert!(all_inserted_values_are_retrievable(
+                state,
+                &ref_state.ref_tree
+            ));
+            let root = state.root.as_ref().unwrap();
+            assert!(all_node_keys_ordered(root));
+            assert!(all_subnode_keys_ordered_relative_to_node_keys(root));
+            assert!(all_nodes_with_fanout_factor(root, ref_state.fanout_factor));
+            assert!(no_empty_nodes(state, root));
+            assert!(no_mergeable_nodes(root));
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum TreeOperation {
         Insert(i32, i32),
         Remove(i32),
-        Get(i32),
-    }
-
-    fn tree_operation() -> impl Strategy<Value = TreeOperation> {
-        prop_oneof![
-            (any::<i32>(), any::<i32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
-            any::<i32>().prop_map(TreeOperation::Remove),
-            any::<i32>().prop_map(TreeOperation::Get),
-        ]
-    }
-
-    fn tree_operations(count: usize) -> impl Strategy<Value = Vec<TreeOperation>> {
-        prop::collection::vec(tree_operation(), count)
     }
 
     fn tree_keys_fully_ordered(tree: &BTree<i32, i32>) -> bool {
@@ -987,17 +1074,23 @@ mod tests {
 
     fn all_inserted_values_are_retrievable(
         tree: &BTree<i32, i32>,
-        kv_lookup: &HashMap<i32, i32>,
+        ref_tree: &BTreeMap<i32, i32>,
     ) -> bool {
-        kv_lookup.iter().all(|(k, v)| tree.get(k) == Some(*v))
+        ref_tree.iter().all(|(k, v)| tree.get(k) == Some(*v))
     }
 
-    fn all_nodes_with_fanout_factor(root: &Child<i32, i32>) -> bool {
+    fn all_nodes_with_fanout_factor(root: &Child<i32, i32>, fanout_factor: usize) -> bool {
         match root {
-            Child::Leaf(leaf) => leaf.items.len() <= leaf.fanout_factor,
+            Child::Leaf(leaf) => {
+                leaf.items.len() <= fanout_factor && leaf.fanout_factor == fanout_factor
+            }
             Child::Node(node) => {
                 node.children.len() <= node.fanout_factor
-                    && node.children.iter().all(all_nodes_with_fanout_factor)
+                    && node.fanout_factor == fanout_factor
+                    && node
+                        .children
+                        .iter()
+                        .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
             }
         }
     }
@@ -1034,203 +1127,15 @@ mod tests {
         }
     }
 
-    //#[test]
-    fn failing_check() {
-        use TreeOperation::*;
-
-        let ops = [
-            Remove(0),
-            Insert(0, 0),
-            Remove(1),
-            Insert(-151760571, 0),
-            Insert(1, 0),
-            Remove(-1),
-            Insert(-151760571, 0),
-            Insert(650824601, 0),
-            Remove(0),
-            Remove(0),
-            Insert(0, 0),
-            Insert(600418446, 0),
-            Insert(-151760571, 0),
-            Remove(0),
-            Remove(2),
-            Insert(0, 0),
-            Insert(-949851982, 0),
-            Insert(-949851982, 0),
-            Remove(0),
-            Insert(0, 0),
-            Insert(-949851983, 0),
-            Remove(-1),
-            Insert(-1, 0),
-            Insert(0, 0),
-            Remove(-2),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(-949851984, 0),
-            Remove(1),
-            Insert(-151760572, 0),
-            Remove(-2),
-            Insert(0, 0),
-            Remove(1),
-            Insert(0, 0),
-            Insert(-2, 0),
-            Insert(-151760573, 0),
-            Insert(0, 0),
-            Remove(1),
-            Insert(1, 0),
-            Insert(-949851981, 0),
-            Remove(2),
-            Remove(2),
-            Insert(-949851981, 0),
-            Insert(-949851981, 0),
-            Insert(2, 0),
-            Insert(0, 0),
-            Insert(-3, 0),
-            Insert(3, 0),
-            Remove(-4),
-            Insert(0, 0),
-            Insert(0, 0),
-            Remove(-4),
-            Insert(-4, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(4, 0),
-            Insert(0, 0),
-            Insert(-5, 0),
-            Insert(-949851981, 0),
-            Insert(-949851981, 0),
-            Insert(-949851981, 0),
-            Remove(5),
-            Insert(-949851981, 0),
-            Insert(0, 0),
-            Insert(-949851981, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Remove(-6),
-            Insert(0, 0),
-            Insert(-6, 0),
-            Remove(0),
-            Insert(0, 0),
-            Remove(0),
-            Remove(0),
-            Remove(0),
-            Insert(-151760574, 0),
-            Remove(0),
-            Insert(0, 0),
-            Remove(0),
-            Insert(0, 0),
-            Insert(-949851981, 0),
-            Insert(0, 0),
-            Insert(-949851981, 0),
-            Insert(-151760575, 0),
-            Insert(-949851981, 0),
-            Remove(0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Remove(5),
-            Insert(0, 0),
-            Insert(-949851981, 0),
-            Insert(5, 0),
-            Insert(-151760576, 0),
-        ];
-        let (mut tree, mut kv_lookup) = proccess_ops(6, &ops);
-        /*
-        let root = tree.root.as_ref().unwrap();
-        println!("{:?}", root.as_node().keys);
-        println!("0: {:?}", root.as_node().children[0].as_leaf().items);
-        println!("1: {:?}", root.as_node().children[1].as_leaf().items);
-        println!("2: {:?}", root.as_node().children[2].as_leaf().items);
-        println!("3: {:?}", root.as_node().children[3].as_leaf().items);
-        println!("4: {:?}", root.as_node().children[4].as_leaf().items);
-        println!("5: {:?}", root.as_node().children[5].as_leaf().items);
-        tree.insert(-151760576, 0);
-        kv_lookup.insert(-151760576, 0);
-        println!("retrieved: {:?}", tree.get(&-151760576));
-        let root = tree.root.as_ref().unwrap();
-        println!("{:?}", root.as_node().keys);
-        println!("{:?}", root.as_node().children[0].as_node().keys);
-        println!("{:?}", root.as_node().children[1].as_node().keys);
-        let len_0 = root.as_node().children[0].as_node().children.len();
-        let len_1 = root.as_node().children[1].as_node().children.len();
-        for i in 0..len_0 {
-            println!(
-                "0-{i}: {:?}",
-                root.as_node().children[0].as_node().children[i]
-                    .as_leaf()
-                    .items
-            );
-        }
-        for i in 0..len_1 {
-            println!(
-                "1-{i}: {:?}",
-                root.as_node().children[1].as_node().children[i]
-                    .as_leaf()
-                    .items
-            );
-        }
-
-        for (k, v) in kv_lookup.iter() {
-            println!("{k}: {v:}");
-            assert_eq!(tree.get(k), Some(*v));
-        }
-        */
-    }
-
-    fn proccess_ops(
-        fanout_factor: usize,
-        ops: &[TreeOperation],
-    ) -> (BTree<i32, i32>, HashMap<i32, i32>) {
-        let mut tree: BTree<i32, i32> = BTree::new(fanout_factor);
-        let mut kv_lookup = HashMap::new();
-        for op in ops {
-            match op {
-                TreeOperation::Get(k) => {
-                    let res = tree.get(k);
-                    let expected = kv_lookup.get(k).copied();
-                    assert_eq!(res, expected);
-                }
-                TreeOperation::Insert(k, v) => {
-                    kv_lookup.insert(*k, *v);
-                    tree.insert(*k, *v);
-                }
-                TreeOperation::Remove(k) => {
-                    kv_lookup.remove(k);
-                    /*
-                     * Here, I'm matching tree.remove exhaustively, because if we add other
-                     * error types to BTreeError in the future, I want this to fail to compile.
-                     * Only these two states are expected. Anything else is a bug.
-                     */
-                    match tree.remove(k) {
-                        Ok(()) => (),
-                        Err(BTreeError::KeyNotFound) => (),
-                    }
-                }
-            }
-            assert!(tree_keys_fully_ordered(&tree));
-            assert!(all_inserted_values_are_retrievable(&tree, &kv_lookup));
-            let root = tree.root.as_ref().unwrap();
-            assert!(all_node_keys_ordered(root));
-            assert!(all_subnode_keys_ordered_relative_to_node_keys(root));
-            assert!(all_nodes_with_fanout_factor(root));
-            assert!(no_empty_nodes(&tree, root));
-            assert!(no_mergeable_nodes(root));
-        }
-
-        (tree, kv_lookup)
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            max_shrink_iters: 8192, .. ProptestConfig::default()
+    prop_state_machine! {
+       #![proptest_config(ProptestConfig {
+            // Enable verbose mode to make the state machine test print the
+            // transitions for each case.
+            verbose: 1,
+            .. ProptestConfig::default()
         })]
+
         #[test]
-        fn full_tree_test(fanout_factor in (5usize..100), ops in tree_operations(100)) {
-            let _ = proccess_ops(fanout_factor, &ops);
-        }
+        fn full_tree_test(sequential 1..100 => BTree<i32, i32>);
     }
 }

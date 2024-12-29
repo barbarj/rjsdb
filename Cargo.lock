@@ -146,6 +146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest-state-machine"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e943d140e09d07740fb496487c51fb8eb31c70389ac4a2e9dcd8a0d9fdf228d4"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,6 +219,7 @@ name = "rjsdb_storage"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "proptest-state-machine",
  "rand",
  "rand_chacha",
 ]
