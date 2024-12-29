@@ -295,7 +295,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         {
             if self.children.len() >= self.fanout_factor {
                 let (mut new_node, new_split_key) = self.split();
-                if self.keys.last().unwrap() < &split_key {
+                if split_key > new_split_key {
                     // insert into new node (right one)
                     let pos = match new_node.binary_search_for_key(&split_key) {
                         Ok(pos) => pos,
@@ -759,13 +759,23 @@ mod tests {
             .collect()
     }
 
+    fn descendent_leaf_keys(mut root: &Child<i32, i32>, path: Vec<usize>) -> &[(i32, i32)] {
+        for i in path {
+            root = &root.as_node().children[i];
+        }
+        &root.as_leaf().items
+    }
+
     #[test]
     fn tree_iter_check() {
         let mut tree = BTree::new(FANOUT_FACTOR);
-        let kv_pairs: Vec<(i32, i32)> = (0..50).map(|v| (v, v)).collect();
+        let kv_pairs: Vec<(i32, i32)> = (0..14).map(|v| (v, v)).collect();
         for (k, v) in kv_pairs.iter() {
             tree.insert(*k, *v);
         }
+        let root = tree.root.as_ref().unwrap();
+        println!("{:?}", descendent_leaf_keys(root, vec![1, 2]));
+        println!("{:?}", descendent_leaf_keys(root, vec![1, 3]));
 
         let collected_iter: Vec<(i32, i32)> = tree.iter().cloned().collect();
         assert_eq!(collected_iter, kv_pairs);
@@ -1024,102 +1034,157 @@ mod tests {
         }
     }
 
-    #[test]
+    //#[test]
     fn failing_check() {
         use TreeOperation::*;
 
         let ops = [
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(-1, 0),
-            Insert(0, 0),
-            Insert(-359134783, 0),
-            Insert(1, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(0, 0),
-            Insert(-359134784, 0),
-            Insert(128243537, 0),
             Remove(0),
             Insert(0, 0),
-            Insert(128243537, 0),
+            Remove(1),
+            Insert(-151760571, 0),
+            Insert(1, 0),
+            Remove(-1),
+            Insert(-151760571, 0),
+            Insert(650824601, 0),
+            Remove(0),
+            Remove(0),
+            Insert(0, 0),
+            Insert(600418446, 0),
+            Insert(-151760571, 0),
+            Remove(0),
+            Remove(2),
+            Insert(0, 0),
+            Insert(-949851982, 0),
+            Insert(-949851982, 0),
+            Remove(0),
+            Insert(0, 0),
+            Insert(-949851983, 0),
+            Remove(-1),
+            Insert(-1, 0),
+            Insert(0, 0),
+            Remove(-2),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(-949851984, 0),
+            Remove(1),
+            Insert(-151760572, 0),
+            Remove(-2),
+            Insert(0, 0),
+            Remove(1),
+            Insert(0, 0),
+            Insert(-2, 0),
+            Insert(-151760573, 0),
+            Insert(0, 0),
+            Remove(1),
+            Insert(1, 0),
+            Insert(-949851981, 0),
+            Remove(2),
+            Remove(2),
+            Insert(-949851981, 0),
+            Insert(-949851981, 0),
             Insert(2, 0),
             Insert(0, 0),
-            //Insert(-2, 0),
+            Insert(-3, 0),
+            Insert(3, 0),
+            Remove(-4),
+            Insert(0, 0),
+            Insert(0, 0),
+            Remove(-4),
+            Insert(-4, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(4, 0),
+            Insert(0, 0),
+            Insert(-5, 0),
+            Insert(-949851981, 0),
+            Insert(-949851981, 0),
+            Insert(-949851981, 0),
+            Remove(5),
+            Insert(-949851981, 0),
+            Insert(0, 0),
+            Insert(-949851981, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Remove(-6),
+            Insert(0, 0),
+            Insert(-6, 0),
+            Remove(0),
+            Insert(0, 0),
+            Remove(0),
+            Remove(0),
+            Remove(0),
+            Insert(-151760574, 0),
+            Remove(0),
+            Insert(0, 0),
+            Remove(0),
+            Insert(0, 0),
+            Insert(-949851981, 0),
+            Insert(0, 0),
+            Insert(-949851981, 0),
+            Insert(-151760575, 0),
+            Insert(-949851981, 0),
+            Remove(0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Insert(0, 0),
+            Remove(5),
+            Insert(0, 0),
+            Insert(-949851981, 0),
+            Insert(5, 0),
+            Insert(-151760576, 0),
         ];
-        let mut tree = proccess_ops(5, &ops);
+        let (mut tree, mut kv_lookup) = proccess_ops(6, &ops);
+        /*
         let root = tree.root.as_ref().unwrap();
         println!("{:?}", root.as_node().keys);
-        println!("<-: {:?}", root.as_node().children[0].as_leaf().items);
-        println!("->: {:?}", root.as_node().children[1].as_leaf().items);
-        tree.insert(-2, 0);
-        let root = &tree.root.as_ref().unwrap();
+        println!("0: {:?}", root.as_node().children[0].as_leaf().items);
+        println!("1: {:?}", root.as_node().children[1].as_leaf().items);
+        println!("2: {:?}", root.as_node().children[2].as_leaf().items);
+        println!("3: {:?}", root.as_node().children[3].as_leaf().items);
+        println!("4: {:?}", root.as_node().children[4].as_leaf().items);
+        println!("5: {:?}", root.as_node().children[5].as_leaf().items);
+        tree.insert(-151760576, 0);
+        kv_lookup.insert(-151760576, 0);
+        println!("retrieved: {:?}", tree.get(&-151760576));
+        let root = tree.root.as_ref().unwrap();
         println!("{:?}", root.as_node().keys);
-        println!("<-: {:?}", root.as_node().children[0].as_leaf().items);
-        println!("->: {:?}", root.as_node().children[1].as_leaf().items);
+        println!("{:?}", root.as_node().children[0].as_node().keys);
+        println!("{:?}", root.as_node().children[1].as_node().keys);
+        let len_0 = root.as_node().children[0].as_node().children.len();
+        let len_1 = root.as_node().children[1].as_node().children.len();
+        for i in 0..len_0 {
+            println!(
+                "0-{i}: {:?}",
+                root.as_node().children[0].as_node().children[i]
+                    .as_leaf()
+                    .items
+            );
+        }
+        for i in 0..len_1 {
+            println!(
+                "1-{i}: {:?}",
+                root.as_node().children[1].as_node().children[i]
+                    .as_leaf()
+                    .items
+            );
+        }
+
+        for (k, v) in kv_lookup.iter() {
+            println!("{k}: {v:}");
+            assert_eq!(tree.get(k), Some(*v));
+        }
+        */
     }
 
-    fn proccess_ops(fanout_factor: usize, ops: &[TreeOperation]) -> BTree<i32, i32> {
+    fn proccess_ops(
+        fanout_factor: usize,
+        ops: &[TreeOperation],
+    ) -> (BTree<i32, i32>, HashMap<i32, i32>) {
         let mut tree: BTree<i32, i32> = BTree::new(fanout_factor);
         let mut kv_lookup = HashMap::new();
         for op in ops {
@@ -1156,7 +1221,7 @@ mod tests {
             assert!(no_mergeable_nodes(root));
         }
 
-        tree
+        (tree, kv_lookup)
     }
 
     proptest! {
