@@ -446,11 +446,13 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeLeaf<K, V> {
                         let _res = new_node.insert(key, value);
                         let typed_done: InsertionResult<K, V> = InsertionResult::Done;
                         assert!(matches!(typed_done, _res));
-                        return InsertionResult::Split {
-                            child: Child::Leaf(Box::new(new_node)),
-                            key: split_key,
-                        };
+                    } else {
+                        self.items.insert(pos, (key, value));
                     }
+                    return InsertionResult::Split {
+                        child: Child::Leaf(Box::new(new_node)),
+                        key: split_key,
+                    };
                 }
                 self.items.insert(pos, (key, value));
             }
@@ -1022,7 +1024,7 @@ mod tests {
         }
     }
 
-    //#[test]
+    #[test]
     fn failing_check() {
         use TreeOperation::*;
 
@@ -1097,15 +1099,21 @@ mod tests {
             Insert(0, 0),
             Insert(0, 0),
             Insert(-359134784, 0),
-            Insert(128243536, 0),
+            Insert(128243537, 0),
             Remove(0),
             Insert(0, 0),
-            Insert(128243536, 0),
+            Insert(128243537, 0),
             Insert(2, 0),
             Insert(0, 0),
+            //Insert(-2, 0),
         ];
-        let tree = proccess_ops(5, &ops);
-        let root = &tree.root.unwrap();
+        let mut tree = proccess_ops(5, &ops);
+        let root = tree.root.as_ref().unwrap();
+        println!("{:?}", root.as_node().keys);
+        println!("<-: {:?}", root.as_node().children[0].as_leaf().items);
+        println!("->: {:?}", root.as_node().children[1].as_leaf().items);
+        tree.insert(-2, 0);
+        let root = &tree.root.as_ref().unwrap();
         println!("{:?}", root.as_node().keys);
         println!("<-: {:?}", root.as_node().children[0].as_leaf().items);
         println!("->: {:?}", root.as_node().children[1].as_leaf().items);
