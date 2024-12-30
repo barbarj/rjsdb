@@ -277,6 +277,48 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         )
     }
 
+    /// Returns an InsertionResult and the position the child was inserted in. If the insertion
+    /// causes a node split, the returned position will be relative to the left node. (So if the
+    /// child gets inserted into the right node, its right-node index will be
+    /// `position % left_node.children.len()`
+    fn insert_child(&mut self, child: Child<K, V>, key: K) -> (InsertionResult<K, V>, usize) {
+        if self.children.len() == self.fanout_factor {
+            let (mut new_node, split_key) = self.split();
+            let _insertion_done: InsertionResult<K, V> = InsertionResult::Done;
+            if key > split_key {
+                // put in new (right) node
+                let (insertion_res, insert_pos) = new_node.insert_child(child, key);
+                assert!(matches!(insertion_res, _insertion_done), "The node was just split, so adding a new node should never cause it to split again");
+                (
+                    InsertionResult::Split {
+                        child: Child::Node(Box::new(new_node)),
+                        key: split_key,
+                    },
+                    self.children.len() + insert_pos,
+                )
+            } else {
+                // put in existing (left ) node
+                let (insertion_res, insert_pos) = self.insert_child(child, key);
+                assert!(matches!(insertion_res, _insertion_done), "The node was just split, so adding a new node should never cause it to split again");
+                (
+                    InsertionResult::Split {
+                        child: Child::Node(Box::new(new_node)),
+                        key: split_key,
+                    },
+                    insert_pos,
+                )
+            }
+        } else {
+            let pos = match self.binary_search_for_key(&key) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            };
+            self.keys.insert(pos, key);
+            self.children.insert(pos + 1, child);
+            (InsertionResult::Done, pos + 1)
+        }
+    }
+
     fn insert(&mut self, key: K, value: V) -> InsertionResult<K, V> {
         assert_eq!(self.keys.len() + 1, self.children.len());
         let position = match self.binary_search_for_key(&key) {
@@ -293,30 +335,37 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
             key: split_key,
         } = insertion_res
         {
-            if self.children.len() >= self.fanout_factor {
-                let (mut new_node, new_split_key) = self.split();
-                if split_key > new_split_key {
-                    // insert into new node (right one)
-                    let pos = match new_node.binary_search_for_key(&split_key) {
-                        Ok(pos) => pos,
-                        Err(pos) => pos,
-                    };
-                    new_node.keys.insert(pos, split_key);
-                    new_node.children.insert(pos + 1, new_child_node);
-                } else {
-                    // insert into existing node (this, the left one)
-                    self.keys.insert(position, split_key);
-                    self.children.insert(position + 1, new_child_node);
-                }
-                return InsertionResult::Split {
-                    child: Child::Node(Box::new(new_node)),
-                    key: new_split_key,
-                };
-            } else {
-                self.keys.insert(position, split_key);
-                self.children.insert(position + 1, new_child_node);
-                return InsertionResult::Done;
+            let (mut second_insertion_res, mut insert_idx) =
+                self.insert_child(new_child_node, split_key);
+            // can merge left node to the left:
+            if insert_idx > 1
+                && insert_idx <= self.children.len()
+                && self.children[insert_idx - 2].member_count() <= self.fanout_factor / 3
+                && self.children[insert_idx - 1].member_count() <= self.fanout_factor / 3
+            {
+                self.merge_children(insert_idx - 2, insert_idx - 1);
+                insert_idx -= 1;
             }
+            if insert_idx >= self.children.len() {
+                let insert_idx = insert_idx - self.children.len();
+                match &mut second_insertion_res {
+                    InsertionResult::Split {
+                        child: Child::Node(sibling),
+                        key: _,
+                    } => {
+                        // can merge right node to the right
+                        if insert_idx < sibling.children.len() - 1
+                            && sibling.children[insert_idx].member_count() <= self.fanout_factor / 3
+                            && sibling.children[insert_idx + 1].member_count()
+                                <= self.fanout_factor / 3
+                        {
+                            sibling.merge_children(insert_idx, insert_idx + 1);
+                        }
+                    }
+                    _ => unreachable!("In this case the node should always have split"),
+                }
+            }
+            return second_insertion_res;
         };
         InsertionResult::Done
     }
@@ -340,14 +389,12 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
 
         match (left_child, right_child) {
             (Child::Node(left), Child::Node(right)) => {
+                let new_key = match left.children.last().unwrap() {
+                    Child::Node(node) => node.keys.last().unwrap(),
+                    Child::Leaf(leaf) => leaf.last_key().unwrap(),
+                };
+                left.keys.push(new_key.clone());
                 left.keys.append(&mut right.keys);
-                if left.keys.is_empty() {
-                    let new_key = match left.children.last().unwrap() {
-                        Child::Node(node) => node.keys.last().unwrap(),
-                        Child::Leaf(leaf) => leaf.last_key().unwrap(),
-                    };
-                    left.keys.push(new_key.clone());
-                }
                 left.children.append(&mut right.children);
             }
             (Child::Leaf(left), Child::Leaf(right)) => {
@@ -384,11 +431,12 @@ impl<K: Ord + Clone + Debug, V: Clone> BTreeNode<K, V> {
         };
         if child_node.member_count() == 0 {
             self.children.remove(position);
-            if position == self.keys.len() {
-                assert!(!self.keys.is_empty());
-                self.keys.remove(position - 1);
-            } else {
-                self.keys.remove(position);
+            if !self.keys.is_empty() {
+                if position == self.keys.len() {
+                    self.keys.remove(position - 1);
+                } else {
+                    self.keys.remove(position);
+                }
             }
         } else if child_node.member_count() <= (self.fanout_factor / 3) {
             if position > 0
@@ -772,6 +820,27 @@ mod tests {
         &root.as_leaf().items
     }
 
+    fn display_tree(tree: &BTree<i32, i32>) {
+        let node = tree.root.as_ref().unwrap();
+        let mut this_level = vec![node];
+        let mut next_level = Vec::new();
+        while this_level[0].is_node() {
+            for node in this_level {
+                let node = node.as_node();
+                print!("{:?} | ", node.keys);
+                next_level.extend(node.children.iter());
+            }
+            this_level = next_level;
+            next_level = Vec::new();
+            println!()
+        }
+        for leaf in this_level {
+            let leaf = leaf.as_leaf();
+            print!("{:?} | ", leaf.items);
+        }
+        println!();
+    }
+
     #[test]
     fn tree_iter_check() {
         let mut tree = BTree::new(FANOUT_FACTOR);
@@ -998,6 +1067,7 @@ mod tests {
                     assert_eq!(state.get(&k), Some(v));
                 }
             };
+            display_tree(&state);
             state
         }
 
@@ -1006,11 +1076,12 @@ mod tests {
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
             assert!(tree_keys_fully_ordered(state));
-            assert!(all_inserted_values_are_retrievable(
-                state,
-                &ref_state.ref_tree
-            ));
+            assert_eq!(
+                first_nonretrievable_inserted_value(state, &ref_state.ref_tree),
+                None
+            );
             let root = state.root.as_ref().unwrap();
+            assert!(all_nodes_properly_structured(root));
             assert!(all_node_keys_ordered(root));
             assert!(all_subnode_keys_ordered_relative_to_node_keys(root));
             assert!(all_nodes_with_fanout_factor(root, ref_state.fanout_factor));
@@ -1023,6 +1094,13 @@ mod tests {
     pub enum TreeOperation {
         Insert(i32, i32),
         Remove(i32),
+    }
+
+    fn all_nodes_properly_structured(node: &Child<i32, i32>) -> bool {
+        match node {
+            Child::Leaf(_) => true,
+            Child::Node(node) => node.keys.len() == node.children.len() - 1,
+        }
     }
 
     fn tree_keys_fully_ordered(tree: &BTree<i32, i32>) -> bool {
@@ -1072,11 +1150,14 @@ mod tests {
         all_keys_in_range(&node.children[node.keys.len()], min_key, i32::MAX)
     }
 
-    fn all_inserted_values_are_retrievable(
+    fn first_nonretrievable_inserted_value(
         tree: &BTree<i32, i32>,
         ref_tree: &BTreeMap<i32, i32>,
-    ) -> bool {
-        ref_tree.iter().all(|(k, v)| tree.get(k) == Some(*v))
+    ) -> Option<i32> {
+        ref_tree
+            .iter()
+            .find(|(k, v)| tree.get(k) != Some(**v))
+            .map(|(k, _)| *k)
     }
 
     fn all_nodes_with_fanout_factor(root: &Child<i32, i32>, fanout_factor: usize) -> bool {
@@ -1132,10 +1213,11 @@ mod tests {
             // Enable verbose mode to make the state machine test print the
             // transitions for each case.
             verbose: 1,
+            max_shrink_iters: 8192,
             .. ProptestConfig::default()
         })]
 
         #[test]
-        fn full_tree_test(sequential 1..100 => BTree<i32, i32>);
+        fn full_tree_test(sequential 1..1000 => BTree<i32, i32>);
     }
 }
