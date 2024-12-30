@@ -1067,7 +1067,7 @@ mod tests {
                     assert_eq!(state.get(&k), Some(v));
                 }
             };
-            display_tree(&state);
+            //display_tree(&state);
             state
         }
 
