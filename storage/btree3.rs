@@ -115,10 +115,23 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn split(&mut self) -> Node<K, V> {
         let split_at = self.fanout_factor / 2;
         let new_keys = self.keys.split_off(split_at);
-        let new_values = self.values.split_off(split_at);
+        println!("split keys");
+        let new_values = if !self.values.is_empty() {
+            // leaf
+            self.values.split_off(split_at)
+        } else {
+            Vec::new()
+        };
+        let new_children = if !self.children.is_empty() {
+            //node
+            self.children.split_off(split_at)
+        } else {
+            Vec::new()
+        };
+        println!("split values");
         Node {
             keys: new_keys,
-            children: Vec::new(),
+            children: new_children,
             values: new_values,
             fanout_factor: self.fanout_factor,
         }
@@ -126,6 +139,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
     /// Returns the newly-created node, which will contain values from the right-side of the split
     fn split_and_insert_as_leaf(&mut self, insert_pos: usize, key: K, value: V) -> Node<K, V> {
+        println!("splitting as leaf");
         let mut new_node = self.split();
         let split_at = self.keys.len();
         if insert_pos >= split_at {
@@ -142,6 +156,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     /// Returns the newly-created node, which will contain values from the right-side of the split
     fn split_and_insert_as_node(&mut self, insert_pos: usize, node: Node<K, V>) -> Node<K, V> {
         assert!(insert_pos > 0);
+        println!("splitting as node");
         let key = self.children[insert_pos - 1].last_key();
         let mut new_node = self.split();
         let split_at = self.keys.len();
