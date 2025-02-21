@@ -14,10 +14,10 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
 
     pub fn insert(&mut self, key: K, value: V) {
         let insert_res = self.root.insert(key, value);
-        if let InsertionResult::Split(new_node) = insert_res {
+        if let InsertionResult::Split(new_node, split_key) = insert_res {
             let fanout_factor = self.root.fanout_factor;
             let old_root = mem::replace(&mut self.root, Node::new(fanout_factor));
-            self.root.keys.push(old_root.last_key());
+            self.root.keys.push(split_key);
             self.root.children.push(old_root);
             self.root.children.push(new_node);
         }
@@ -112,65 +112,82 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         res
     }
 
-    fn split(&mut self) -> Node<K, V> {
+    // returns the new node, and the key to be brough up
+    fn split(&mut self) -> (Node<K, V>, K) {
         let split_at = self.fanout_factor / 2;
         let new_keys = self.keys.split_off(split_at);
-        println!("split keys");
-        let new_values = if !self.values.is_empty() {
-            // leaf
+        let split_key: K = if self.is_leaf() {
+            self.keys.last().unwrap().clone()
+        } else {
+            // on a node, keys split a keyspace. After splitting, the last key has
+            // nothing right of it, so we pop it off
+            self.keys.pop().unwrap()
+        };
+        let new_values = if self.is_leaf() {
             self.values.split_off(split_at)
         } else {
             Vec::new()
         };
-        let new_children = if !self.children.is_empty() {
-            //node
+        let new_children = if !self.is_leaf() {
             self.children.split_off(split_at)
         } else {
             Vec::new()
         };
-        println!("split values");
-        Node {
+        let node = Node {
             keys: new_keys,
             children: new_children,
             values: new_values,
             fanout_factor: self.fanout_factor,
-        }
+        };
+        (node, split_key)
     }
 
     /// Returns the newly-created node, which will contain values from the right-side of the split
-    fn split_and_insert_as_leaf(&mut self, insert_pos: usize, key: K, value: V) -> Node<K, V> {
-        println!("splitting as leaf");
-        let mut new_node = self.split();
-        let split_at = self.keys.len();
-        if insert_pos >= split_at {
-            new_node.keys.insert(insert_pos - split_at, key);
-            new_node.values.insert(insert_pos - split_at, value);
+    fn split_and_insert_as_leaf(&mut self, key: K, value: V) -> (Node<K, V>, K) {
+        let (mut new_node, split_key) = self.split();
+        if key > split_key {
+            let insert_pos = match new_node.keys.binary_search(&key) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            };
+            new_node.keys.insert(insert_pos, key);
+            new_node.values.insert(insert_pos, value);
         } else {
+            let insert_pos = match self.keys.binary_search(&key) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            };
             self.keys.insert(insert_pos, key);
             self.values.insert(insert_pos, value);
         }
 
-        new_node
+        (new_node, split_key)
     }
 
     /// Returns the newly-created node, which will contain values from the right-side of the split
-    fn split_and_insert_as_node(&mut self, insert_pos: usize, node: Node<K, V>) -> Node<K, V> {
-        assert!(insert_pos > 0);
-        println!("splitting as node");
-        let key = self.children[insert_pos - 1].last_key();
-        let mut new_node = self.split();
-        let split_at = self.keys.len();
-        if insert_pos >= split_at {
-            if insert_pos - split_at > 0 {
-                new_node.keys.insert(insert_pos - split_at - 1, key);
-            }
-            new_node.children.insert(insert_pos - split_at, node);
+    ///
+    /// The new node is inserted at insert_pos + because the key is to the left of it
+    fn split_and_insert_as_node(&mut self, key: K, node: Node<K, V>) -> (Node<K, V>, K) {
+        let (mut new_node, split_key) = self.split();
+        if key > split_key {
+            println!("inserting right");
+            let insert_pos = match new_node.keys.binary_search(&key) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            };
+            new_node.keys.insert(insert_pos, key);
+            new_node.children.insert(insert_pos + 1, node);
         } else {
-            self.keys.insert(insert_pos - 1, key);
-            self.children.insert(insert_pos, node);
+            println!("inserting left");
+            let insert_pos = match self.keys.binary_search(&key) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            };
+            self.keys.insert(insert_pos, key);
+            self.children.insert(insert_pos + 1, node);
         }
 
-        new_node
+        (new_node, split_key)
     }
 
     fn is_full(&self) -> bool {
@@ -190,8 +207,8 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             }
             Err(pos) => {
                 if self.is_full() {
-                    let new_node = self.split_and_insert_as_leaf(pos, key, value);
-                    InsertionResult::Split(new_node)
+                    let (new_node, split_key) = self.split_and_insert_as_leaf(key, value);
+                    InsertionResult::Split(new_node, split_key)
                 } else {
                     self.keys.insert(pos, key);
                     self.values.insert(pos, value);
@@ -203,15 +220,24 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
     fn insert_as_node(&mut self, key: K, value: V) -> InsertionResult<K, V> {
         assert!(!self.is_leaf());
-        let pos = match self.keys.binary_search(&key) {
+        let mut pos = match self.keys.binary_search(&key) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
-        if let InsertionResult::Split(mut new_node) = self.children[pos].insert(key, value) {
+        if let InsertionResult::Split(mut new_node, split_key) =
+            self.children[pos].insert(key, value)
+        {
+            if pos > 0 && self.children[pos].is_mergeable() && self.children[pos - 1].is_mergeable()
+            {
+                println!("merging left");
+                self.merge_children(pos - 1);
+                pos -= 1;
+            }
             let insert_res = if new_node.is_mergeable()
                 && pos < self.children.len() - 1
                 && self.children[pos + 1].is_mergeable()
             {
+                println!("merging new node right");
                 // If the new node is can be merged into its right-sibling to be, just do that and
                 // avoid manipulating the children otherwise
                 Self::merge_nodes(&mut new_node, self.children.get_mut(pos + 1).unwrap());
@@ -219,20 +245,23 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                 self.keys[pos] = self.children[pos].last_key();
                 InsertionResult::Done
             } else if self.is_full() {
+                println!(
+                    "splitting and inserting at node with end key: {:?} at pos {}",
+                    self.last_key(),
+                    pos + 1
+                );
                 // Otherwise, if this node is full, split and insert the new child node.
-                let new_new_node = self.split_and_insert_as_node(pos + 1, new_node);
-                InsertionResult::Split(new_new_node)
+                let (new_new_node, new_split_key) =
+                    self.split_and_insert_as_node(split_key, new_node);
+                InsertionResult::Split(new_new_node, new_split_key)
             } else {
+                println!("inserting new node");
                 // Otherwise just insert the new child node
                 let new_key = self.children[pos].keys.last().unwrap();
                 self.keys.insert(pos, new_key.clone());
                 self.children.insert(pos + 1, new_node);
                 InsertionResult::Done
             };
-            if pos > 0 && self.children[pos].is_mergeable() && self.children[pos - 1].is_mergeable()
-            {
-                self.merge_children(pos - 1);
-            }
             insert_res
         } else {
             InsertionResult::Done
@@ -376,39 +405,41 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
 pub enum InsertionResult<K: Ord + Clone + Debug, V: Clone> {
     Done,
-    Split(Node<K, V>),
+    Split(Node<K, V>, K),
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
 
     use proptest::prelude::*;
     use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
 
     use super::{BTree, Node};
 
-    fn display_tree(tree: &BTree<i32, i32>) {
-        let mut this_level = vec![&tree.root];
-        let mut next_level = Vec::new();
-        while !this_level[0].is_leaf() {
-            for node in this_level {
-                print!("{:?} | ", node.keys);
-                next_level.extend(node.children.iter());
+    // TODO: Figure out how to stick an extra seperator between grandchildren
+    fn display_tree(tree: &BTree<u32, u32>) {
+        let mut queue = VecDeque::new();
+        queue.push_back((vec![0], &tree.root));
+        while let Some((ancestry, node)) = queue.pop_front() {
+            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
+            let path = path_parts.join("->");
+            if node.is_leaf() {
+                println!("{path}: L{:?}", node.keys);
+            } else {
+                println!("{path}: {:?}", node.keys);
             }
-            this_level = next_level;
-            next_level = Vec::new();
-            println!()
+            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
+                let mut child_ancestry = ancestry.clone();
+                child_ancestry.push(idx);
+                (child_ancestry, node)
+            }));
         }
-        for leaf in this_level {
-            print!("{:?} | ", leaf.keys);
-        }
-        println!();
     }
 
     #[derive(Debug, Clone)]
     pub struct ReferenceBTree {
-        ref_tree: BTreeMap<i32, i32>,
+        ref_tree: BTreeMap<u32, u32>,
         fanout_factor: usize,
     }
     impl ReferenceStateMachine for ReferenceBTree {
@@ -429,12 +460,12 @@ mod tests {
                 let keys: Vec<_> = state.ref_tree.keys().cloned().collect();
                 let removal_key = proptest::sample::select(keys);
                 prop_oneof![
-                    (any::<i32>(), any::<i32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+                    (any::<u32>(), any::<u32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
                     removal_key.prop_map(TreeOperation::Remove)
                 ]
                 .boxed()
             } else {
-                (any::<i32>(), any::<i32>())
+                (any::<u32>(), any::<u32>())
                     .prop_map(|(k, v)| TreeOperation::Insert(k, v))
                     .boxed()
             }
@@ -456,7 +487,7 @@ mod tests {
         }
     }
 
-    impl StateMachineTest for BTree<i32, i32> {
+    impl StateMachineTest for BTree<u32, u32> {
         type SystemUnderTest = Self;
         type Reference = ReferenceBTree;
 
@@ -509,11 +540,11 @@ mod tests {
 
     #[derive(Debug, Clone)]
     pub enum TreeOperation {
-        Insert(i32, i32),
-        Remove(i32),
+        Insert(u32, u32),
+        Remove(u32),
     }
 
-    fn all_nodes_properly_structured(node: &Node<i32, i32>) -> bool {
+    fn all_nodes_properly_structured(node: &Node<u32, u32>) -> bool {
         if node.is_leaf() {
             node.keys.len() == node.values.len()
         } else {
@@ -521,28 +552,28 @@ mod tests {
         }
     }
 
-    fn tree_keys_fully_ordered(tree: &BTree<i32, i32>) -> bool {
+    fn tree_keys_fully_ordered(tree: &BTree<u32, u32>) -> bool {
         let keys: Vec<_> = tree.iter().collect();
         let mut sorted_keys = keys.clone();
         sorted_keys.sort();
         keys == sorted_keys
     }
 
-    fn all_node_keys_ordered(node: &Node<i32, i32>) -> bool {
+    fn all_node_keys_ordered(node: &Node<u32, u32>) -> bool {
         let mut sorted_keys = node.keys.clone();
         sorted_keys.sort();
         sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered)
     }
 
-    fn all_keys_in_range(node: &Node<i32, i32>, min: i32, max: i32) -> bool {
+    fn all_keys_in_range(node: &Node<u32, u32>, min: u32, max: u32) -> bool {
         node.keys.iter().all(|k| (min..=max).contains(k))
     }
 
-    fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<i32, i32>) -> bool {
+    fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<u32, u32>) -> bool {
         if node.is_leaf() {
             return true;
         }
-        let mut min_key = i32::MIN;
+        let mut min_key = u32::MIN;
         for (idx, k) in node.keys.iter().enumerate() {
             let max_key = *k;
             if !all_keys_in_range(&node.children[idx], min_key, max_key) {
@@ -550,20 +581,24 @@ mod tests {
             }
             min_key = k + 1;
         }
-        all_keys_in_range(&node.children[node.keys.len()], min_key, i32::MAX)
+        all_keys_in_range(&node.children[node.keys.len()], min_key, u32::MAX)
     }
 
     fn first_nonretrievable_inserted_value(
-        tree: &BTree<i32, i32>,
-        ref_tree: &BTreeMap<i32, i32>,
-    ) -> Option<i32> {
+        tree: &BTree<u32, u32>,
+        ref_tree: &BTreeMap<u32, u32>,
+    ) -> Option<u32> {
         ref_tree
             .iter()
             .find(|(k, v)| tree.get(k) != Some(**v))
-            .map(|(k, _)| *k)
+            .map(|(k, v)| {
+                println!("didn't find: ({k}, {v})");
+                println!("actual value: {:?}", tree.get(k));
+                *k
+            })
     }
 
-    fn all_nodes_with_fanout_factor(node: &Node<i32, i32>, fanout_factor: usize) -> bool {
+    fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> bool {
         node.member_count() <= node.fanout_factor
             && node.fanout_factor == fanout_factor
             && node
@@ -572,7 +607,7 @@ mod tests {
                 .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
     }
 
-    fn no_empty_nodes(tree: &BTree<i32, i32>, node: &Node<i32, i32>) -> bool {
+    fn no_empty_nodes(tree: &BTree<u32, u32>, node: &Node<u32, u32>) -> bool {
         if node.is_leaf() {
             !node.is_empty() || tree.root.is_empty()
         } else {
@@ -584,7 +619,7 @@ mod tests {
         }
     }
 
-    fn no_mergeable_nodes(node: &Node<i32, i32>) -> bool {
+    fn no_mergeable_nodes(node: &Node<u32, u32>) -> bool {
         if node.is_leaf() {
             return true;
         }
@@ -609,6 +644,6 @@ mod tests {
         })]
 
         #[test]
-        fn full_tree_test(sequential 1..1000 => BTree<i32, i32>);
+        fn full_tree_test(sequential 1..1000 => BTree<u32, u32>);
     }
 }
