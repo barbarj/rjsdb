@@ -230,7 +230,9 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             if pos > 0 && self.children[pos].is_mergeable() && self.children[pos - 1].is_mergeable()
             {
                 println!("merging left");
+                println!("keys before merge: {:?}", self.keys);
                 self.merge_children(pos - 1);
+                println!("keys aftermerge:   {:?}", self.keys);
                 pos -= 1;
             }
             let insert_res = if new_node.is_mergeable()
@@ -240,9 +242,18 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                 println!("merging new node right");
                 // If the new node is can be merged into its right-sibling to be, just do that and
                 // avoid manipulating the children otherwise
-                Self::merge_nodes(&mut new_node, self.children.get_mut(pos + 1).unwrap());
+
+                // That means,
+                // - split key goes at pos,
+                // - merge_key is key at pos currently
+                // - new_node goes to pos + 1
+                Self::merge_nodes(
+                    self.keys[pos].clone(),
+                    &mut new_node,
+                    self.children.get_mut(pos + 1).unwrap(),
+                );
                 self.children[pos + 1] = new_node;
-                self.keys[pos] = self.children[pos].last_key();
+                self.keys[pos] = split_key;
                 InsertionResult::Done
             } else if self.is_full() {
                 println!(
@@ -257,8 +268,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             } else {
                 println!("inserting new node");
                 // Otherwise just insert the new child node
-                let new_key = self.children[pos].keys.last().unwrap();
-                self.keys.insert(pos, new_key.clone());
+                self.keys.insert(pos, split_key);
                 self.children.insert(pos + 1, new_node);
                 InsertionResult::Done
             };
@@ -309,19 +319,14 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
     /// This will always merge the contents of the right node into the left node,
     /// The right node will be empty after this operation
-    fn merge_nodes(left: &mut Node<K, V>, right: &mut Node<K, V>) {
-        if !left.is_leaf() {
-            // If this child is a node, we'll need to add a new key to separate its rightmost
-            // child from the leftmost child of the right node, which is about to belong to the
-            // left node.
-            left.keys.push(left.children.last().unwrap().last_key());
-        }
-        left.keys.append(&mut right.keys);
+    fn merge_nodes(merge_key: K, left: &mut Node<K, V>, right: &mut Node<K, V>) {
         if left.is_leaf() {
             left.values.append(&mut right.values);
         } else {
             left.children.append(&mut right.children);
+            left.keys.push(merge_key);
         }
+        left.keys.append(&mut right.keys);
     }
 
     /// merges the child at left_child_idx with the child to its right by moving the contents of
@@ -329,14 +334,14 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn merge_children(&mut self, left_child_idx: usize) {
         assert!(left_child_idx < self.children.len() - 1);
 
+        let merge_key = self.keys.remove(left_child_idx);
         let (left_side, right_side) = self.children.split_at_mut(left_child_idx + 1);
         let left_child = &mut left_side[left_child_idx];
         let right_child = &mut right_side[0];
 
-        Self::merge_nodes(left_child, right_child);
+        Self::merge_nodes(merge_key, left_child, right_child);
 
-        // now clean up this node's references
-        self.keys.remove(left_child_idx);
+        // now clean up the now duplicate data of the right node
         self.children.remove(left_child_idx + 1);
     }
 
