@@ -664,6 +664,6 @@ mod tests {
         })]
 
         #[test]
-        fn full_tree_test(sequential 1..200 => BTree<u32, u32>);
+        fn full_tree_test(sequential 1..500 => BTree<u32, u32>);
     }
 }
