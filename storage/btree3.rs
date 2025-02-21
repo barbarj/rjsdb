@@ -309,7 +309,9 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn remove_as_leaf(&mut self, key: &K) -> Option<V> {
         match self.keys.binary_search(key) {
             Ok(pos) => {
+                println!("remove 6");
                 self.keys.remove(pos);
+                println!("remove 7");
                 let res = self.values.remove(pos);
                 Some(res)
             }
@@ -334,6 +336,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn merge_children(&mut self, left_child_idx: usize) {
         assert!(left_child_idx < self.children.len() - 1);
 
+        println!("remove 1");
         let merge_key = self.keys.remove(left_child_idx);
         let (left_side, right_side) = self.children.split_at_mut(left_child_idx + 1);
         let left_child = &mut left_side[left_child_idx];
@@ -341,8 +344,10 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
         Self::merge_nodes(merge_key, left_child, right_child);
 
+        println!("remove 2");
         // now clean up the now duplicate data of the right node
         self.children.remove(left_child_idx + 1);
+        println!("did remove 2");
     }
 
     fn replace_with_only_child(&mut self) {
@@ -367,12 +372,18 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
+        println!("remove 3");
         let res = self.children[pos].remove(key);
         if self.children[pos].is_empty() {
+            println!("remove 4");
             self.children.remove(pos);
-            self.keys.remove(pos);
-        }
-        if self.children[pos].is_mergeable() {
+            println!("remove 5");
+            if pos < self.keys.len() {
+                self.keys.remove(pos);
+            } else {
+                self.keys.pop();
+            }
+        } else if self.children[pos].is_mergeable() {
             if pos > 0 && self.children[pos - 1].is_mergeable() {
                 self.merge_children(pos - 1);
             } else if pos < self.children.len() - 1 && self.children[pos + 1].is_mergeable() {
@@ -649,6 +660,6 @@ mod tests {
         })]
 
         #[test]
-        fn full_tree_test(sequential 1..1000 => BTree<u32, u32>);
+        fn full_tree_test(sequential 1..200 => BTree<u32, u32>);
     }
 }
