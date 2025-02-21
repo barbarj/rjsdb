@@ -218,6 +218,12 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
+    fn are_mergeable(left: &Node<K, V>, right: &Node<K, V>) -> bool {
+        ((left.is_leaf() && right.is_leaf()) || (!left.is_leaf() && !right.is_leaf()))
+            && left.is_mergeable()
+            && right.is_mergeable()
+    }
+
     fn insert_as_node(&mut self, key: K, value: V) -> InsertionResult<K, V> {
         assert!(!self.is_leaf());
         let mut pos = match self.keys.binary_search(&key) {
@@ -227,17 +233,15 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         if let InsertionResult::Split(mut new_node, split_key) =
             self.children[pos].insert(key, value)
         {
-            if pos > 0 && self.children[pos].is_mergeable() && self.children[pos - 1].is_mergeable()
-            {
+            if pos > 0 && Self::are_mergeable(&self.children[pos - 1], &self.children[pos]) {
                 println!("merging left");
                 println!("keys before merge: {:?}", self.keys);
                 self.merge_children(pos - 1);
                 println!("keys aftermerge:   {:?}", self.keys);
                 pos -= 1;
             }
-            let insert_res = if new_node.is_mergeable()
-                && pos < self.children.len() - 1
-                && self.children[pos + 1].is_mergeable()
+            let insert_res = if pos < self.children.len() - 1
+                && Self::are_mergeable(&new_node, &self.children[pos + 1])
             {
                 println!("merging new node right");
                 // If the new node is can be merged into its right-sibling to be, just do that and
@@ -383,12 +387,12 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             } else {
                 self.keys.pop();
             }
-        } else if self.children[pos].is_mergeable() {
-            if pos > 0 && self.children[pos - 1].is_mergeable() {
-                self.merge_children(pos - 1);
-            } else if pos < self.children.len() - 1 && self.children[pos + 1].is_mergeable() {
-                self.merge_children(pos);
-            }
+        } else if pos > 0 && Self::are_mergeable(&self.children[pos - 1], &self.children[pos]) {
+            self.merge_children(pos - 1);
+        } else if pos < self.children.len() - 1
+            && Self::are_mergeable(&self.children[pos], &self.children[pos + 1])
+        {
+            self.merge_children(pos);
         }
         if self.children.len() == 1 {
             self.replace_with_only_child();
