@@ -170,7 +170,6 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn split_and_insert_as_node(&mut self, key: K, node: Node<K, V>) -> (Node<K, V>, K) {
         let (mut new_node, split_key) = self.split();
         if key > split_key {
-            println!("inserting right");
             let insert_pos = match new_node.keys.binary_search(&key) {
                 Ok(pos) => pos,
                 Err(pos) => pos,
@@ -178,7 +177,6 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             new_node.keys.insert(insert_pos, key);
             new_node.children.insert(insert_pos + 1, node);
         } else {
-            println!("inserting left");
             let insert_pos = match self.keys.binary_search(&key) {
                 Ok(pos) => pos,
                 Err(pos) => pos,
@@ -191,11 +189,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     }
 
     fn is_full(&self) -> bool {
-        if self.is_leaf() {
-            self.values.len() == self.fanout_factor
-        } else {
-            self.children.len() == self.fanout_factor
-        }
+        self.keys.len() == self.fanout_factor
     }
 
     fn insert_as_leaf(&mut self, key: K, value: V) -> InsertionResult<K, V> {
@@ -218,65 +212,24 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    fn are_mergeable(left: &Node<K, V>, right: &Node<K, V>) -> bool {
-        ((left.is_leaf() && right.is_leaf()) || (!left.is_leaf() && !right.is_leaf()))
-            && left.is_mergeable()
-            && right.is_mergeable()
-    }
-
     fn insert_as_node(&mut self, key: K, value: V) -> InsertionResult<K, V> {
         assert!(!self.is_leaf());
-        let mut pos = match self.keys.binary_search(&key) {
+        let pos = match self.keys.binary_search(&key) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
-        if let InsertionResult::Split(mut new_node, split_key) =
-            self.children[pos].insert(key, value)
-        {
-            if pos > 0 && Self::are_mergeable(&self.children[pos - 1], &self.children[pos]) {
-                println!("merging left");
-                println!("keys before merge: {:?}", self.keys);
-                self.merge_children(pos - 1);
-                println!("keys aftermerge:   {:?}", self.keys);
-                pos -= 1;
-            }
-            let insert_res = if pos < self.children.len() - 1
-                && Self::are_mergeable(&new_node, &self.children[pos + 1])
-            {
-                println!("merging new node right");
-                // If the new node is can be merged into its right-sibling to be, just do that and
-                // avoid manipulating the children otherwise
-
-                // That means,
-                // - split key goes at pos,
-                // - merge_key is key at pos currently
-                // - new_node goes to pos + 1
-                Self::merge_nodes(
-                    self.keys[pos].clone(),
-                    &mut new_node,
-                    self.children.get_mut(pos + 1).unwrap(),
-                );
-                self.children[pos + 1] = new_node;
-                self.keys[pos] = split_key;
-                InsertionResult::Done
-            } else if self.is_full() {
-                println!(
-                    "splitting and inserting at node with end key: {:?} at pos {}",
-                    self.last_key(),
-                    pos + 1
-                );
+        if let InsertionResult::Split(new_node, split_key) = self.children[pos].insert(key, value) {
+            if self.is_full() {
                 // Otherwise, if this node is full, split and insert the new child node.
                 let (new_new_node, new_split_key) =
                     self.split_and_insert_as_node(split_key, new_node);
                 InsertionResult::Split(new_new_node, new_split_key)
             } else {
-                println!("inserting new node");
                 // Otherwise just insert the new child node
                 self.keys.insert(pos, split_key);
                 self.children.insert(pos + 1, new_node);
                 InsertionResult::Done
-            };
-            insert_res
+            }
         } else {
             InsertionResult::Done
         }
@@ -306,52 +259,15 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    fn is_mergeable(&self) -> bool {
-        self.keys.len() <= self.fanout_factor / 3
-    }
-
     fn remove_as_leaf(&mut self, key: &K) -> Option<V> {
         match self.keys.binary_search(key) {
             Ok(pos) => {
-                println!("remove 6");
                 self.keys.remove(pos);
-                println!("remove 7");
                 let res = self.values.remove(pos);
                 Some(res)
             }
             Err(_) => None,
         }
-    }
-
-    /// This will always merge the contents of the right node into the left node,
-    /// The right node will be empty after this operation
-    fn merge_nodes(merge_key: K, left: &mut Node<K, V>, right: &mut Node<K, V>) {
-        if left.is_leaf() {
-            left.values.append(&mut right.values);
-        } else {
-            left.children.append(&mut right.children);
-            left.keys.push(merge_key);
-        }
-        left.keys.append(&mut right.keys);
-    }
-
-    /// merges the child at left_child_idx with the child to its right by moving the contents of
-    /// the right child into the left child
-    fn merge_children(&mut self, left_child_idx: usize) {
-        assert!(left_child_idx < self.children.len() - 1);
-
-        println!("remove 1");
-        let merge_key = self.keys.remove(left_child_idx);
-        let (left_side, right_side) = self.children.split_at_mut(left_child_idx + 1);
-        let left_child = &mut left_side[left_child_idx];
-        let right_child = &mut right_side[0];
-
-        Self::merge_nodes(merge_key, left_child, right_child);
-
-        println!("remove 2");
-        // now clean up the now duplicate data of the right node
-        self.children.remove(left_child_idx + 1);
-        println!("did remove 2");
     }
 
     fn replace_with_only_child(&mut self) {
@@ -371,33 +287,96 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
+    fn is_below_minimum_size(&self) -> bool {
+        assert!(!self.is_leaf());
+        self.keys.len() < self.fanout_factor / 3
+    }
+
+    // we drop the boundary key because it becomes unecessary
+    fn steal_for_child_from_child(&mut self, for_pos: usize, from_pos: usize) {
+        assert_ne!(for_pos, from_pos);
+        assert!(for_pos < self.children.len());
+        assert!(from_pos < self.children.len());
+        let len = self.children[from_pos].keys.len();
+        let (split_idx, new_keys, new_children) = if for_pos > from_pos {
+            // steal right half
+            let split_idx = len / 2;
+            let key_range = split_idx + 1..len;
+            let child_range = split_idx + 1..len;
+
+            let mut new_keys = Vec::with_capacity(self.fanout_factor);
+            new_keys.extend(self.children[from_pos].keys.drain(key_range));
+            new_keys.append(&mut self.children[for_pos].keys);
+
+            let mut new_children = Vec::with_capacity(self.fanout_factor);
+            new_children.extend(self.children[from_pos].children.drain(child_range));
+            new_children.append(&mut self.children[for_pos].children);
+
+            (split_idx, new_keys, new_children)
+        } else {
+            // steal left half
+            let split_idx = len / 2;
+            let key_range = 0..split_idx;
+            let child_range = 0..split_idx + 1;
+
+            // TODO: Once bugs fixed, improve this by removing the unecessary recreation of the
+            // existing vec
+
+            let mut new_keys = Vec::with_capacity(self.fanout_factor);
+            new_keys.append(&mut self.children[for_pos].keys);
+            new_keys.extend(self.children[from_pos].keys.drain(key_range));
+
+            let mut new_children = Vec::with_capacity(self.fanout_factor);
+            new_children.append(&mut self.children[for_pos].children);
+            new_children.extend(self.children[from_pos].children.drain(child_range));
+
+            (0, new_keys, new_children)
+        };
+
+        self.children[for_pos].keys = new_keys;
+        self.children[for_pos].children = new_children;
+        // drop key that now no longer splits any search space (as it's missing a side)
+        self.children[from_pos].keys.remove(split_idx);
+        if self.children[from_pos].keys.is_empty() {
+            self.children.remove(from_pos);
+        }
+    }
+
     fn remove_as_node(&mut self, key: &K) -> Option<V> {
         let pos = match self.keys.binary_search(key) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
-        println!("remove 3");
         let res = self.children[pos].remove(key);
         if self.children[pos].is_empty() {
-            println!("remove 4");
             self.children.remove(pos);
-            println!("remove 5");
             if pos < self.keys.len() {
                 self.keys.remove(pos);
             } else {
                 self.keys.pop();
             }
-        } else if pos > 0 && Self::are_mergeable(&self.children[pos - 1], &self.children[pos]) {
-            self.merge_children(pos - 1);
-        } else if pos < self.children.len() - 1
-            && Self::are_mergeable(&self.children[pos], &self.children[pos + 1])
-        {
-            self.merge_children(pos);
+        } else if !self.children[pos].is_leaf() && self.children[pos].is_below_minimum_size() {
+            // steal from the larger sibling
+            let left_size = if pos > 0 {
+                self.children[pos - 1].keys.len()
+            } else {
+                0
+            };
+            let right_size = if pos < self.keys.len() {
+                self.children[pos + 1].keys.len()
+            } else {
+                0
+            };
+            let steal_from_pos = if left_size > right_size {
+                pos - 1
+            } else {
+                pos + 1
+            };
+            self.steal_for_child_from_child(pos, steal_from_pos);
         }
-        if self.children.len() == 1 {
+        if self.children.len() == 1 && !self.children[0].is_leaf() {
             self.replace_with_only_child();
         }
-
         res
     }
 
@@ -415,11 +394,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     }
 
     fn member_count(&self) -> usize {
-        if self.is_leaf() {
-            self.values.len()
-        } else {
-            self.children.len()
-        }
+        self.keys.len()
     }
 }
 
@@ -553,8 +528,10 @@ mod tests {
                 &state.root,
                 ref_state.fanout_factor
             ));
-            assert!(no_empty_nodes(state, &state.root));
-            assert!(no_mergeable_nodes(&state.root));
+
+            assert!(all_nodes_sized_correctly(&state.root));
+            assert!(root_is_sized_correctly(&state.root));
+            assert!(all_leaves_same_level(&state.root));
         }
     }
 
@@ -562,6 +539,38 @@ mod tests {
     pub enum TreeOperation {
         Insert(u32, u32),
         Remove(u32),
+    }
+
+    fn all_leaves_same_level(root: &Node<u32, u32>) -> bool {
+        fn leaf_levels(node: &Node<u32, u32>, level: usize) -> Vec<usize> {
+            if node.is_leaf() {
+                return vec![level];
+            }
+            node.children
+                .iter()
+                .flat_map(|c| leaf_levels(c, level + 1))
+                .collect()
+        }
+
+        let mut levels = leaf_levels(root, 0).into_iter();
+        let first = levels.next().unwrap();
+        levels.all(|x| x == first)
+    }
+
+    fn root_is_sized_correctly(root: &Node<u32, u32>) -> bool {
+        root.is_leaf() || root.children.len() > 1
+    }
+
+    fn all_nodes_sized_correctly(root: &Node<u32, u32>) -> bool {
+        fn all_nodes_sized_correctly_not_root(node: &Node<u32, u32>) -> bool {
+            if node.is_leaf() {
+                return true;
+            }
+            node.keys.len() >= node.fanout_factor / 3
+                && node.children.iter().all(all_nodes_sized_correctly_not_root)
+        }
+
+        root.children.iter().all(all_nodes_sized_correctly)
     }
 
     fn all_nodes_properly_structured(node: &Node<u32, u32>) -> bool {
@@ -625,33 +634,6 @@ mod tests {
                 .children
                 .iter()
                 .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
-    }
-
-    fn no_empty_nodes(tree: &BTree<u32, u32>, node: &Node<u32, u32>) -> bool {
-        if node.is_leaf() {
-            !node.is_empty() || tree.root.is_empty()
-        } else {
-            !node.is_empty()
-                && node
-                    .children
-                    .iter()
-                    .all(|child| no_empty_nodes(tree, child))
-        }
-    }
-
-    fn no_mergeable_nodes(node: &Node<u32, u32>) -> bool {
-        if node.is_leaf() {
-            return true;
-        }
-        for i in 1..node.children.len() - 1 {
-            if node.children[i].member_count() <= node.fanout_factor / 3
-                && (node.children[i - 1].member_count() <= node.fanout_factor / 3
-                    || node.children[i + 1].member_count() <= node.fanout_factor / 3)
-            {
-                return false;
-            }
-        }
-        node.children.iter().all(no_mergeable_nodes)
     }
 
     prop_state_machine! {
