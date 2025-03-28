@@ -89,7 +89,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         let half = self.fanout_factor / 2;
         let new_node = Node {
             keys: self.keys.drain(half + 1..).collect(),
-            children: self.children.drain(half..).collect(),
+            children: self.children.drain(half + 1..).collect(),
             values: Vec::new(),
             fanout_factor: self.fanout_factor,
         };
@@ -212,8 +212,10 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         } else {
             // is leaf
             let left_child = &mut self.children[left_child_idx];
+            assert!(left_child.is_leaf());
             left_child.keys.append(&mut right_child.keys);
-            left_child.children.append(&mut right_child.children);
+            left_child.values.append(&mut right_child.values);
+            self.keys.remove(left_child_idx);
         }
     }
 
@@ -258,7 +260,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         assert!(pos < self.children.len() - 1);
         assert!(self.children[pos + 1].member_count() > self.children[pos].member_count());
         let end_idx =
-            (self.children[pos - 1].member_count() - self.children[pos].member_count()) / 2;
+            (self.children[pos + 1].member_count() - self.children[pos].member_count()) / 2;
 
         if self.children[pos].is_leaf() {
             let mut new_keys = Vec::new();
@@ -314,6 +316,12 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                 {
                     // merge right sibling into this one
                     self.merge_children(pos);
+                } else if pos == 0 {
+                    // left-edge case
+                    self.keys[pos] = self.child_steal_from_right_sibling(pos);
+                } else if pos == self.children.len() - 1 {
+                    // right edge case
+                    self.keys[pos - 1] = self.child_steal_from_left_sibling(pos);
                 } else {
                     // steal from smaller of siblings
                     let left_size = if pos > 0 {
@@ -332,6 +340,12 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                         self.keys[pos] = self.child_steal_from_right_sibling(pos);
                     }
                 }
+            }
+
+            if self.keys.is_empty() {
+                assert_eq!(self.children.len(), 1);
+                let child = self.children.pop().unwrap();
+                let _ = mem::replace(self, child);
             }
 
             res
@@ -497,14 +511,15 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.remove(&k);
                     assert!(res.is_some());
+                    display_tree(&state);
                     assert!(state.get(&k).is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.insert(k, v);
+                    display_tree(&state);
                     assert_eq!(state.get(&k), Some(&v));
                 }
             };
-            display_tree(&state);
             state
         }
 
