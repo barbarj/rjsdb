@@ -23,6 +23,7 @@ use generate::{Generate, Rng};
 mod btree;
 mod btree2;
 mod btree3;
+mod btree4;
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
 mod serialize;
