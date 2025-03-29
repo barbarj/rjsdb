@@ -653,6 +653,7 @@ mod tests {
             // transitions for each case.
             verbose: 1,
             max_shrink_iters: 8192,
+            cases: 1024,
             .. ProptestConfig::default()
         })]
 
