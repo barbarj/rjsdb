@@ -31,7 +31,13 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        self.root.remove(key)
+        let res = self.root.remove(key);
+
+        if self.root.keys.is_empty() && self.root.children.len() == 1 {
+            self.root = self.root.children.pop().unwrap();
+        }
+
+        res
     }
 
     pub fn iter(&self) -> BTreeIterator<K, V> {
@@ -340,12 +346,6 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                         self.keys[pos] = self.child_steal_from_right_sibling(pos);
                     }
                 }
-            }
-
-            if self.keys.is_empty() {
-                assert_eq!(self.children.len(), 1);
-                let child = self.children.pop().unwrap();
-                let _ = mem::replace(self, child);
             }
 
             res
