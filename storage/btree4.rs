@@ -191,8 +191,8 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         self.member_count() < self.fanout_factor / 3
     }
 
-    fn can_fit(&self, count: usize) -> bool {
-        self.fanout_factor - self.member_count() >= count
+    fn can_fit_via_merge(&self, count: usize) -> bool {
+        self.fanout_factor - self.member_count() > count
     }
 
     fn last_key(&self) -> &K {
@@ -205,9 +205,8 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
     fn merge_children(&mut self, left_child_idx: usize) {
         assert!(left_child_idx < self.children.len() - 1);
-        assert!(
-            self.children[left_child_idx].can_fit(self.children[left_child_idx + 1].member_count())
-        );
+        assert!(self.children[left_child_idx]
+            .can_fit_via_merge(self.children[left_child_idx + 1].member_count()));
         let mut right_child = self.children.remove(left_child_idx + 1);
         if self.children[left_child_idx].is_node() {
             let join_key = self.keys.remove(left_child_idx);
@@ -314,11 +313,13 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             };
             let res = self.children[pos].remove(key);
             if self.children[pos].below_min_size() {
-                if pos > 0 && self.children[pos - 1].can_fit(self.children[pos].member_count()) {
+                if pos > 0
+                    && self.children[pos - 1].can_fit_via_merge(self.children[pos].member_count())
+                {
                     // merge to left
                     self.merge_children(pos - 1);
                 } else if pos < self.children.len() - 1
-                    && self.children[pos].can_fit(self.children[pos + 1].member_count())
+                    && self.children[pos].can_fit_via_merge(self.children[pos + 1].member_count())
                 {
                     // merge right sibling into this one
                     self.merge_children(pos);
