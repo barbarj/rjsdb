@@ -174,11 +174,14 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
     pub fn get(&self, key: &K) -> Option<&V> {
         if self.is_leaf() {
+            assert_eq!(self.keys.len(), self.values.len());
             match self.keys.binary_search(key) {
                 Ok(pos) => Some(&self.values[pos]),
                 Err(_) => None,
             }
         } else {
+            assert!(self.is_node());
+            assert_eq!(self.keys.len() + 1, self.children.len());
             let pos = match self.keys.binary_search(key) {
                 Ok(pos) => pos,
                 Err(pos) => pos,
@@ -289,7 +292,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
 
             let mut new_children = Vec::new();
             new_children.append(&mut self.children[pos].children);
-            new_children.extend(self.children[pos + 1].children.drain(..end_idx));
+            new_children.extend(self.children[pos + 1].children.drain(..end_idx + 1));
 
             self.children[pos].keys = new_keys;
             self.children[pos].children = new_children;
@@ -431,9 +434,9 @@ mod tests {
             let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
             let path = path_parts.join("->");
             if node.is_leaf() {
-                println!("{path}: L{:?}", node.keys);
+                println!("{path}: L{:?} ({})", node.keys, node.children.len());
             } else {
-                println!("{path}: {:?}", node.keys);
+                println!("{path}: {:?} ({})", node.keys, node.children.len());
             }
             queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
                 let mut child_ancestry = ancestry.clone();
