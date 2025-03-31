@@ -41,7 +41,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
     }
 
     pub fn iter(&self) -> BTreeIterator<K, V> {
-        BTreeIterator::new(self)
+        self.root.iter()
     }
 }
 
@@ -355,6 +355,10 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             res
         }
     }
+
+    pub fn iter(&self) -> BTreeIterator<K, V> {
+        BTreeIterator::new(self)
+    }
 }
 
 pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
@@ -364,10 +368,10 @@ pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
     leaf_idx: usize,
 }
 impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
-    pub fn new(tree: &'a BTree<K, V>) -> Self {
+    pub fn new(root_node: &'a Node<K, V>) -> Self {
         let mut queue = Vec::new();
         let mut queue_indices = Vec::new();
-        let mut node = &tree.root;
+        let mut node = root_node;
         while node.is_node() {
             let next = &node.children[0];
             queue.push(node);
@@ -419,7 +423,10 @@ impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        ops::RangeInclusive,
+    };
 
     use proptest::prelude::*;
     use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
@@ -531,7 +538,7 @@ mod tests {
             state: &Self::SystemUnderTest,
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
-            assert!(tree_keys_fully_ordered(state));
+            assert!(tree_keys_fully_ordered(&state.root));
             assert_eq!(
                 first_nonretrievable_inserted_value(state, &ref_state.ref_tree),
                 None
@@ -596,8 +603,8 @@ mod tests {
         }
     }
 
-    fn tree_keys_fully_ordered(tree: &BTree<u32, u32>) -> bool {
-        let keys: Vec<_> = tree.iter().collect();
+    fn tree_keys_fully_ordered(root: &Node<u32, u32>) -> bool {
+        let keys: Vec<_> = root.iter().collect();
         let mut sorted_keys = keys.clone();
         sorted_keys.sort();
         keys == sorted_keys
@@ -651,6 +658,17 @@ mod tests {
                 .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
     }
 
+    fn assert_subtree_valid(node: &Node<u32, u32>) {
+        assert!(tree_keys_fully_ordered(node));
+        assert!(all_nodes_properly_structured(node));
+        assert!(all_node_keys_ordered(node));
+        assert!(all_subnode_keys_ordered_relative_to_node_keys(node));
+        assert!(all_nodes_with_fanout_factor(node, node.fanout_factor));
+        assert!(all_nodes_sized_correctly(node));
+        assert!(root_is_sized_correctly(node));
+        assert!(all_leaves_same_level(node));
+    }
+
     prop_state_machine! {
        #![proptest_config(ProptestConfig {
             // Enable verbose mode to make the state machine test print the
@@ -664,4 +682,54 @@ mod tests {
         #[test]
         fn full_tree_test(sequential 1..500 => BTree<u32, u32>);
     }
+
+    fn construct_leaf(fanout_factor: usize, range: RangeInclusive<u32>) -> Node<u32, u32> {
+        let mut leaf = Node::new(fanout_factor);
+        leaf.keys = range.clone().collect();
+        leaf.values = range.collect();
+        leaf
+    }
+
+    #[test]
+    fn split_as_leaf_insert_right() {
+        let leaf1 = construct_leaf(4, 1..=3);
+        let leaf2 = construct_leaf(4, 4..=7);
+        let mut node = Node::new(4);
+        node.keys = vec![3];
+        node.children = vec![leaf1, leaf2];
+        assert_subtree_valid(&node);
+
+        node.insert(8, 8);
+        assert_eq!(node.keys, vec![3, 5]);
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.children[0].keys, vec![1, 2, 3]);
+        assert_eq!(node.children[1].keys, vec![4, 5]);
+        assert_eq!(node.children[2].keys, vec![6, 7, 8]);
+        assert_subtree_valid(&node);
+    }
+
+    #[test]
+    fn split_as_leaf_insert_left() {
+        let leaf1 = construct_leaf(4, 1..=3);
+        let leaf2 = construct_leaf(4, 5..=8);
+        let mut node = Node::new(4);
+        node.keys = vec![3];
+        node.children = vec![leaf1, leaf2];
+        assert_subtree_valid(&node);
+
+        node.insert(4, 4);
+        assert_eq!(node.keys, vec![3, 6]);
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.children[0].keys, vec![1, 2, 3]);
+        assert_eq!(node.children[1].keys, vec![4, 5, 6]);
+        assert_eq!(node.children[2].keys, vec![7, 8]);
+        assert_subtree_valid(&node);
+    }
+
+    // TODO: Write tests for:
+    // - Split as node
+    // - Merge left
+    // - Merge right
+    // - Steal from left
+    // - Steal from right
 }
