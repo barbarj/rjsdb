@@ -434,9 +434,9 @@ mod tests {
     use super::{BTree, Node};
 
     // TODO: Figure out how to stick an extra seperator between grandchildren
-    fn display_tree(tree: &BTree<u32, u32>) {
+    fn display_subtree(root_node: &Node<u32, u32>) {
         let mut queue = VecDeque::new();
-        queue.push_back((vec![0], &tree.root));
+        queue.push_back((vec![0], root_node));
         while let Some((ancestry, node)) = queue.pop_front() {
             let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
             let path = path_parts.join("->");
@@ -522,12 +522,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.remove(&k);
                     assert!(res.is_some());
-                    display_tree(&state);
+                    display_subtree(&state.root);
                     assert!(state.get(&k).is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.insert(k, v);
-                    display_tree(&state);
+                    display_subtree(&state.root);
                     assert_eq!(state.get(&k), Some(&v));
                 }
             };
@@ -726,8 +726,78 @@ mod tests {
         assert_subtree_valid(&node);
     }
 
+    #[test]
+    fn split_as_node_insert_left() {
+        let leaf1 = construct_leaf(4, 1..=3);
+        let leaf2 = construct_leaf(4, 4..=6);
+        let leaf3 = construct_leaf(4, 7..=9);
+        let leaf4 = construct_leaf(4, 10..=12);
+        let leaf5 = construct_leaf(4, 13..=15);
+        let mut leaf6 = construct_leaf(4, 16..=18);
+        leaf6.insert(20, 20);
+        let leaf7 = construct_leaf(4, 21..=23);
+        let leaf8 = construct_leaf(4, 24..=27);
+        let leaf9 = construct_leaf(4, 29..=31);
+
+        let mut node1 = Node::new(4);
+        node1.keys = vec![3, 6, 9];
+        node1.children = vec![leaf1, leaf2, leaf3, leaf4];
+
+        let mut node2 = Node::new(4);
+        node2.keys = vec![15, 20, 23, 28];
+        node2.children = vec![leaf5, leaf6, leaf7, leaf8, leaf9];
+
+        let mut root = Node::new(4);
+        root.keys = vec![12];
+        root.children = vec![node1, node2];
+        assert_subtree_valid(&root);
+
+        root.insert(19, 19);
+        display_subtree(&root);
+        assert_eq!(root.keys, vec![12, 23]);
+        assert_eq!(root.children.len(), 3);
+        assert_eq!(root.children[0].keys, vec![3, 6, 9]);
+        assert_eq!(root.children[1].keys, vec![15, 17, 20]);
+        assert_eq!(root.children[2].keys, vec![28]);
+        assert_subtree_valid(&root);
+    }
+
+    #[test]
+    fn split_as_node_insert_right() {
+        let leaf1 = construct_leaf(4, 1..=3);
+        let leaf2 = construct_leaf(4, 4..=6);
+        let leaf3 = construct_leaf(4, 7..=9);
+        let leaf4 = construct_leaf(4, 10..=12);
+        let leaf5 = construct_leaf(4, 13..=15);
+        let mut leaf6 = construct_leaf(4, 16..=18);
+        leaf6.insert(20, 20);
+        let leaf7 = construct_leaf(4, 21..=23);
+        let leaf8 = construct_leaf(4, 24..=27);
+        let leaf9 = construct_leaf(4, 29..=31);
+
+        let mut node1 = Node::new(4);
+        node1.keys = vec![3, 6, 9];
+        node1.children = vec![leaf1, leaf2, leaf3, leaf4];
+
+        let mut node2 = Node::new(4);
+        node2.keys = vec![15, 20, 23, 28];
+        node2.children = vec![leaf5, leaf6, leaf7, leaf8, leaf9];
+
+        let mut root = Node::new(4);
+        root.keys = vec![12];
+        root.children = vec![node1, node2];
+        assert_subtree_valid(&root);
+
+        root.insert(28, 28);
+        assert_eq!(root.keys, vec![12, 23]);
+        assert_eq!(root.children.len(), 3);
+        assert_eq!(root.children[0].keys, vec![3, 6, 9]);
+        assert_eq!(root.children[1].keys, vec![15, 20]);
+        assert_eq!(root.children[2].keys, vec![25, 28]);
+        assert_subtree_valid(&root);
+    }
+
     // TODO: Write tests for:
-    // - Split as node
     // - Merge left
     // - Merge right
     // - Steal from left
