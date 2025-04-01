@@ -45,6 +45,119 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
     }
 }
 
+#[cfg(test)]
+impl BTree<u32, u32> {
+    /*
+    0: [12, 23] (3)
+    0->0: [3, 6, 9] (4)
+    0->1: [15, 17, 20] (4)
+    0->2: [28] (2)
+    0->0->0: L[1, 2, 3] (0)
+    0->0->1: L[4, 5, 6] (0)
+    0->0->2: L[7, 8, 9] (0)
+    0->0->3: L[10, 11, 12] (0)
+    0->1->0: L[13, 14, 15] (0)
+    0->1->1: L[16, 17] (0)
+    0->1->2: L[18, 19, 20] (0)
+    0->1->3: L[21, 22, 23] (0)
+    0->2->0: L[24, 25, 26, 27] (0)
+    0->2->1: L[29, 30, 31] (0)
+        */
+    pub fn from_description(description: &str, fanout_factor: usize) -> BTree<u32, u32> {
+        let mut lines = description
+            .trim()
+            .split('\n')
+            .map(|x| x.trim())
+            .map(DescriptionLine::from_str);
+        let mut root = Node::new(fanout_factor);
+        root.keys = lines.next().unwrap().keys;
+        for line in lines {
+            let mut node = &mut root;
+            for i in &line.traversal_path[1..] {
+                if *i >= node.children.len() {
+                    node.children.push(Node::new(fanout_factor));
+                }
+                node = &mut node.children[*i];
+            }
+            if line.is_leaf {
+                node.values = line.keys.clone();
+            }
+            node.keys = line.keys;
+        }
+
+        assert_subtree_valid(&root);
+        BTree { root }
+    }
+
+    fn to_description(&self) -> String {
+        BTree::node_to_description(&self.root)
+    }
+
+    fn node_to_description(node: &Node<u32, u32>) -> String {
+        use std::collections::VecDeque;
+
+        let mut description = String::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((vec![0], node));
+        while let Some((ancestry, node)) = queue.pop_front() {
+            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
+            let path = path_parts.join("->");
+            if node.is_leaf() {
+                let s = format!("{path}: L{:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            } else {
+                let s = format!("{path}: {:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            }
+            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
+                let mut child_ancestry = ancestry.clone();
+                child_ancestry.push(idx);
+                (child_ancestry, node)
+            }));
+        }
+        description
+    }
+
+    fn display_subtree(root_node: &Node<u32, u32>) {
+        let description = BTree::node_to_description(root_node);
+        print!("{description}");
+    }
+}
+
+#[cfg(test)]
+struct DescriptionLine {
+    traversal_path: Vec<usize>,
+    is_leaf: bool,
+    keys: Vec<u32>,
+}
+#[cfg(test)]
+impl DescriptionLine {
+    fn from_str(s: &str) -> Self {
+        let mut parts = s.split(": ");
+        let traversal_path = parts
+            .next()
+            .unwrap()
+            .split("->")
+            .map(|x| x.parse::<usize>().unwrap())
+            .collect();
+
+        let second_half = parts.next().unwrap();
+        assert!(second_half.starts_with("L[") || second_half.starts_with("["));
+        let is_leaf = second_half.starts_with("L");
+        let skip_num = if is_leaf { 2 } else { 1 };
+
+        let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
+        let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
+        let keys = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+
+        DescriptionLine {
+            traversal_path,
+            is_leaf,
+            keys,
+        }
+    }
+}
+
 pub struct Node<K: Ord + Clone + Debug, V: Clone> {
     keys: Vec<K>,
     children: Vec<Node<K, V>>,
@@ -361,6 +474,108 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     }
 }
 
+#[cfg(test)]
+fn all_leaves_same_level(root: &Node<u32, u32>) -> bool {
+    fn leaf_levels(node: &Node<u32, u32>, level: usize) -> Vec<usize> {
+        if node.is_leaf() {
+            return vec![level];
+        }
+        node.children
+            .iter()
+            .flat_map(|c| leaf_levels(c, level + 1))
+            .collect()
+    }
+
+    let mut levels = leaf_levels(root, 0).into_iter();
+    let first = levels.next().unwrap();
+    levels.all(|x| x == first)
+}
+
+#[cfg(test)]
+fn root_is_sized_correctly(root: &Node<u32, u32>) -> bool {
+    root.is_leaf() || root.children.len() > 1
+}
+
+#[cfg(test)]
+fn all_nodes_sized_correctly(root: &Node<u32, u32>) -> bool {
+    fn all_nodes_sized_correctly_not_root(node: &Node<u32, u32>) -> bool {
+        if node.is_leaf() {
+            return true;
+        }
+        node.keys.len() >= node.fanout_factor / 3
+            && node.children.iter().all(all_nodes_sized_correctly_not_root)
+    }
+
+    root.children.iter().all(all_nodes_sized_correctly)
+}
+
+#[cfg(test)]
+fn all_nodes_properly_structured(node: &Node<u32, u32>) -> bool {
+    if node.is_leaf() {
+        node.keys.len() == node.values.len()
+    } else {
+        node.keys.len() == node.children.len() - 1
+    }
+}
+
+#[cfg(test)]
+fn tree_keys_fully_ordered(root: &Node<u32, u32>) -> bool {
+    let keys: Vec<_> = root.iter().collect();
+    let mut sorted_keys = keys.clone();
+    sorted_keys.sort();
+    keys == sorted_keys
+}
+
+#[cfg(test)]
+fn all_node_keys_ordered(node: &Node<u32, u32>) -> bool {
+    let mut sorted_keys = node.keys.clone();
+    sorted_keys.sort();
+    sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered)
+}
+
+#[cfg(test)]
+fn all_keys_in_range(node: &Node<u32, u32>, min: u32, max: u32) -> bool {
+    node.keys.iter().all(|k| (min..=max).contains(k))
+}
+
+#[cfg(test)]
+fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<u32, u32>) -> bool {
+    if node.is_leaf() {
+        return true;
+    }
+    let mut min_key = u32::MIN;
+    for (idx, k) in node.keys.iter().enumerate() {
+        let max_key = *k;
+        if !all_keys_in_range(&node.children[idx], min_key, max_key) {
+            return false;
+        }
+        min_key = k + 1;
+    }
+    all_keys_in_range(&node.children[node.keys.len()], min_key, u32::MAX)
+}
+
+#[cfg(test)]
+fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> bool {
+    node.member_count() <= node.fanout_factor
+        && node.fanout_factor == fanout_factor
+        && node
+            .children
+            .iter()
+            .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
+}
+
+#[cfg(test)]
+fn assert_subtree_valid(node: &Node<u32, u32>) {
+    assert!(tree_keys_fully_ordered(node));
+    assert!(all_nodes_properly_structured(node));
+    assert!(all_node_keys_ordered(node));
+    assert!(all_subnode_keys_ordered_relative_to_node_keys(node));
+    assert!(all_nodes_with_fanout_factor(node, node.fanout_factor));
+    assert!(all_nodes_sized_correctly(node));
+    assert!(root_is_sized_correctly(node));
+    assert!(all_leaves_same_level(node));
+}
+
 pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
     queue: Vec<&'a Node<K, V>>,
     queue_indices: Vec<usize>,
@@ -423,34 +638,59 @@ impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> 
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, VecDeque},
-        ops::RangeInclusive,
-    };
+    use std::{collections::BTreeMap, ops::RangeInclusive};
 
+    use itertools::Itertools;
     use proptest::prelude::*;
     use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
 
-    use super::{BTree, Node};
+    use super::{
+        all_leaves_same_level, all_node_keys_ordered, all_nodes_properly_structured,
+        all_nodes_sized_correctly, all_nodes_with_fanout_factor,
+        all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
+        root_is_sized_correctly, tree_keys_fully_ordered, BTree, Node,
+    };
 
-    // TODO: Figure out how to stick an extra seperator between grandchildren
-    fn display_subtree(root_node: &Node<u32, u32>) {
-        let mut queue = VecDeque::new();
-        queue.push_back((vec![0], root_node));
-        while let Some((ancestry, node)) = queue.pop_front() {
-            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
-            let path = path_parts.join("->");
-            if node.is_leaf() {
-                println!("{path}: L{:?} ({})", node.keys, node.children.len());
-            } else {
-                println!("{path}: {:?} ({})", node.keys, node.children.len());
-            }
-            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
-                let mut child_ancestry = ancestry.clone();
-                child_ancestry.push(idx);
-                (child_ancestry, node)
-            }));
-        }
+    fn trim_lines(s: &str) -> String {
+        s.trim().lines().map(|l| l.trim()).join("\n") + "\n"
+    }
+
+    #[test]
+    fn description_test() {
+        let input_description = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)";
+        let input_description = trim_lines(input_description);
+
+        let tree = BTree::from_description(&input_description, 4);
+        let output_description = tree.to_description();
+        assert_eq!(output_description, input_description);
+    }
+
+    fn first_nonretrievable_inserted_value(
+        tree: &BTree<u32, u32>,
+        ref_tree: &BTreeMap<u32, u32>,
+    ) -> Option<u32> {
+        ref_tree
+            .iter()
+            .find(|(k, v)| tree.get(k) != Some(*v))
+            .map(|(k, v)| {
+                println!("didn't find: ({k}, {v})");
+                println!("actual value: {:?}", tree.get(k));
+                *k
+            })
     }
 
     #[derive(Debug, Clone)]
@@ -522,12 +762,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.remove(&k);
                     assert!(res.is_some());
-                    display_subtree(&state.root);
+                    BTree::display_subtree(&state.root);
                     assert!(state.get(&k).is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.insert(k, v);
-                    display_subtree(&state.root);
+                    BTree::display_subtree(&state.root);
                     assert_eq!(state.get(&k), Some(&v));
                 }
             };
@@ -561,112 +801,6 @@ mod tests {
     pub enum TreeOperation {
         Insert(u32, u32),
         Remove(u32),
-    }
-
-    fn all_leaves_same_level(root: &Node<u32, u32>) -> bool {
-        fn leaf_levels(node: &Node<u32, u32>, level: usize) -> Vec<usize> {
-            if node.is_leaf() {
-                return vec![level];
-            }
-            node.children
-                .iter()
-                .flat_map(|c| leaf_levels(c, level + 1))
-                .collect()
-        }
-
-        let mut levels = leaf_levels(root, 0).into_iter();
-        let first = levels.next().unwrap();
-        levels.all(|x| x == first)
-    }
-
-    fn root_is_sized_correctly(root: &Node<u32, u32>) -> bool {
-        root.is_leaf() || root.children.len() > 1
-    }
-
-    fn all_nodes_sized_correctly(root: &Node<u32, u32>) -> bool {
-        fn all_nodes_sized_correctly_not_root(node: &Node<u32, u32>) -> bool {
-            if node.is_leaf() {
-                return true;
-            }
-            node.keys.len() >= node.fanout_factor / 3
-                && node.children.iter().all(all_nodes_sized_correctly_not_root)
-        }
-
-        root.children.iter().all(all_nodes_sized_correctly)
-    }
-
-    fn all_nodes_properly_structured(node: &Node<u32, u32>) -> bool {
-        if node.is_leaf() {
-            node.keys.len() == node.values.len()
-        } else {
-            node.keys.len() == node.children.len() - 1
-        }
-    }
-
-    fn tree_keys_fully_ordered(root: &Node<u32, u32>) -> bool {
-        let keys: Vec<_> = root.iter().collect();
-        let mut sorted_keys = keys.clone();
-        sorted_keys.sort();
-        keys == sorted_keys
-    }
-
-    fn all_node_keys_ordered(node: &Node<u32, u32>) -> bool {
-        let mut sorted_keys = node.keys.clone();
-        sorted_keys.sort();
-        sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered)
-    }
-
-    fn all_keys_in_range(node: &Node<u32, u32>, min: u32, max: u32) -> bool {
-        node.keys.iter().all(|k| (min..=max).contains(k))
-    }
-
-    fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<u32, u32>) -> bool {
-        if node.is_leaf() {
-            return true;
-        }
-        let mut min_key = u32::MIN;
-        for (idx, k) in node.keys.iter().enumerate() {
-            let max_key = *k;
-            if !all_keys_in_range(&node.children[idx], min_key, max_key) {
-                return false;
-            }
-            min_key = k + 1;
-        }
-        all_keys_in_range(&node.children[node.keys.len()], min_key, u32::MAX)
-    }
-
-    fn first_nonretrievable_inserted_value(
-        tree: &BTree<u32, u32>,
-        ref_tree: &BTreeMap<u32, u32>,
-    ) -> Option<u32> {
-        ref_tree
-            .iter()
-            .find(|(k, v)| tree.get(k) != Some(*v))
-            .map(|(k, v)| {
-                println!("didn't find: ({k}, {v})");
-                println!("actual value: {:?}", tree.get(k));
-                *k
-            })
-    }
-
-    fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> bool {
-        node.member_count() <= node.fanout_factor
-            && node.fanout_factor == fanout_factor
-            && node
-                .children
-                .iter()
-                .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
-    }
-
-    fn assert_subtree_valid(node: &Node<u32, u32>) {
-        assert!(tree_keys_fully_ordered(node));
-        assert!(all_nodes_properly_structured(node));
-        assert!(all_node_keys_ordered(node));
-        assert!(all_subnode_keys_ordered_relative_to_node_keys(node));
-        assert!(all_nodes_with_fanout_factor(node, node.fanout_factor));
-        assert!(all_nodes_sized_correctly(node));
-        assert!(root_is_sized_correctly(node));
-        assert!(all_leaves_same_level(node));
     }
 
     prop_state_machine! {
@@ -753,7 +887,7 @@ mod tests {
         assert_subtree_valid(&root);
 
         root.insert(19, 19);
-        display_subtree(&root);
+        BTree::display_subtree(&root);
         assert_eq!(root.keys, vec![12, 23]);
         assert_eq!(root.children.len(), 3);
         assert_eq!(root.children[0].keys, vec![3, 6, 9]);
@@ -797,9 +931,47 @@ mod tests {
         assert_subtree_valid(&root);
     }
 
+    #[test]
+    fn merge_left_leaf() {
+        let leaf1 = construct_leaf(6, 0..=2);
+        let leaf2 = construct_leaf(6, 5..=6);
+        let leaf3 = construct_leaf(6, 7..=10);
+        let mut root = Node::new(6);
+        root.keys = vec![2, 6];
+        root.children = vec![leaf1, leaf2, leaf3];
+        assert_subtree_valid(&root);
+
+        root.remove(&6);
+        assert_eq!(root.keys, vec![6]);
+        assert_eq!(root.children.len(), 2);
+        assert_eq!(root.children[0].keys, [0, 1, 2, 5]);
+        assert_eq!(root.children[1].keys, [7, 8, 9, 10]);
+        assert_subtree_valid(&root);
+    }
+
+    #[test]
+    fn merge_right_leaf() {
+        let leaf1 = construct_leaf(6, 0..=4);
+        let leaf2 = construct_leaf(6, 5..=6);
+        let leaf3 = construct_leaf(6, 7..=9);
+        let mut root = Node::new(6);
+        root.keys = vec![4, 6];
+        root.children = vec![leaf1, leaf2, leaf3];
+        assert_subtree_valid(&root);
+
+        root.remove(&6);
+        assert_eq!(root.keys, vec![4]);
+        assert_eq!(root.children.len(), 2);
+        assert_eq!(root.children[0].keys, [0, 1, 2, 3, 4]);
+        assert_eq!(root.children[1].keys, [5, 7, 8, 9]);
+        assert_subtree_valid(&root);
+    }
+
     // TODO: Write tests for:
-    // - Merge left
-    // - Merge right
-    // - Steal from left
-    // - Steal from right
+    // - Merge left node
+    // - Merge right node
+    // - Steal from left node
+    // - Steal from right node
+    // - Steal from left leaf
+    // - Steal from right leaf
 }

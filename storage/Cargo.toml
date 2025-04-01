@@ -8,6 +8,7 @@ name = "rjsdb_storage"
 path = "lib.rs"
 
 [dependencies]
+itertools = "0.14.0"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 
