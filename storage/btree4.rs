@@ -527,10 +527,11 @@ fn tree_keys_fully_ordered(root: &Node<u32, u32>) -> bool {
 }
 
 #[cfg(test)]
-fn all_node_keys_ordered(node: &Node<u32, u32>) -> bool {
+fn all_node_keys_ordered_and_deduped(node: &Node<u32, u32>) -> bool {
     let mut sorted_keys = node.keys.clone();
     sorted_keys.sort();
-    sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered)
+    sorted_keys.dedup();
+    sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered_and_deduped)
 }
 
 #[cfg(test)]
@@ -568,7 +569,7 @@ fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> 
 fn assert_subtree_valid(node: &Node<u32, u32>) {
     assert!(tree_keys_fully_ordered(node));
     assert!(all_nodes_properly_structured(node));
-    assert!(all_node_keys_ordered(node));
+    assert!(all_node_keys_ordered_and_deduped(node));
     assert!(all_subnode_keys_ordered_relative_to_node_keys(node));
     assert!(all_nodes_with_fanout_factor(node, node.fanout_factor));
     assert!(all_nodes_sized_correctly(node));
@@ -645,7 +646,7 @@ mod tests {
     use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
 
     use super::{
-        all_leaves_same_level, all_node_keys_ordered, all_nodes_properly_structured,
+        all_leaves_same_level, all_node_keys_ordered_and_deduped, all_nodes_properly_structured,
         all_nodes_sized_correctly, all_nodes_with_fanout_factor,
         all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
         root_is_sized_correctly, tree_keys_fully_ordered, BTree, Node,
@@ -784,7 +785,7 @@ mod tests {
                 None
             );
             assert!(all_nodes_properly_structured(&state.root));
-            assert!(all_node_keys_ordered(&state.root));
+            assert!(all_node_keys_ordered_and_deduped(&state.root));
             assert!(all_subnode_keys_ordered_relative_to_node_keys(&state.root));
             assert!(all_nodes_with_fanout_factor(
                 &state.root,
@@ -826,109 +827,136 @@ mod tests {
 
     #[test]
     fn split_as_leaf_insert_right() {
-        let leaf1 = construct_leaf(4, 1..=3);
-        let leaf2 = construct_leaf(4, 4..=7);
-        let mut node = Node::new(4);
-        node.keys = vec![3];
-        node.children = vec![leaf1, leaf2];
-        assert_subtree_valid(&node);
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6, 7] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
 
-        node.insert(8, 8);
-        assert_eq!(node.keys, vec![3, 5]);
-        assert_eq!(node.children.len(), 3);
-        assert_eq!(node.children[0].keys, vec![1, 2, 3]);
-        assert_eq!(node.children[1].keys, vec![4, 5]);
-        assert_eq!(node.children[2].keys, vec![6, 7, 8]);
-        assert_subtree_valid(&node);
+        let output_tree = "
+            0: [3, 5] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5] (0)
+            0->2: L[6, 7, 8] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.root.insert(8, 8);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     #[test]
     fn split_as_leaf_insert_left() {
-        let leaf1 = construct_leaf(4, 1..=3);
-        let leaf2 = construct_leaf(4, 5..=8);
-        let mut node = Node::new(4);
-        node.keys = vec![3];
-        node.children = vec![leaf1, leaf2];
-        assert_subtree_valid(&node);
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[5, 6, 7, 8] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
 
-        node.insert(4, 4);
-        assert_eq!(node.keys, vec![3, 6]);
-        assert_eq!(node.children.len(), 3);
-        assert_eq!(node.children[0].keys, vec![1, 2, 3]);
-        assert_eq!(node.children[1].keys, vec![4, 5, 6]);
-        assert_eq!(node.children[2].keys, vec![7, 8]);
-        assert_subtree_valid(&node);
+        let output_tree = "
+            0: [3, 6] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6] (0)
+            0->2: L[7, 8] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.root.insert(4, 4);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     #[test]
     fn split_as_node_insert_left() {
-        let leaf1 = construct_leaf(4, 1..=3);
-        let leaf2 = construct_leaf(4, 4..=6);
-        let leaf3 = construct_leaf(4, 7..=9);
-        let leaf4 = construct_leaf(4, 10..=12);
-        let leaf5 = construct_leaf(4, 13..=15);
-        let mut leaf6 = construct_leaf(4, 16..=18);
-        leaf6.insert(20, 20);
-        let leaf7 = construct_leaf(4, 21..=23);
-        let leaf8 = construct_leaf(4, 24..=27);
-        let leaf9 = construct_leaf(4, 29..=31);
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20, 23, 28] (5)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->1->3: L[24, 25, 26, 27] (0)
+            0->1->4: L[29, 30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
 
-        let mut node1 = Node::new(4);
-        node1.keys = vec![3, 6, 9];
-        node1.children = vec![leaf1, leaf2, leaf3, leaf4];
+        let output_tree = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
 
-        let mut node2 = Node::new(4);
-        node2.keys = vec![15, 20, 23, 28];
-        node2.children = vec![leaf5, leaf6, leaf7, leaf8, leaf9];
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.insert(19, 19);
 
-        let mut root = Node::new(4);
-        root.keys = vec![12];
-        root.children = vec![node1, node2];
-        assert_subtree_valid(&root);
-
-        root.insert(19, 19);
-        BTree::display_subtree(&root);
-        assert_eq!(root.keys, vec![12, 23]);
-        assert_eq!(root.children.len(), 3);
-        assert_eq!(root.children[0].keys, vec![3, 6, 9]);
-        assert_eq!(root.children[1].keys, vec![15, 17, 20]);
-        assert_eq!(root.children[2].keys, vec![28]);
-        assert_subtree_valid(&root);
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     #[test]
     fn split_as_node_insert_right() {
-        let leaf1 = construct_leaf(4, 1..=3);
-        let leaf2 = construct_leaf(4, 4..=6);
-        let leaf3 = construct_leaf(4, 7..=9);
-        let leaf4 = construct_leaf(4, 10..=12);
-        let leaf5 = construct_leaf(4, 13..=15);
-        let mut leaf6 = construct_leaf(4, 16..=18);
-        leaf6.insert(20, 20);
-        let leaf7 = construct_leaf(4, 21..=23);
-        let leaf8 = construct_leaf(4, 24..=27);
-        let leaf9 = construct_leaf(4, 29..=31);
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20, 23, 28] (5)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->1->3: L[24, 25, 26, 27] (0)
+            0->1->4: L[29, 30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
 
-        let mut node1 = Node::new(4);
-        node1.keys = vec![3, 6, 9];
-        node1.children = vec![leaf1, leaf2, leaf3, leaf4];
+        let output_tree = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20] (3)
+            0->2: [25, 28] (3)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->2->0: L[24, 25] (0)
+            0->2->1: L[26, 27, 28] (0)
+            0->2->2: L[29, 30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
 
-        let mut node2 = Node::new(4);
-        node2.keys = vec![15, 20, 23, 28];
-        node2.children = vec![leaf5, leaf6, leaf7, leaf8, leaf9];
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.insert(28, 28);
 
-        let mut root = Node::new(4);
-        root.keys = vec![12];
-        root.children = vec![node1, node2];
-        assert_subtree_valid(&root);
-
-        root.insert(28, 28);
-        assert_eq!(root.keys, vec![12, 23]);
-        assert_eq!(root.children.len(), 3);
-        assert_eq!(root.children[0].keys, vec![3, 6, 9]);
-        assert_eq!(root.children[1].keys, vec![15, 20]);
-        assert_eq!(root.children[2].keys, vec![25, 28]);
-        assert_subtree_valid(&root);
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     #[test]
