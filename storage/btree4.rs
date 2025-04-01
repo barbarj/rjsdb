@@ -961,38 +961,50 @@ mod tests {
 
     #[test]
     fn merge_left_leaf() {
-        let leaf1 = construct_leaf(6, 0..=2);
-        let leaf2 = construct_leaf(6, 5..=6);
-        let leaf3 = construct_leaf(6, 7..=10);
-        let mut root = Node::new(6);
-        root.keys = vec![2, 6];
-        root.children = vec![leaf1, leaf2, leaf3];
-        assert_subtree_valid(&root);
+        let input_tree = "
+            0: [2, 6] (2)
+            0->0: L[0, 1, 2] (0)
+            0->1: L[5, 6] (0)
+            0->2: L[7, 8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
 
-        root.remove(&6);
-        assert_eq!(root.keys, vec![6]);
-        assert_eq!(root.children.len(), 2);
-        assert_eq!(root.children[0].keys, [0, 1, 2, 5]);
-        assert_eq!(root.children[1].keys, [7, 8, 9, 10]);
-        assert_subtree_valid(&root);
+        let output_tree = "
+            0: [6] (2)
+            0->0: L[0, 1, 2, 5] (0)
+            0->1: L[7, 8, 9, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&6);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     #[test]
     fn merge_right_leaf() {
-        let leaf1 = construct_leaf(6, 0..=4);
-        let leaf2 = construct_leaf(6, 5..=6);
-        let leaf3 = construct_leaf(6, 7..=9);
-        let mut root = Node::new(6);
-        root.keys = vec![4, 6];
-        root.children = vec![leaf1, leaf2, leaf3];
-        assert_subtree_valid(&root);
+        let input_tree = "
+            0: [4, 6] (3)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 6] (0)
+            0->2: L[7, 8, 9] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
 
-        root.remove(&6);
-        assert_eq!(root.keys, vec![4]);
-        assert_eq!(root.children.len(), 2);
-        assert_eq!(root.children[0].keys, [0, 1, 2, 3, 4]);
-        assert_eq!(root.children[1].keys, [5, 7, 8, 9]);
-        assert_subtree_valid(&root);
+        let output_tree = "
+            0: [4] (2)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 7, 8, 9] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&6);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 
     // TODO: Write tests for:
