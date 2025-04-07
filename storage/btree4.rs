@@ -48,6 +48,7 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
 #[cfg(test)]
 impl BTree<u32, u32> {
     /*
+     * An example description looks something like this:
     0: [12, 23] (3)
     0->0: [3, 6, 9] (4)
     0->1: [15, 17, 20] (4)
@@ -384,36 +385,24 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         let end_idx =
             (self.children[pos + 1].member_count() - self.children[pos].member_count()) / 2;
 
-        if self.children[pos].is_leaf() {
-            let mut new_keys = Vec::new();
-            new_keys.append(&mut self.children[pos].keys);
-            new_keys.extend(self.children[pos + 1].keys.drain(..end_idx));
+        let (left_children, right_children) = self.children.split_at_mut(pos + 1);
+        let left = &mut left_children[pos];
+        let right = &mut right_children[0];
 
-            let mut new_values = Vec::new();
-            new_values.append(&mut self.children[pos].values);
-            new_values.extend(self.children[pos + 1].values.drain(..end_idx));
-
-            self.children[pos].keys = new_keys;
-            self.children[pos].values = new_values;
-            self.children[pos].last_key().clone()
+        if left.is_leaf() {
+            left.keys.extend(right.keys.drain(..end_idx));
+            left.values.extend(right.values.drain(..end_idx));
+            left.last_key().clone()
         } else {
             assert!(end_idx > 0);
             let end_idx = end_idx - 1; // to account for the addition of the join key
-            let join_key = self.children[pos].last_key().clone();
+            let join_key = left.last_key().clone();
 
             println!("end_idx: {end_idx}");
-            let mut new_keys = Vec::new();
-            new_keys.append(&mut self.children[pos].keys);
-            new_keys.push(join_key);
-            new_keys.extend(self.children[pos + 1].keys.drain(..end_idx));
-
-            let mut new_children = Vec::new();
-            new_children.append(&mut self.children[pos].children);
-            new_children.extend(self.children[pos + 1].children.drain(..end_idx + 1));
-
-            self.children[pos].keys = new_keys;
-            self.children[pos].children = new_children;
-            self.children[pos + 1].keys.remove(0)
+            left.keys.push(join_key);
+            left.keys.extend(right.keys.drain(..end_idx));
+            left.children.extend(right.children.drain(..end_idx + 1));
+            right.keys.remove(0)
         }
     }
 
