@@ -344,50 +344,50 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     fn child_steal_from_left_sibling(&mut self, pos: usize) -> K {
         assert!(pos > 0);
         assert!(self.children[pos - 1].member_count() > self.children[pos].member_count());
-        let amount_to_steal =
-            (self.children[pos - 1].member_count() - self.children[pos].member_count()) / 2;
-        let start_idx = self.children[pos - 1].member_count() - amount_to_steal;
+        let (left_children, right_children) = self.children.split_at_mut(pos);
+        let left = &mut left_children[pos - 1];
+        let right = &mut right_children[0];
 
-        if self.children[pos].is_leaf() {
+        let amount_to_steal = (left.member_count() - right.member_count()) / 2;
+        let start_idx = left.member_count() - amount_to_steal;
+
+        if right.is_leaf() {
             let mut new_keys = Vec::new();
-            new_keys.extend(self.children[pos - 1].keys.drain(start_idx..));
-            new_keys.append(&mut self.children[pos].keys);
+            new_keys.extend(left.keys.drain(start_idx..));
+            new_keys.append(&mut right.keys);
 
             let mut new_values = Vec::new();
-            new_values.extend(self.children[pos - 1].values.drain(start_idx..));
-            new_values.append(&mut self.children[pos].values);
+            new_values.extend(left.values.drain(start_idx..));
+            new_values.append(&mut right.values);
 
-            self.children[pos].keys = new_keys;
-            self.children[pos].values = new_values;
-            self.children[pos - 1].keys.last().unwrap().clone()
+            right.keys = new_keys;
+            right.values = new_values;
+            left.keys.last().unwrap().clone()
         } else {
             let start_idx = start_idx + 1; // to account for the addition of the join key
-            let join_key = self.children[pos - 1].last_key().clone();
+            let join_key = left.last_key().clone();
             let mut new_keys = Vec::new();
-            new_keys.extend(self.children[pos - 1].keys.drain(start_idx..));
+            new_keys.extend(left.keys.drain(start_idx..));
             new_keys.push(join_key);
-            new_keys.append(&mut self.children[pos].keys);
+            new_keys.append(&mut right.keys);
 
             let mut new_children = Vec::new();
-            new_children.extend(self.children[pos - 1].children.drain(start_idx..));
-            new_children.append(&mut self.children[pos].children);
+            new_children.extend(left.children.drain(start_idx..));
+            new_children.append(&mut right.children);
 
-            self.children[pos].keys = new_keys;
-            self.children[pos].children = new_children;
-            self.children[pos - 1].keys.pop().unwrap()
+            right.keys = new_keys;
+            right.children = new_children;
+            left.keys.pop().unwrap()
         }
     }
 
-    // TODO: Figure out how to avoid copying the destination node's contents unecissarilly
     fn child_steal_from_right_sibling(&mut self, pos: usize) -> K {
         assert!(pos < self.children.len() - 1);
         assert!(self.children[pos + 1].member_count() > self.children[pos].member_count());
-        let end_idx =
-            (self.children[pos + 1].member_count() - self.children[pos].member_count()) / 2;
-
         let (left_children, right_children) = self.children.split_at_mut(pos + 1);
         let left = &mut left_children[pos];
         let right = &mut right_children[0];
+        let end_idx = (right.member_count() - left.member_count()) / 2;
 
         if left.is_leaf() {
             left.keys.extend(right.keys.drain(..end_idx));
