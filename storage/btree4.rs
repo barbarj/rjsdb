@@ -2,7 +2,7 @@
 
 use std::{fmt::Debug, mem};
 
-pub enum InsertResult<K: Ord + Clone + Debug, V: Clone> {
+enum InsertResult<K: Ord + Clone + Debug, V: Clone> {
     Split(K, Node<K, V>),
     Done,
 }
@@ -159,14 +159,14 @@ impl DescriptionLine {
     }
 }
 
-pub struct Node<K: Ord + Clone + Debug, V: Clone> {
+struct Node<K: Ord + Clone + Debug, V: Clone> {
     keys: Vec<K>,
     children: Vec<Node<K, V>>,
     values: Vec<V>,
     fanout_factor: usize,
 }
 impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
-    pub fn new(fanout_factor: usize) -> Self {
+    fn new(fanout_factor: usize) -> Self {
         Node {
             keys: Vec::with_capacity(fanout_factor),
             children: Vec::new(),
@@ -278,7 +278,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> InsertResult<K, V> {
+    fn insert(&mut self, key: K, value: V) -> InsertResult<K, V> {
         if self.is_leaf() {
             self.insert_as_leaf(key, value)
         } else {
@@ -286,7 +286,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    pub fn get(&self, key: &K) -> Option<&V> {
+    fn get(&self, key: &K) -> Option<&V> {
         if self.is_leaf() {
             assert_eq!(self.keys.len(), self.values.len());
             match self.keys.binary_search(key) {
@@ -406,7 +406,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    fn remove(&mut self, key: &K) -> Option<V> {
         if self.is_leaf() {
             if let Ok(pos) = self.keys.binary_search(key) {
                 self.keys.remove(pos);
@@ -462,7 +462,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    pub fn iter(&self) -> BTreeIterator<K, V> {
+    fn iter(&self) -> BTreeIterator<K, V> {
         BTreeIterator::new(self)
     }
 }
@@ -577,7 +577,7 @@ pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
     leaf_idx: usize,
 }
 impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
-    pub fn new(root_node: &'a Node<K, V>) -> Self {
+    fn new(root_node: &'a Node<K, V>) -> Self {
         let mut queue = Vec::new();
         let mut queue_indices = Vec::new();
         let mut node = root_node;
