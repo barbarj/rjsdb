@@ -1104,10 +1104,106 @@ mod tests {
         assert_subtree_valid(&t.root);
     }
 
+    #[test]
+    fn steal_from_left_leaf() {
+        let input_tree = "
+            0: [7, 10] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7] (0)
+            0->1: L[8, 9, 10] (0)
+            0->2: L[11, 12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4, 10] (3)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 6, 7, 8, 9] (0)
+            0->2: L[11, 12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&10);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_left_leaf_edge() {
+        let input_tree = "
+            0: [7] (2)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7] (0)
+            0->1: L[8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4] (2)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 6, 7, 8, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&9);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_leaf() {
+        let input_tree = "
+            0: [8, 11] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7, 8] (0)
+            0->1: L[9, 10, 11] (0)
+            0->2: L[12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [8, 14] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7, 8] (0)
+            0->1: L[9, 10, 12, 13, 14] (0)
+            0->2: L[15, 16, 17, 18, 19] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&11);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_leaf_edge() {
+        let input_tree = "
+            0: [2] (2)
+            0->0: L[0, 1, 2] (0)
+            0->1: L[3, 4, 5, 6, 7, 8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [5] (2)
+            0->0: L[0, 1, 3, 4, 5] (0)
+            0->1: L[6, 7, 8, 9, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&2);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
     // TODO: Write tests for:
     // - Steal from left node
     // - Steal from right node
-    // - Steal from left leaf
-    // - Steal from right leaf
+    // - Steal from left node edge
+    // - Steal from right node edge
     // - Removing a nonexistent key does not alter the tree in any way.
 }
