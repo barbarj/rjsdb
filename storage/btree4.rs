@@ -809,17 +809,50 @@ mod tests {
     }
 
     prop_state_machine! {
-       #![proptest_config(ProptestConfig {
-            // Enable verbose mode to make the state machine test print the
-            // transitions for each case.
-            verbose: 1,
-            max_shrink_iters: 8192,
-            cases: 1024,
-            .. ProptestConfig::default()
-        })]
+        #![proptest_config(ProptestConfig {
+             // Enable verbose mode to make the state machine test print the
+             // transitions for each case.
+             verbose: 1,
+             max_shrink_iters: 8192,
+             cases: 1024,
+             .. ProptestConfig::default()
+         })]
+
+         #[test]
+         fn full_tree_test(sequential 1..500 => BTree<u32, u32>);
+    }
+
+    proptest! {
+        #[test]
+        fn removal_of_nonexistent_val_doesnt_modify_tree(mut vals in prop::collection::vec(prop::num::u32::ANY, 2usize..1000), fanout in 5usize..50) {
+            let to_remove = vals.pop().unwrap();
+            prop_assume!(!vals.contains(&to_remove));
+            let mut t = BTree::new(fanout);
+            for v in vals {
+                t.insert(v, v);
+            }
+            let before_removal = t.to_description();
+            let removed = t.remove(&to_remove);
+            let after_removal = t.to_description();
+            assert!(removed.is_none());
+            assert_eq!(before_removal, after_removal);
+        }
 
         #[test]
-        fn full_tree_test(sequential 1..500 => BTree<u32, u32>);
+        fn get_of_nonexistent_val_doesnt_modify_tree(mut vals in prop::collection::vec(prop::num::u32::ANY, 2usize..1000), fanout in 5usize..50) {
+            let to_get = vals.pop().unwrap();
+            prop_assume!(!vals.contains(&to_get));
+            let mut t = BTree::new(fanout);
+            for v in vals {
+                t.insert(v, v);
+            }
+            let before_removal = t.to_description();
+            let got = t.get(&to_get);
+            let after_removal = t.to_description();
+            assert!(got.is_none());
+            assert_eq!(before_removal, after_removal);
+        }
+
     }
 
     fn construct_leaf(fanout_factor: usize, range: RangeInclusive<u32>) -> Node<u32, u32> {
@@ -1395,7 +1428,4 @@ mod tests {
         assert_eq!(&t.to_description(), &output_tree);
         assert_subtree_valid(&t.root);
     }
-
-    // TODO: Write tests for:
-    // - Removing a nonexistent key does not alter the tree in any way.
 }
