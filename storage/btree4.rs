@@ -1316,8 +1316,86 @@ mod tests {
         assert_subtree_valid(&t.root);
     }
 
+    #[test]
+    fn steal_from_left_node_edge() {
+        let input_tree = "
+            0: [11] (2)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->1->0: L[12, 13] (0)
+            0->1->1: L[14, 15] (0)
+            0->1->2: L[16, 17] (0)
+       ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [7] (2)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 11, 15] (4)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->1->0: L[8, 9] (0)
+            0->1->1: L[10, 11] (0)
+            0->1->2: L[12, 13, 15] (0)
+            0->1->3: L[16, 17] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&14);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_node_edge() {
+        let input_tree = "
+            0: [19] (2)
+            0->0: [15, 17] (3)
+            0->1: [21, 23, 25, 27, 29] (6)
+            0->0->0: L[14, 15] (0)
+            0->0->1: L[16, 17] (0)
+            0->0->2: L[18, 19] (0)
+            0->1->0: L[20, 21] (0)
+            0->1->1: L[22, 23] (0)
+            0->1->2: L[24, 25] (0)
+            0->1->3: L[26, 27] (0)
+            0->1->4: L[28, 29] (0)
+            0->1->5: L[30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [23] (2)
+            0->0: [17, 19, 21] (4)
+            0->1: [25, 27, 29] (4)
+            0->0->0: L[14, 15, 17] (0)
+            0->0->1: L[18, 19] (0)
+            0->0->2: L[20, 21] (0)
+            0->0->3: L[22, 23] (0)
+            0->1->0: L[24, 25] (0)
+            0->1->1: L[26, 27] (0)
+            0->1->2: L[28, 29] (0)
+            0->1->3: L[30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&16);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
     // TODO: Write tests for:
-    // - Steal from left node edge
-    // - Steal from right node edge
     // - Removing a nonexistent key does not alter the tree in any way.
 }
