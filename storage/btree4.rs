@@ -246,9 +246,11 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             InsertResult::Split(split_key, new_node)
         } else {
             match self.keys.binary_search(&key) {
+                // Key exists in leaf. Overwrite the existing value.
                 Ok(pos) => {
                     self.values[pos] = value;
                 }
+                // Key does not exist in leaf, so insert a new key-value pair.
                 Err(pos) => {
                     self.keys.insert(pos, key);
                     self.values.insert(pos, value);
@@ -258,35 +260,38 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
-    fn insert_as_node(&mut self, key: K, value: V) -> InsertResult<K, V> {
+    fn add_child_as_node(&mut self, key: K, child: Node<K, V>, pos: usize) {
         assert!(self.is_node());
-        let pos = match self.keys.binary_search(&key) {
+        self.keys.insert(pos, key);
+        self.children.insert(pos + 1, child);
+    }
+
+    /// For node searches, we usually only care about which child to descend to,
+    /// so an exact match isn't necessary
+    fn search_keys_as_node(&self, key: &K) -> usize {
+        match self.keys.binary_search(key) {
             Ok(pos) => pos,
             Err(pos) => pos,
-        };
+        }
+    }
+
+    fn insert_as_node(&mut self, key: K, value: V) -> InsertResult<K, V> {
+        assert!(self.is_node());
+        let pos = self.search_keys_as_node(&key);
         if let InsertResult::Split(split_key, new_node) = self.children[pos].insert(key, value) {
             if self.is_full() {
                 let (parent_split_key, mut parent_new_node) = self.split_as_node();
                 assert!(parent_new_node.is_node());
-                if split_key > parent_split_key {
-                    let parent_pos = match parent_new_node.keys.binary_search(&split_key) {
-                        Ok(pos) => pos,
-                        Err(pos) => pos,
-                    };
-                    parent_new_node.keys.insert(parent_pos, split_key);
-                    parent_new_node.children.insert(parent_pos + 1, new_node);
+                let node_to_add_to = if split_key > parent_split_key {
+                    &mut parent_new_node
                 } else {
-                    let parent_pos = match self.keys.binary_search(&split_key) {
-                        Ok(pos) => pos,
-                        Err(pos) => pos,
-                    };
-                    self.keys.insert(parent_pos, split_key);
-                    self.children.insert(parent_pos + 1, new_node);
-                }
+                    self
+                };
+                let parent_pos = node_to_add_to.search_keys_as_node(&split_key);
+                node_to_add_to.add_child_as_node(split_key, new_node, parent_pos);
                 InsertResult::Split(parent_split_key, parent_new_node)
             } else {
-                self.keys.insert(pos, split_key);
-                self.children.insert(pos + 1, new_node);
+                self.add_child_as_node(split_key, new_node, pos);
                 InsertResult::Done
             }
         } else {
@@ -312,10 +317,7 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         } else {
             assert!(self.is_node());
             assert_eq!(self.keys.len() + 1, self.children.len());
-            let pos = match self.keys.binary_search(key) {
-                Ok(pos) => pos,
-                Err(pos) => pos,
-            };
+            let pos = self.search_keys_as_node(key);
             self.children[pos].get(key)
         }
     }
@@ -324,8 +326,14 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         self.member_count() < self.fanout_factor / 3
     }
 
+    /// Merging nodes requires space for one additional key
+    /// in order to separate children that were formerly on the edges
     fn can_fit_via_merge(&self, count: usize) -> bool {
-        self.fanout_factor - self.member_count() > count
+        if self.is_leaf() {
+            self.fanout_factor - self.member_count() >= count
+        } else {
+            self.fanout_factor - self.member_count() > count
+        }
     }
 
     fn last_key(&self) -> &K {
@@ -1028,22 +1036,22 @@ mod tests {
     #[test]
     fn merge_right_leaf() {
         let input_tree = "
-            0: [4, 6] (3)
-            0->0: L[0, 1, 2, 3, 4] (0)
-            0->1: L[5, 6] (0)
-            0->2: L[7, 8, 9] (0)
+            0: [5, 7] (3)
+            0->0: L[0, 1, 2, 3, 4, 5] (0)
+            0->1: L[6, 7] (0)
+            0->2: L[8, 9, 10] (0)
         ";
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [4] (2)
-            0->0: L[0, 1, 2, 3, 4] (0)
-            0->1: L[5, 7, 8, 9] (0)
+            0: [5] (2)
+            0->0: L[0, 1, 2, 3, 4, 5] (0)
+            0->1: L[6, 8, 9, 10] (0)
         ";
         let output_tree = trim_lines(output_tree);
 
         let mut t = BTree::from_description(&input_tree, 6);
-        t.remove(&6);
+        t.remove(&7);
 
         assert_eq!(&t.to_description(), &output_tree);
         assert_subtree_valid(&t.root);
