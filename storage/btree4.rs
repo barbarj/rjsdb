@@ -424,7 +424,6 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
             let amount_to_steal = amount_to_steal - 1; // to account for the addition of the join key
             let join_key = left.last_key().clone();
 
-            println!("end_idx: {amount_to_steal}");
             left.keys.push(join_key);
             left.keys.extend(right.keys.drain(..amount_to_steal));
             left.children
@@ -666,7 +665,7 @@ impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> 
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, ops::RangeInclusive};
+    use std::collections::BTreeMap;
 
     use itertools::Itertools;
     use proptest::prelude::*;
@@ -676,7 +675,7 @@ mod tests {
         all_leaves_same_level, all_node_keys_ordered_and_deduped, all_nodes_properly_structured,
         all_nodes_sized_correctly, all_nodes_with_fanout_factor,
         all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
-        root_is_sized_correctly, tree_keys_fully_ordered, BTree, Node,
+        root_is_sized_correctly, tree_keys_fully_ordered, BTree,
     };
 
     fn trim_lines(s: &str) -> String {
@@ -790,12 +789,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.remove(&k);
                     assert!(res.is_some());
-                    BTree::display_subtree(&state.root);
+                    // BTree::display_subtree(&state.root);
                     assert!(state.get(&k).is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.insert(k, v);
-                    BTree::display_subtree(&state.root);
+                    // BTree::display_subtree(&state.root);
                     assert_eq!(state.get(&k), Some(&v));
                 }
             };
@@ -876,13 +875,6 @@ mod tests {
             assert_eq!(before_removal, after_removal);
         }
 
-    }
-
-    fn construct_leaf(fanout_factor: usize, range: RangeInclusive<u32>) -> Node<u32, u32> {
-        let mut leaf = Node::new(fanout_factor);
-        leaf.keys = range.clone().collect();
-        leaf.values = range.collect();
-        leaf
     }
 
     #[test]
