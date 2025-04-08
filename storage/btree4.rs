@@ -46,135 +46,6 @@ impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
     }
 }
 
-#[cfg(test)]
-impl BTree<u32, u32> {
-    /*
-     * An example description looks something like this:
-    0: [12, 23] (3)
-    0->0: [3, 6, 9] (4)
-    0->1: [15, 17, 20] (4)
-    0->2: [28] (2)
-    0->0->0: L[1, 2, 3] (0)
-    0->0->1: L[4, 5, 6] (0)
-    0->0->2: L[7, 8, 9] (0)
-    0->0->3: L[10, 11, 12] (0)
-    0->1->0: L[13, 14, 15] (0)
-    0->1->1: L[16, 17] (0)
-    0->1->2: L[18, 19, 20] (0)
-    0->1->3: L[21, 22, 23] (0)
-    0->2->0: L[24, 25, 26, 27] (0)
-    0->2->1: L[29, 30, 31] (0)
-        */
-    pub fn from_description(description: &str, fanout_factor: usize) -> BTree<u32, u32> {
-        let mut lines = description
-            .trim()
-            .split('\n')
-            .map(|x| x.trim())
-            .map(DescriptionLine::from_str);
-        let mut root = Node::new(fanout_factor);
-        root.keys = lines.next().unwrap().keys;
-        for line in lines {
-            let mut node = &mut root;
-            for i in &line.traversal_path[1..] {
-                if *i >= node.children.len() {
-                    node.children.push(Node::new(fanout_factor));
-                }
-                node = &mut node.children[*i];
-            }
-            if line.is_leaf {
-                node.values = line.keys.clone();
-            }
-            node.keys = line.keys;
-        }
-
-        assert_subtree_valid(&root);
-        BTree { root }
-    }
-
-    fn to_description(&self) -> String {
-        BTree::node_to_description(&self.root)
-    }
-
-    fn node_to_description(node: &Node<u32, u32>) -> String {
-        use std::collections::VecDeque;
-
-        let mut description = String::new();
-        let mut queue = VecDeque::new();
-        queue.push_back((vec![0], node));
-        while let Some((ancestry, node)) = queue.pop_front() {
-            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
-            let path = path_parts.join("->");
-            if node.is_leaf() {
-                let s = format!("{path}: L{:?} ({})\n", node.keys, node.children.len());
-                description.push_str(&s);
-            } else {
-                let s = format!("{path}: {:?} ({})\n", node.keys, node.children.len());
-                description.push_str(&s);
-            }
-            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
-                let mut child_ancestry = ancestry.clone();
-                child_ancestry.push(idx);
-                (child_ancestry, node)
-            }));
-        }
-        description
-    }
-
-    fn display_subtree(root_node: &Node<u32, u32>) {
-        let description = BTree::node_to_description(root_node);
-        print!("{description}");
-    }
-}
-
-#[cfg(test)]
-struct DescriptionLine {
-    traversal_path: Vec<usize>,
-    is_leaf: bool,
-    keys: Vec<u32>,
-    child_count: usize,
-}
-#[cfg(test)]
-impl DescriptionLine {
-    fn from_str(s: &str) -> Self {
-        let mut parts = s.split(": ");
-        let traversal_path = parts
-            .next()
-            .unwrap()
-            .split("->")
-            .map(|x| x.parse::<usize>().unwrap())
-            .collect();
-
-        let second_half = parts.next().unwrap();
-        assert!(second_half.starts_with("L[") || second_half.starts_with("["));
-        let is_leaf = second_half.starts_with("L");
-        let skip_num = if is_leaf { 2 } else { 1 };
-
-        let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
-        let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
-        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
-
-        let child_count = second_half[closing_bracket_pos + 3..]
-            .split(")")
-            .next()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-
-        if is_leaf {
-            assert_eq!(child_count, 0);
-        } else {
-            assert_eq!(keys.len() + 1, child_count);
-        }
-
-        DescriptionLine {
-            traversal_path,
-            is_leaf,
-            keys,
-            child_count,
-        }
-    }
-}
-
 struct Node<K: Ord + Clone + Debug, V: Clone> {
     keys: Vec<K>,
     children: Vec<Node<K, V>>,
@@ -483,6 +354,212 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
     }
 }
 
+pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
+    queue: Vec<&'a Node<K, V>>,
+    queue_indices: Vec<usize>,
+    leaf: &'a Node<K, V>,
+    leaf_idx: usize,
+}
+impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
+    fn new(root_node: &'a Node<K, V>) -> Self {
+        let mut queue = Vec::new();
+        let mut queue_indices = Vec::new();
+        let mut node = root_node;
+        while node.is_node() {
+            let next = &node.children[0];
+            queue.push(node);
+            queue_indices.push(0);
+            node = next;
+        }
+        BTreeIterator {
+            queue,
+            queue_indices,
+            leaf: node,
+            leaf_idx: 0,
+        }
+    }
+}
+
+// Iteration logic
+impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
+    fn ascend_as_needed(&mut self) {
+        while let Some(node) = self.queue.pop() {
+            let idx = self.queue_indices.pop().unwrap();
+            if idx < node.member_count() {
+                self.queue.push(node);
+                self.queue_indices.push(idx + 1);
+            }
+        }
+    }
+
+    fn descend_as_needed(&mut self) {
+        while self.queue.last().unwrap().is_node() {
+            let next = &self.queue.last().unwrap().children[0];
+            self.queue.push(next);
+            self.queue_indices.push(0);
+        }
+        let idx = self.queue_indices.last().unwrap();
+        self.leaf = &self.queue.last().unwrap().children[*idx];
+        self.leaf_idx = 0;
+    }
+
+    fn current_kv_pair(&self) -> (&'a K, &'a V) {
+        (
+            &self.leaf.keys[self.leaf_idx],
+            &self.leaf.values[self.leaf_idx],
+        )
+    }
+
+    fn step(&mut self) -> Option<()> {
+        self.leaf_idx += 1;
+        if self.leaf_idx >= self.leaf.member_count() {
+            self.ascend_as_needed();
+            if self.queue.is_empty() {
+                return None;
+            }
+            self.descend_as_needed();
+        }
+        Some(())
+    }
+}
+impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.step()?;
+        Some(self.current_kv_pair())
+    }
+}
+
+#[cfg(test)]
+impl BTree<u32, u32> {
+    /*
+     * An example description looks something like this:
+    0: [12, 23] (3)
+    0->0: [3, 6, 9] (4)
+    0->1: [15, 17, 20] (4)
+    0->2: [28] (2)
+    0->0->0: L[1, 2, 3] (0)
+    0->0->1: L[4, 5, 6] (0)
+    0->0->2: L[7, 8, 9] (0)
+    0->0->3: L[10, 11, 12] (0)
+    0->1->0: L[13, 14, 15] (0)
+    0->1->1: L[16, 17] (0)
+    0->1->2: L[18, 19, 20] (0)
+    0->1->3: L[21, 22, 23] (0)
+    0->2->0: L[24, 25, 26, 27] (0)
+    0->2->1: L[29, 30, 31] (0)
+        */
+    pub fn from_description(description: &str, fanout_factor: usize) -> BTree<u32, u32> {
+        let mut lines = description
+            .trim()
+            .split('\n')
+            .map(|x| x.trim())
+            .map(DescriptionLine::from_str);
+        let mut root = Node::new(fanout_factor);
+        root.keys = lines.next().unwrap().keys;
+        for line in lines {
+            let mut node = &mut root;
+            for i in &line.traversal_path[1..] {
+                if *i >= node.children.len() {
+                    node.children.push(Node::new(fanout_factor));
+                }
+                node = &mut node.children[*i];
+            }
+            if line.is_leaf {
+                node.values = line.keys.clone();
+            }
+            node.keys = line.keys;
+        }
+
+        assert_subtree_valid(&root);
+        BTree { root }
+    }
+
+    fn to_description(&self) -> String {
+        BTree::node_to_description(&self.root)
+    }
+
+    fn node_to_description(node: &Node<u32, u32>) -> String {
+        use std::collections::VecDeque;
+
+        let mut description = String::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((vec![0], node));
+        while let Some((ancestry, node)) = queue.pop_front() {
+            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
+            let path = path_parts.join("->");
+            if node.is_leaf() {
+                let s = format!("{path}: L{:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            } else {
+                let s = format!("{path}: {:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            }
+            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
+                let mut child_ancestry = ancestry.clone();
+                child_ancestry.push(idx);
+                (child_ancestry, node)
+            }));
+        }
+        description
+    }
+
+    fn display_subtree(root_node: &Node<u32, u32>) {
+        let description = BTree::node_to_description(root_node);
+        print!("{description}");
+    }
+}
+
+#[cfg(test)]
+struct DescriptionLine {
+    traversal_path: Vec<usize>,
+    is_leaf: bool,
+    keys: Vec<u32>,
+    child_count: usize,
+}
+#[cfg(test)]
+impl DescriptionLine {
+    fn from_str(s: &str) -> Self {
+        let mut parts = s.split(": ");
+        let traversal_path = parts
+            .next()
+            .unwrap()
+            .split("->")
+            .map(|x| x.parse::<usize>().unwrap())
+            .collect();
+
+        let second_half = parts.next().unwrap();
+        assert!(second_half.starts_with("L[") || second_half.starts_with("["));
+        let is_leaf = second_half.starts_with("L");
+        let skip_num = if is_leaf { 2 } else { 1 };
+
+        let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
+        let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
+        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+
+        let child_count = second_half[closing_bracket_pos + 3..]
+            .split(")")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        if is_leaf {
+            assert_eq!(child_count, 0);
+        } else {
+            assert_eq!(keys.len() + 1, child_count);
+        }
+
+        DescriptionLine {
+            traversal_path,
+            is_leaf,
+            keys,
+            child_count,
+        }
+    }
+}
+
 #[cfg(test)]
 fn all_leaves_same_level(root: &Node<u32, u32>) -> bool {
     fn leaf_levels(node: &Node<u32, u32>, level: usize) -> Vec<usize> {
@@ -584,83 +661,6 @@ fn assert_subtree_valid(node: &Node<u32, u32>) {
     assert!(all_nodes_sized_correctly(node));
     assert!(root_is_sized_correctly(node));
     assert!(all_leaves_same_level(node));
-}
-
-pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
-    queue: Vec<&'a Node<K, V>>,
-    queue_indices: Vec<usize>,
-    leaf: &'a Node<K, V>,
-    leaf_idx: usize,
-}
-impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
-    fn new(root_node: &'a Node<K, V>) -> Self {
-        let mut queue = Vec::new();
-        let mut queue_indices = Vec::new();
-        let mut node = root_node;
-        while node.is_node() {
-            let next = &node.children[0];
-            queue.push(node);
-            queue_indices.push(0);
-            node = next;
-        }
-        BTreeIterator {
-            queue,
-            queue_indices,
-            leaf: node,
-            leaf_idx: 0,
-        }
-    }
-}
-
-// Iteration logic
-impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
-    fn ascend_as_needed(&mut self) {
-        while let Some(node) = self.queue.pop() {
-            let idx = self.queue_indices.pop().unwrap();
-            if idx < node.member_count() {
-                self.queue.push(node);
-                self.queue_indices.push(idx + 1);
-            }
-        }
-    }
-
-    fn descend_as_needed(&mut self) {
-        while self.queue.last().unwrap().is_node() {
-            let next = &self.queue.last().unwrap().children[0];
-            self.queue.push(next);
-            self.queue_indices.push(0);
-        }
-        let idx = self.queue_indices.last().unwrap();
-        self.leaf = &self.queue.last().unwrap().children[*idx];
-        self.leaf_idx = 0;
-    }
-
-    fn current_kv_pair(&self) -> (&'a K, &'a V) {
-        (
-            &self.leaf.keys[self.leaf_idx],
-            &self.leaf.values[self.leaf_idx],
-        )
-    }
-
-    fn step(&mut self) -> Option<()> {
-        self.leaf_idx += 1;
-        if self.leaf_idx >= self.leaf.member_count() {
-            self.ascend_as_needed();
-            if self.queue.is_empty() {
-                return None;
-            }
-            self.descend_as_needed();
-        }
-        Some(())
-    }
-}
-impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> {
-    type Item = (&'a K, &'a V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.step()?;
-        Some(self.current_kv_pair())
-    }
 }
 
 #[cfg(test)]
