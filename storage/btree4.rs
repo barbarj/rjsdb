@@ -349,15 +349,13 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         assert!(self.children[left_child_idx]
             .can_fit_via_merge(self.children[left_child_idx + 1].member_count()));
         let mut right_child = self.children.remove(left_child_idx + 1);
-        if self.children[left_child_idx].is_node() {
+        let left_child = &mut self.children[left_child_idx];
+        if left_child.is_node() {
             let join_key = self.keys.remove(left_child_idx);
-            let left_child = &mut self.children[left_child_idx];
             left_child.keys.push(join_key);
             left_child.keys.append(&mut right_child.keys);
             left_child.children.append(&mut right_child.children);
         } else {
-            // is leaf
-            let left_child = &mut self.children[left_child_idx];
             assert!(left_child.is_leaf());
             left_child.keys.append(&mut right_child.keys);
             left_child.values.append(&mut right_child.values);
@@ -365,6 +363,8 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
+    /// Returns the new split_key separating these children (so the one pointing at the child at
+    /// position `pos - 1`)
     fn child_steal_from_left_sibling(&mut self, pos: usize) -> K {
         assert!(pos > 0);
         assert!(self.children[pos - 1].member_count() > self.children[pos].member_count());
@@ -405,27 +405,30 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
         }
     }
 
+    /// Returns the new split_key separating these children (so the one pointing at the child at
+    /// position `pos`)
     fn child_steal_from_right_sibling(&mut self, pos: usize) -> K {
         assert!(pos < self.children.len() - 1);
         assert!(self.children[pos + 1].member_count() > self.children[pos].member_count());
         let (left_children, right_children) = self.children.split_at_mut(pos + 1);
         let left = &mut left_children[pos];
         let right = &mut right_children[0];
-        let end_idx = (right.member_count() - left.member_count()) / 2;
+        let amount_to_steal = (right.member_count() - left.member_count()) / 2;
 
         if left.is_leaf() {
-            left.keys.extend(right.keys.drain(..end_idx));
-            left.values.extend(right.values.drain(..end_idx));
+            left.keys.extend(right.keys.drain(..amount_to_steal));
+            left.values.extend(right.values.drain(..amount_to_steal));
             left.last_key().clone()
         } else {
-            assert!(end_idx > 0);
-            let end_idx = end_idx - 1; // to account for the addition of the join key
+            assert!(amount_to_steal > 0);
+            let amount_to_steal = amount_to_steal - 1; // to account for the addition of the join key
             let join_key = left.last_key().clone();
 
-            println!("end_idx: {end_idx}");
+            println!("end_idx: {amount_to_steal}");
             left.keys.push(join_key);
-            left.keys.extend(right.keys.drain(..end_idx));
-            left.children.extend(right.children.drain(..end_idx + 1));
+            left.keys.extend(right.keys.drain(..amount_to_steal));
+            left.children
+                .extend(right.children.drain(..amount_to_steal + 1));
             right.keys.remove(0)
         }
     }
@@ -440,10 +443,8 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                 None
             }
         } else {
-            let pos = match self.keys.binary_search(key) {
-                Ok(pos) => pos,
-                Err(pos) => pos,
-            };
+            assert!(self.is_node());
+            let pos = self.search_keys_as_node(key);
             let res = self.children[pos].remove(key);
             if self.children[pos].below_min_size() {
                 if pos > 0
@@ -463,17 +464,9 @@ impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
                     // right edge case
                     self.keys[pos - 1] = self.child_steal_from_left_sibling(pos);
                 } else {
-                    // steal from smaller of siblings
-                    let left_size = if pos > 0 {
-                        self.children[pos - 1].member_count()
-                    } else {
-                        0
-                    };
-                    let right_size = if pos < self.children.len() - 1 {
-                        self.children[pos + 1].member_count()
-                    } else {
-                        0
-                    };
+                    // steal from smaller of siblings, to in theory, move less data around
+                    let left_size = self.children[pos - 1].member_count();
+                    let right_size = self.children[pos + 1].member_count();
                     if left_size < right_size {
                         self.keys[pos - 1] = self.child_steal_from_left_sibling(pos);
                     } else {
@@ -517,9 +510,10 @@ fn root_is_sized_correctly(root: &Node<u32, u32>) -> bool {
 fn all_nodes_sized_correctly(root: &Node<u32, u32>) -> bool {
     fn all_nodes_sized_correctly_not_root(node: &Node<u32, u32>) -> bool {
         if node.is_leaf() {
-            return true;
+            return node.member_count() <= node.fanout_factor;
         }
-        node.keys.len() >= node.fanout_factor / 3
+        node.member_count() >= node.fanout_factor / 3
+            && node.member_count() <= node.fanout_factor
             && node.children.iter().all(all_nodes_sized_correctly_not_root)
     }
 
@@ -574,8 +568,7 @@ fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<u32, u32>) -> bool
 
 #[cfg(test)]
 fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> bool {
-    node.member_count() <= node.fanout_factor
-        && node.fanout_factor == fanout_factor
+    node.fanout_factor == fanout_factor
         && node
             .children
             .iter()
@@ -619,38 +612,55 @@ impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
         }
     }
 }
+
+// Iteration logic
+impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
+    fn ascend_as_needed(&mut self) {
+        while let Some(node) = self.queue.pop() {
+            let idx = self.queue_indices.pop().unwrap();
+            if idx < node.member_count() {
+                self.queue.push(node);
+                self.queue_indices.push(idx + 1);
+            }
+        }
+    }
+
+    fn descend_as_needed(&mut self) {
+        while self.queue.last().unwrap().is_node() {
+            let next = &self.queue.last().unwrap().children[0];
+            self.queue.push(next);
+            self.queue_indices.push(0);
+        }
+        let idx = self.queue_indices.last().unwrap();
+        self.leaf = &self.queue.last().unwrap().children[*idx];
+        self.leaf_idx = 0;
+    }
+
+    fn current_kv_pair(&self) -> (&'a K, &'a V) {
+        (
+            &self.leaf.keys[self.leaf_idx],
+            &self.leaf.values[self.leaf_idx],
+        )
+    }
+
+    fn step(&mut self) -> Option<()> {
+        self.leaf_idx += 1;
+        if self.leaf_idx >= self.leaf.member_count() {
+            self.ascend_as_needed();
+            if self.queue.is_empty() {
+                return None;
+            }
+            self.descend_as_needed();
+        }
+        Some(())
+    }
+}
 impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.leaf_idx >= self.leaf.member_count() {
-            // traverse up as needed
-            while let Some(node) = self.queue.pop() {
-                let idx = self.queue_indices.pop().unwrap();
-                if idx < node.member_count() {
-                    self.queue.push(node);
-                    self.queue_indices.push(idx + 1);
-                }
-            }
-            if self.queue.is_empty() {
-                return None;
-            }
-            // traverse down as needed
-            while self.queue.last().unwrap().is_node() {
-                let next = &self.queue.last().unwrap().children[0];
-                self.queue.push(next);
-                self.queue_indices.push(0);
-            }
-            let idx = self.queue_indices.last().unwrap();
-            self.leaf = &self.queue.last().unwrap().children[*idx];
-            self.leaf_idx = 0;
-        }
-        let out = (
-            &self.leaf.keys[self.leaf_idx],
-            &self.leaf.values[self.leaf_idx],
-        );
-        self.leaf_idx += 1;
-        Some(out)
+        self.step()?;
+        Some(self.current_kv_pair())
     }
 }
 
