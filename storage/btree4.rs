@@ -2,6 +2,7 @@
 
 use std::{fmt::Debug, mem};
 
+/// InsertResult::Split contains the split key and the new (right-hand) node
 enum InsertResult<K: Ord + Clone + Debug, V: Clone> {
     Split(K, Node<K, V>),
     Done,
@@ -130,6 +131,7 @@ struct DescriptionLine {
     traversal_path: Vec<usize>,
     is_leaf: bool,
     keys: Vec<u32>,
+    child_count: usize,
 }
 #[cfg(test)]
 impl DescriptionLine {
@@ -149,12 +151,26 @@ impl DescriptionLine {
 
         let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
         let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
-        let keys = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+
+        let child_count = second_half[closing_bracket_pos + 3..]
+            .split(")")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        if is_leaf {
+            assert_eq!(child_count, 0);
+        } else {
+            assert_eq!(keys.len() + 1, child_count);
+        }
 
         DescriptionLine {
             traversal_path,
             is_leaf,
             keys,
+            child_count,
         }
     }
 }
@@ -988,7 +1004,7 @@ mod tests {
     #[test]
     fn merge_left_leaf() {
         let input_tree = "
-            0: [2, 6] (2)
+            0: [2, 6] (3)
             0->0: L[0, 1, 2] (0)
             0->1: L[5, 6] (0)
             0->2: L[7, 8, 9, 10] (0)
