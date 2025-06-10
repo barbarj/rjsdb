@@ -1,5 +1,5 @@
 [workspace]
-members = ["storage"]
+members = [ "serialize","storage"]
 resolver = "2"
 
 [workspace.package]
