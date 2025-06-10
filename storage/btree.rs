@@ -1,1424 +1,1446 @@
 #![allow(dead_code)]
-use std::{
-    cell::RefCell,
-    cmp::Ordering,
-    fmt::Debug,
-    io::Error as IoError,
-    os::{fd::RawFd, unix::fs::MetadataExt},
-    rc::Rc,
-};
 
-use crate::{
-    pager::{Page, PageError, PageId, PageKind, Pager, PagerError, PAGE_BUFFER_SIZE},
-    serialize::{Deserialize, SerdeError, Serialize},
-};
+use std::{fmt::Debug, mem};
 
-/*
- * GOALS:
- * - Support heap-location indices for Row_id as key
- *   - Not bothering about wraparound
- *   - Leaf nodes store HeapInsertionData
- *   - Support point queries by row id, and table scans
- * - Support row_id indices with user-defined primary key as key
- *   - Leaf nodes store row id
- *   - support same point queries and range scans
- *
- * FUTURE GOALS:
- * - Support secondary indices
- *
- */
-
-/*
- * NOTE: Cells point left. The rightmost cell always contains the rightmost key
- */
-
-/*
-* BTree Node Cell Layout:
-*
-* 0                  8             8 + key_size
-* +------------------+------------------+
-* | [u64] PageId     | [Serialized] Key |
-* +------------------+------------------+
-*
- * BTree Leaf Not Heap Cell Layout:
-*
-* 0                  8             8 + key_size
-* +------------------+------------------+
-* | [u64] row_id     | [Serialized] Key |
-* +------------------+------------------+
-
-*
-* BTree Leaf Heap Cell Layout:
-*
-* 0                  8                     10              10 + key_size
-* +------------------+---------------------+------------------+
-* | [u64] PageId     | [u16] cell_position | [Serialized] Key |
-* +------------------+---------------------+------------------+
-* - This points to the HEAP page id
-*
-*
-*/
-const NODE_CELL_KEY_OFFSET: usize = 8;
-const LEAF_NOTHEAP_CELL_KEY_OFFSET: usize = 8;
-const LEAF_HEAP_CELL_KEY_OFFSET: usize = 10;
-
-const MIN_FANOUT_FACTOR: u16 = 4;
-const MAX_BTREE_CELL_SIZE: u16 = PAGE_BUFFER_SIZE / MIN_FANOUT_FACTOR;
-
-const METAROOT_ROOT_PTR_LOCATION: u16 = 0;
-
-const SIBLING_LEFT_PTR_LOCATION: u16 = 0;
-const SIBLING_RIGHT_PTR_LOCATION: u16 = 1;
-const BTREE_FIRST_CELL_LOCATION: u16 = 2;
-
-#[derive(Debug, PartialEq)]
-enum SearchResult {
-    Found(u16),
-    NotFound(u16),
+/// InsertResult::Split contains the split key and the new (right-hand) node
+enum InsertResult<K: Ord + Clone + Debug, V: Clone> {
+    Split(K, Node<K, V>),
+    Done,
 }
 
-#[derive(Debug)]
-pub enum BTreeError {
-    Serde(SerdeError),
-    Pager(PagerError),
-    Page(PageError),
-    Io(IoError),
-    KeyAlreadyExists,
-    KeyTooLarge,
+pub struct BTree<K: Ord + Clone + Debug, V: Clone> {
+    root: Node<K, V>,
 }
-impl From<SerdeError> for BTreeError {
-    fn from(value: SerdeError) -> Self {
-        Self::Serde(value)
-    }
-}
-impl From<PagerError> for BTreeError {
-    fn from(value: PagerError) -> Self {
-        Self::Pager(value)
-    }
-}
-impl From<PageError> for BTreeError {
-    fn from(value: PageError) -> Self {
-        Self::Page(value)
-    }
-}
-impl From<IoError> for BTreeError {
-    fn from(value: IoError) -> Self {
-        Self::Io(value)
-    }
-}
-
-#[derive(Clone)]
-struct BTreeNode {
-    page_ref: Rc<RefCell<Page>>,
-}
-impl BTreeNode {
-    fn build(page_ref: Rc<RefCell<Page>>) -> Self {
-        let page = page_ref.borrow();
-        assert!(
-            page.cell_count() >= 2,
-            "This page should already contain sibling pointers"
-        );
-        drop(page);
-
-        BTreeNode { page_ref }
+impl<K: Ord + Clone + Debug, V: Clone> BTree<K, V> {
+    pub fn new(fanout_factor: usize) -> Self {
+        let root = Node::new(fanout_factor);
+        BTree { root }
     }
 
-    fn build_new(page_ref: Rc<RefCell<Page>>) -> Result<Self, BTreeError> {
-        let mut page = page_ref.borrow_mut();
-        assert_eq!(page.cell_count(), 0, "This should be a fresh page");
-
-        let mut left_ptr_bytes = Vec::with_capacity(8);
-        page.id().write_to_bytes(&mut left_ptr_bytes)?;
-        let mut right_ptr_bytes = Vec::with_capacity(8);
-        page.id().write_to_bytes(&mut right_ptr_bytes)?;
-
-        page.insert_cell(SIBLING_LEFT_PTR_LOCATION, &left_ptr_bytes)?;
-        page.insert_cell(SIBLING_RIGHT_PTR_LOCATION, &right_ptr_bytes)?;
-        drop(page);
-
-        Ok(BTreeNode { page_ref })
-    }
-
-    fn page_id(&self) -> PageId {
-        let page = self.page_ref.borrow();
-        page.id()
-    }
-
-    fn total_free_space(&self) -> u16 {
-        let page = self.page_ref.borrow();
-        page.total_free_space()
-    }
-
-    fn member_count(&self) -> u16 {
-        let page = self.page_ref.borrow();
-        page.cell_count() - BTREE_FIRST_CELL_LOCATION
-    }
-
-    fn left_sibling_id(&self) -> Result<Option<PageId>, BTreeError> {
-        let page = self.page_ref.borrow();
-        let cell = page.get_cell(SIBLING_LEFT_PTR_LOCATION);
-        let mut reader = &cell[..];
-        let sibling_id = PageId::from_bytes(&mut reader, &())?;
-        if sibling_id != self.page_id() {
-            Ok(Some(sibling_id))
-        } else {
-            Ok(None)
+    pub fn insert(&mut self, key: K, value: V) {
+        let insert_res = self.root.insert(key, value);
+        if let InsertResult::Split(split_key, new_node) = insert_res {
+            let fanout_factor = self.root.fanout_factor;
+            let old_root = mem::replace(&mut self.root, Node::new(fanout_factor));
+            self.root.keys.push(split_key);
+            self.root.children.extend([old_root, new_node]);
         }
     }
 
-    fn right_sibling_id(&self) -> Result<Option<PageId>, BTreeError> {
-        let page = self.page_ref.borrow();
-        let cell = page.get_cell(SIBLING_RIGHT_PTR_LOCATION);
-        let mut reader = &cell[..];
-        let sibling_id = PageId::from_bytes(&mut reader, &())?;
-        if sibling_id != self.page_id() {
-            Ok(Some(sibling_id))
-        } else {
-            Ok(None)
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.root.get(key)
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let res = self.root.remove(key);
+
+        if self.root.keys.is_empty() && self.root.children.len() == 1 {
+            self.root = self.root.children.pop().unwrap();
+        }
+
+        res
+    }
+
+    pub fn iter(&self) -> BTreeIterator<K, V> {
+        self.root.iter()
+    }
+}
+
+struct Node<K: Ord + Clone + Debug, V: Clone> {
+    keys: Vec<K>,
+    children: Vec<Node<K, V>>,
+    values: Vec<V>,
+    fanout_factor: usize,
+}
+impl<K: Ord + Clone + Debug, V: Clone> Node<K, V> {
+    fn new(fanout_factor: usize) -> Self {
+        Node {
+            keys: Vec::with_capacity(fanout_factor),
+            children: Vec::new(),
+            values: Vec::new(),
+            fanout_factor,
         }
     }
 
-    fn kind(&self) -> NodeKind {
-        let page = self.page_ref.borrow();
-        match page.kind() {
-            PageKind::BTreeNode => NodeKind::Node,
-            PageKind::BTreeLeafNotHeap => NodeKind::NonHeapLeaf,
-            PageKind::BTreeLeafHeap => NodeKind::HeapLeaf,
-            PageKind::Heap | PageKind::Unitialized | PageKind::BTreeMetaRoot => unreachable!(),
-        }
+    fn member_count(&self) -> usize {
+        self.keys.len()
     }
 
-    fn key_from_cell<K>(&self, position: u16) -> Result<K, BTreeError>
-    where
-        K: Deserialize<ExtraInfo = ()>,
-    {
-        let page = self.page_ref.borrow();
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        assert!(position < page.cell_count());
-        assert!(!matches!(
-            page.kind(),
-            PageKind::Heap | PageKind::BTreeMetaRoot
-        ));
+    fn is_full(&self) -> bool {
+        self.member_count() == self.fanout_factor
+    }
 
-        let cell_bytes = page.get_cell(position);
-        let mut reader = match page.kind() {
-            PageKind::BTreeNode => &cell_bytes[NODE_CELL_KEY_OFFSET..],
-            PageKind::BTreeLeafHeap => &cell_bytes[LEAF_HEAP_CELL_KEY_OFFSET..],
-            PageKind::BTreeLeafNotHeap => todo!(),
-            PageKind::Heap | PageKind::BTreeMetaRoot | PageKind::Unitialized => unreachable!(),
+    fn is_leaf(&self) -> bool {
+        let res = self.children.is_empty();
+        assert!(self.keys.is_empty() || self.values.is_empty() != res);
+        res
+    }
+
+    fn is_node(&self) -> bool {
+        !self.is_leaf()
+    }
+
+    fn split_as_leaf(&mut self) -> (K, Node<K, V>) {
+        let half = self.fanout_factor / 2;
+        let new_node = Node {
+            keys: self.keys.drain(half..).collect(),
+            children: Vec::new(),
+            values: self.values.drain(half..).collect(),
+            fanout_factor: self.fanout_factor,
         };
-        Ok(K::from_bytes(&mut reader, &())?)
+        let split_key = self.keys.last().unwrap().clone();
+        (split_key, new_node)
     }
 
-    fn rightmost_key<K>(&self) -> Result<K, BTreeError>
-    where
-        K: Deserialize<ExtraInfo = ()>,
-    {
-        self.key_from_cell::<K>(self.member_count() - 1)
-    }
-
-    fn page_id_from_cell(&self, position: u16) -> Result<PageId, BTreeError> {
-        assert!(position < self.member_count());
-        assert!(matches!(self.kind(), NodeKind::Node));
-
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        let page = self.page_ref.borrow();
-        let cell_bytes = page.get_cell(position);
-        let mut reader = &cell_bytes[0..];
-        Ok(PageId::from_bytes(&mut reader, &())?)
-    }
-
-    fn heap_insertion_data_from_leaf_cell(
-        &self,
-        position: u16,
-    ) -> Result<HeapInsertionData, BTreeError> {
-        assert!(position < self.member_count());
-        assert!(matches!(self.kind(), NodeKind::HeapLeaf));
-
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        let page = self.page_ref.borrow();
-        let cell_bytes = page.get_cell(position);
-        let mut reader = &cell_bytes[..];
-        let heap_page_id = PageId::from_bytes(&mut reader, &())?;
-        let page_position = u16::from_bytes(&mut reader, &())?;
-        Ok(HeapInsertionData {
-            page_id: heap_page_id,
-            cell_position: page_position,
-        })
-    }
-
-    fn insert_cell(&mut self, position: u16, data: &[u8]) -> Result<(), BTreeError> {
-        let mut page = self.page_ref.borrow_mut();
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        page.insert_cell(position, data)?;
-        Ok(())
-    }
-
-    fn get_cell(&self, position: u16) -> Vec<u8> {
-        assert!(position < self.member_count());
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        let page = self.page_ref.borrow();
-        page.get_cell(position)
-    }
-
-    fn remove_cell(&mut self, position: u16) {
-        assert!(position < self.member_count());
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        let mut page = self.page_ref.borrow_mut();
-        page.remove_cell(position);
-    }
-
-    fn cell_size(&self, position: u16) -> u16 {
-        assert!(position < self.member_count());
-        let position = position + BTREE_FIRST_CELL_LOCATION;
-        let page = self.page_ref.borrow();
-        page.cell_size(position)
-    }
-
-    fn update_sibling_pointer(
-        &mut self,
-        direction: SiblingPointerDirection,
-        new_page_id: PageId,
-    ) -> Result<(), BTreeError> {
-        let update_loc = match direction {
-            SiblingPointerDirection::Left => SIBLING_LEFT_PTR_LOCATION,
-            SiblingPointerDirection::Right => SIBLING_RIGHT_PTR_LOCATION,
+    fn split_as_node(&mut self) -> (K, Node<K, V>) {
+        let half = self.fanout_factor / 2;
+        let new_node = Node {
+            keys: self.keys.drain(half + 1..).collect(),
+            children: self.children.drain(half + 1..).collect(),
+            values: Vec::new(),
+            fanout_factor: self.fanout_factor,
         };
-        let mut page = self.page_ref.borrow_mut();
-        page.remove_cell(update_loc);
-
-        let mut cell_bytes = Vec::with_capacity(8);
-        new_page_id.write_to_bytes(&mut cell_bytes)?;
-
-        page.insert_cell(update_loc, &cell_bytes)?;
-        Ok(())
+        let split_key = self.keys.pop().unwrap();
+        (split_key, new_node)
     }
 
-    /// Searches the page. If the page contains the key (i.e., this is a data page and the key is
-    /// present, or is not a data page, but happens to have a split key matching the key), return
-    /// a SearchResult::Found containing the cell location the key was found in.
-    /// If the key was not found, return a SearchResult::NotFound containing the location that the
-    /// key would belong at if inserted into the page.
-    fn binary_search_for_key<K>(&self, key: &K) -> Result<SearchResult, BTreeError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()>,
-    {
-        if self.member_count() == 0 {
-            return Ok(SearchResult::NotFound(0));
-        }
-        let mut bottom = 0;
-        let mut top = self.member_count() - 1;
-        let mut pos = (top - bottom) / 2;
-        while bottom < top {
-            let pos_key = self.key_from_cell::<K>(pos)?;
-            match key.cmp(&pos_key) {
-                Ordering::Less => {
-                    if pos == bottom {
-                        break;
-                    }
-                    top = pos - 1;
-                }
-                Ordering::Greater => {
-                    bottom = pos + 1;
-                }
-                Ordering::Equal => return Ok(SearchResult::Found(pos)),
+    fn insert_as_leaf(&mut self, key: K, value: V) -> InsertResult<K, V> {
+        assert!(self.is_leaf());
+        if self.is_full() {
+            let (split_key, mut new_node) = self.split_as_leaf();
+            assert!(new_node.is_leaf());
+            if key > split_key {
+                new_node.insert_as_leaf(key, value);
+            } else {
+                self.insert_as_leaf(key, value);
             }
-            pos = bottom + ((top - bottom) / 2);
+            InsertResult::Split(split_key, new_node)
+        } else {
+            match self.keys.binary_search(&key) {
+                // Key exists in leaf. Overwrite the existing value.
+                Ok(pos) => {
+                    self.values[pos] = value;
+                }
+                // Key does not exist in leaf, so insert a new key-value pair.
+                Err(pos) => {
+                    self.keys.insert(pos, key);
+                    self.values.insert(pos, value);
+                }
+            }
+            InsertResult::Done
         }
-        let pos_key = self.key_from_cell::<K>(pos)?;
-        match key.cmp(&pos_key) {
-            Ordering::Equal => Ok(SearchResult::Found(pos)),
-            Ordering::Greater => Ok(SearchResult::NotFound(pos + 1)),
-            Ordering::Less => {
-                if bottom == 0 {
-                    Ok(SearchResult::NotFound(0))
+    }
+
+    fn add_child_as_node(&mut self, key: K, child: Node<K, V>, pos: usize) {
+        assert!(self.is_node());
+        self.keys.insert(pos, key);
+        self.children.insert(pos + 1, child);
+    }
+
+    /// For node searches, we usually only care about which child to descend to,
+    /// so an exact match isn't necessary
+    fn search_keys_as_node(&self, key: &K) -> usize {
+        match self.keys.binary_search(key) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        }
+    }
+
+    fn insert_as_node(&mut self, key: K, value: V) -> InsertResult<K, V> {
+        assert!(self.is_node());
+        let pos = self.search_keys_as_node(&key);
+        if let InsertResult::Split(split_key, new_node) = self.children[pos].insert(key, value) {
+            if self.is_full() {
+                let (parent_split_key, mut parent_new_node) = self.split_as_node();
+                assert!(parent_new_node.is_node());
+                let node_to_add_to = if split_key > parent_split_key {
+                    &mut parent_new_node
                 } else {
-                    Ok(SearchResult::NotFound(pos))
-                }
+                    self
+                };
+                let parent_pos = node_to_add_to.search_keys_as_node(&split_key);
+                node_to_add_to.add_child_as_node(split_key, new_node, parent_pos);
+                InsertResult::Split(parent_split_key, parent_new_node)
+            } else {
+                self.add_child_as_node(split_key, new_node, pos);
+                InsertResult::Done
             }
-        }
-    }
-}
-
-enum SiblingPointerDirection {
-    Left,
-    Right,
-}
-
-enum NodeKind {
-    Node,
-    HeapLeaf,
-    NonHeapLeaf,
-}
-impl NodeKind {
-    fn into_page_kind(self) -> PageKind {
-        match self {
-            Self::Node => PageKind::BTreeNode,
-            Self::HeapLeaf => PageKind::BTreeLeafHeap,
-            Self::NonHeapLeaf => PageKind::BTreeLeafNotHeap,
-        }
-    }
-}
-
-pub struct BTree {
-    pager: Rc<RefCell<Pager>>,
-    max_cell_size: u16,
-    fd: RawFd,
-}
-impl BTree {
-    pub fn init(pager_ref: Rc<RefCell<Pager>>, fd: RawFd) -> Result<Self, BTreeError> {
-        let mut btree = BTree {
-            pager: pager_ref,
-            max_cell_size: MAX_BTREE_CELL_SIZE,
-            fd,
-        };
-
-        let pager = btree.pager.borrow();
-        let file = pager.file_from_fd(fd).unwrap();
-        let file_size = file.metadata()?.size();
-        drop(pager);
-        if file_size == 0 {
-            btree.init_meta_root()?;
-        }
-
-        Ok(btree)
-    }
-
-    fn new_node(&mut self, kind: NodeKind) -> Result<BTreeNode, BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-        let new_page_ref = pager.new_page(self.fd, kind.into_page_kind())?;
-        let node = BTreeNode::build_new(new_page_ref)?;
-        Ok(node)
-    }
-
-    fn init_meta_root(&mut self) -> Result<(), BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-
-        // init meta root page
-        let meta_root_page_ref = pager.new_page(self.fd, PageKind::BTreeMetaRoot)?;
-        let mut meta_root_page = meta_root_page_ref.borrow_mut();
-        assert_eq!(meta_root_page.id(), 0);
-
-        // say that page 1 is the root
-        let mut id_bytes = Vec::new();
-        1u64.write_to_bytes(&mut id_bytes)?;
-        meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &id_bytes)?;
-
-        // init new root page (with id of 1)
-        drop(pager);
-        let root_node = self.new_node(NodeKind::HeapLeaf)?;
-        assert_eq!(root_node.page_id(), 1);
-
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn with_max_cell_size(pager: Rc<RefCell<Pager>>, fd: RawFd, max_cell_size: u16) -> Self {
-        BTree {
-            pager,
-            max_cell_size,
-            fd,
+        } else {
+            InsertResult::Done
         }
     }
 
-    fn force_flush(&self) -> Result<(), BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-        pager.flush_all()?;
-        Ok(())
-    }
-
-    fn make_new_root(&mut self, first_cell: &[u8], second_cell: &[u8]) -> Result<(), BTreeError> {
-        // set up new root
-        let mut new_root_node = self.new_node(NodeKind::Node)?;
-        new_root_node.insert_cell(0, first_cell)?;
-        new_root_node.insert_cell(1, second_cell)?;
-        let mut new_root_page_id_bytes = Vec::new();
-        new_root_node
-            .page_id()
-            .write_to_bytes(&mut new_root_page_id_bytes)?;
-
-        // update meta root page
-        let mut pager = self.pager.borrow_mut();
-        let meta_root_ref = pager.get_page(self.fd, 0)?;
-        let mut meta_root_page = meta_root_ref.borrow_mut();
-        //remove old id
-        meta_root_page.remove_cell(METAROOT_ROOT_PTR_LOCATION);
-        //add new id
-        meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &new_root_page_id_bytes)?;
-
-        Ok(())
-    }
-
-    fn get_root_node(&self) -> Result<BTreeNode, BTreeError> {
-        let page_id = self.get_root_page_id()?;
-        let mut pager = self.pager.borrow_mut();
-        let page_ref = pager.get_page(self.fd, page_id)?;
-        Ok(BTreeNode::build(page_ref))
-    }
-
-    fn get_root_page_id(&self) -> Result<PageId, BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-        let meta_root_ref = pager.get_page(self.fd, 0)?;
-        let meta_root_page = meta_root_ref.borrow();
-        assert!(matches!(meta_root_page.kind(), PageKind::BTreeMetaRoot));
-        let ptr_bytes = meta_root_page.get_cell(METAROOT_ROOT_PTR_LOCATION);
-        let mut reader = &ptr_bytes[..];
-        Ok(PageId::from_bytes(&mut reader, &())?)
-    }
-
-    pub fn contains_key<K>(&self, key: &K) -> Result<bool, BTreeError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        let traversal_res = self.traverse_to_leaf(key)?;
-        match traversal_res.leaf.binary_search_for_key(key)? {
-            SearchResult::Found(_) => Ok(true),
-            SearchResult::NotFound(_) => Ok(false),
+    fn insert(&mut self, key: K, value: V) -> InsertResult<K, V> {
+        if self.is_leaf() {
+            self.insert_as_leaf(key, value)
+        } else {
+            self.insert_as_node(key, value)
         }
     }
-}
 
-#[derive(Clone)]
-struct TraversalResult {
-    leaf: BTreeNode,
-    breadcrumbs: Vec<BTreeNode>,
-}
-
-impl BTree {
-    fn node_from_page_id(&self, page_id: PageId) -> Result<BTreeNode, BTreeError> {
-        let mut pager = self.pager.borrow_mut();
-        let node = BTreeNode::build(pager.get_page(self.fd, page_id)?);
-        Ok(node)
+    fn get(&self, key: &K) -> Option<&V> {
+        if self.is_leaf() {
+            assert_eq!(self.keys.len(), self.values.len());
+            match self.keys.binary_search(key) {
+                Ok(pos) => Some(&self.values[pos]),
+                Err(_) => None,
+            }
+        } else {
+            assert!(self.is_node());
+            assert_eq!(self.keys.len() + 1, self.children.len());
+            let pos = self.search_keys_as_node(key);
+            self.children[pos].get(key)
+        }
     }
 
-    fn traverse_to_leaf<K>(&self, key: &K) -> Result<TraversalResult, BTreeError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()>,
-    {
-        let mut node = self.get_root_node()?;
-        let mut breadcrumbs = Vec::new();
-        // traverse until we hit a leaf page
-        while !matches!(node.kind(), NodeKind::HeapLeaf) {
-            let position = match node.binary_search_for_key(key)? {
-                SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => {
-                    // if the key is greater than our rightmost, go-down the rightmost path anyways
-                    if pos == node.member_count() {
-                        pos - 1
+    fn below_min_size(&self) -> bool {
+        self.member_count() < self.fanout_factor / 3
+    }
+
+    /// Merging nodes requires space for one additional key
+    /// in order to separate children that were formerly on the edges
+    fn can_fit_via_merge(&self, count: usize) -> bool {
+        if self.is_leaf() {
+            self.fanout_factor - self.member_count() >= count
+        } else {
+            self.fanout_factor - self.member_count() > count
+        }
+    }
+
+    fn last_key(&self) -> &K {
+        if self.is_node() {
+            self.children.last().unwrap().last_key()
+        } else {
+            self.keys.last().unwrap()
+        }
+    }
+
+    fn merge_children(&mut self, left_child_idx: usize) {
+        assert!(left_child_idx < self.children.len() - 1);
+        assert!(self.children[left_child_idx]
+            .can_fit_via_merge(self.children[left_child_idx + 1].member_count()));
+        let mut right_child = self.children.remove(left_child_idx + 1);
+        let left_child = &mut self.children[left_child_idx];
+        if left_child.is_node() {
+            let join_key = self.keys.remove(left_child_idx);
+            left_child.keys.push(join_key);
+            left_child.keys.append(&mut right_child.keys);
+            left_child.children.append(&mut right_child.children);
+        } else {
+            assert!(left_child.is_leaf());
+            left_child.keys.append(&mut right_child.keys);
+            left_child.values.append(&mut right_child.values);
+            self.keys.remove(left_child_idx);
+        }
+    }
+
+    /// Returns the new split_key separating these children (so the one pointing at the child at
+    /// position `pos - 1`)
+    fn child_steal_from_left_sibling(&mut self, pos: usize) -> K {
+        assert!(pos > 0);
+        assert!(self.children[pos - 1].member_count() > self.children[pos].member_count());
+        let (left_children, right_children) = self.children.split_at_mut(pos);
+        let left = &mut left_children[pos - 1];
+        let right = &mut right_children[0];
+
+        let amount_to_steal = (left.member_count() - right.member_count()) / 2;
+        let start_idx = left.member_count() - amount_to_steal;
+
+        if right.is_leaf() {
+            let mut new_keys = Vec::new();
+            new_keys.extend(left.keys.drain(start_idx..));
+            new_keys.append(&mut right.keys);
+
+            let mut new_values = Vec::new();
+            new_values.extend(left.values.drain(start_idx..));
+            new_values.append(&mut right.values);
+
+            right.keys = new_keys;
+            right.values = new_values;
+            left.keys.last().unwrap().clone()
+        } else {
+            let start_idx = start_idx + 1; // to account for the addition of the join key
+            let join_key = left.last_key().clone();
+            let mut new_keys = Vec::new();
+            new_keys.extend(left.keys.drain(start_idx..));
+            new_keys.push(join_key);
+            new_keys.append(&mut right.keys);
+
+            let mut new_children = Vec::new();
+            new_children.extend(left.children.drain(start_idx..));
+            new_children.append(&mut right.children);
+
+            right.keys = new_keys;
+            right.children = new_children;
+            left.keys.pop().unwrap()
+        }
+    }
+
+    /// Returns the new split_key separating these children (so the one pointing at the child at
+    /// position `pos`)
+    fn child_steal_from_right_sibling(&mut self, pos: usize) -> K {
+        assert!(pos < self.children.len() - 1);
+        assert!(self.children[pos + 1].member_count() > self.children[pos].member_count());
+        let (left_children, right_children) = self.children.split_at_mut(pos + 1);
+        let left = &mut left_children[pos];
+        let right = &mut right_children[0];
+        let amount_to_steal = (right.member_count() - left.member_count()) / 2;
+
+        if left.is_leaf() {
+            left.keys.extend(right.keys.drain(..amount_to_steal));
+            left.values.extend(right.values.drain(..amount_to_steal));
+            left.last_key().clone()
+        } else {
+            assert!(amount_to_steal > 0);
+            let amount_to_steal = amount_to_steal - 1; // to account for the addition of the join key
+            let join_key = left.last_key().clone();
+
+            left.keys.push(join_key);
+            left.keys.extend(right.keys.drain(..amount_to_steal));
+            left.children
+                .extend(right.children.drain(..amount_to_steal + 1));
+            right.keys.remove(0)
+        }
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        if self.is_leaf() {
+            if let Ok(pos) = self.keys.binary_search(key) {
+                self.keys.remove(pos);
+                let val = self.values.remove(pos);
+                Some(val)
+            } else {
+                None
+            }
+        } else {
+            assert!(self.is_node());
+            let pos = self.search_keys_as_node(key);
+            let res = self.children[pos].remove(key);
+            if self.children[pos].below_min_size() {
+                if pos > 0
+                    && self.children[pos - 1].can_fit_via_merge(self.children[pos].member_count())
+                {
+                    // merge to left
+                    self.merge_children(pos - 1);
+                } else if pos < self.children.len() - 1
+                    && self.children[pos].can_fit_via_merge(self.children[pos + 1].member_count())
+                {
+                    // merge right sibling into this one
+                    self.merge_children(pos);
+                } else if pos == 0 {
+                    // left-edge case
+                    self.keys[pos] = self.child_steal_from_right_sibling(pos);
+                } else if pos == self.children.len() - 1 {
+                    // right edge case
+                    self.keys[pos - 1] = self.child_steal_from_left_sibling(pos);
+                } else {
+                    // steal from smaller of siblings, to in theory, move less data around
+                    let left_size = self.children[pos - 1].member_count();
+                    let right_size = self.children[pos + 1].member_count();
+                    if left_size < right_size {
+                        self.keys[pos - 1] = self.child_steal_from_left_sibling(pos);
                     } else {
-                        pos
+                        self.keys[pos] = self.child_steal_from_right_sibling(pos);
                     }
                 }
-            };
-            let page_id = node.page_id_from_cell(position)?;
-            breadcrumbs.push(node);
-            node = self.node_from_page_id(page_id)?;
+            }
+
+            res
         }
-        Ok(TraversalResult {
+    }
+
+    fn iter(&self) -> BTreeIterator<K, V> {
+        BTreeIterator::new(self)
+    }
+}
+
+pub struct BTreeIterator<'a, K: Ord + Clone + Debug, V: Clone> {
+    queue: Vec<&'a Node<K, V>>,
+    queue_indices: Vec<usize>,
+    leaf: &'a Node<K, V>,
+    leaf_idx: usize,
+}
+impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
+    fn new(root_node: &'a Node<K, V>) -> Self {
+        let mut queue = Vec::new();
+        let mut queue_indices = Vec::new();
+        let mut node = root_node;
+        while node.is_node() {
+            let next = &node.children[0];
+            queue.push(node);
+            queue_indices.push(0);
+            node = next;
+        }
+        BTreeIterator {
+            queue,
+            queue_indices,
             leaf: node,
-            breadcrumbs,
-        })
-    }
-
-    pub fn lookup_value<K>(&self, key: &K) -> Result<Option<HeapInsertionData>, BTreeError>
-    where
-        K: Ord + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        let traversal_res = self.traverse_to_leaf(key)?;
-        match traversal_res.leaf.binary_search_for_key(key)? {
-            SearchResult::NotFound(_) => Ok(None),
-            SearchResult::Found(pos) => Ok(Some(
-                traversal_res.leaf.heap_insertion_data_from_leaf_cell(pos)?,
-            )),
+            leaf_idx: 0,
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct HeapInsertionData {
-    pub page_id: PageId,
-    pub cell_position: u16,
-}
-impl HeapInsertionData {
-    pub fn new(page_id: PageId, cell_position: u16) -> Self {
-        HeapInsertionData {
-            page_id,
-            cell_position,
-        }
-    }
-}
-
-impl BTree {
-    fn make_node_cell<K>(key: &K, page_id: PageId) -> Result<Vec<u8>, BTreeError>
-    where
-        K: Serialize,
-    {
-        let mut bytes = Vec::with_capacity(10); // this is the absolute minimum size we'll need
-        page_id.write_to_bytes(&mut bytes)?;
-        key.write_to_bytes(&mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn make_leaf_cell<K>(key: &K, insertion_data: &HeapInsertionData) -> Result<Vec<u8>, BTreeError>
-    where
-        K: Serialize,
-    {
-        let mut bytes = Vec::with_capacity(12); // absolute minimum size
-        insertion_data.page_id.write_to_bytes(&mut bytes)?;
-        insertion_data.cell_position.write_to_bytes(&mut bytes)?;
-        key.write_to_bytes(&mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn split_location(node: &BTreeNode, insert_location: u16, insert_data_size: u16) -> u16 {
-        assert!(node.member_count() > 0);
-        let mut left_sum = 0;
-        let mut left_loc = 0;
-        let mut right_sum = 0;
-        let mut right_loc = node.member_count() - 1;
-        let mut used_insert = false;
-
-        while left_loc <= right_loc {
-            // try left side first
-            if left_sum <= right_sum {
-                if left_loc == insert_location && !used_insert {
-                    left_sum += insert_data_size;
-                    used_insert = true;
-                } else {
-                    left_sum += node.cell_size(left_loc);
-                    left_loc += 1;
-                }
-            // otherwise use right
-            } else if right_loc == insert_location && !used_insert {
-                right_sum += insert_data_size;
-                used_insert = true;
-            } else {
-                right_sum += node.cell_size(right_loc);
-                right_loc -= 1;
+// Iteration logic
+impl<'a, K: Ord + Clone + Debug, V: Clone> BTreeIterator<'a, K, V> {
+    fn ascend_as_needed(&mut self) {
+        while let Some(node) = self.queue.pop() {
+            let idx = self.queue_indices.pop().unwrap();
+            if idx < node.member_count() {
+                self.queue.push(node);
+                self.queue_indices.push(idx + 1);
             }
         }
-        right_loc
     }
 
-    fn split_node_after(
-        &mut self,
-        node: &mut BTreeNode,
-        split_location: u16,
-    ) -> Result<BTreeNode, BTreeError> {
-        let mut new_node = self.new_node(node.kind())?;
-        // copy cells to new page
-        for idx in split_location + 1..node.member_count() {
-            let cell = node.get_cell(idx);
-            let new_pos = idx - (split_location + 1);
-            new_node.insert_cell(new_pos, &cell).unwrap();
+    fn descend_as_needed(&mut self) {
+        while self.queue.last().unwrap().is_node() {
+            let next = &self.queue.last().unwrap().children[0];
+            self.queue.push(next);
+            self.queue_indices.push(0);
         }
-        // remove cells from this one
-        for idx in (split_location + 1..node.member_count()).rev() {
-            node.remove_cell(idx);
-        }
-        // update pointers
-        node.update_sibling_pointer(SiblingPointerDirection::Right, new_node.page_id())?;
-        new_node.update_sibling_pointer(SiblingPointerDirection::Left, node.page_id())?;
-        Ok(new_node)
+        let idx = self.queue_indices.last().unwrap();
+        self.leaf = &self.queue.last().unwrap().children[*idx];
+        self.leaf_idx = 0;
     }
 
-    fn split<K>(
-        &mut self,
-        traversal_res: TraversalResult,
-        insert_location: u16,
-        data: &[u8],
-    ) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        let mut traversal_res = traversal_res;
-        let mut orig_node = traversal_res.leaf;
-
-        let split_location = BTree::split_location(&orig_node, insert_location, data.len() as u16);
-        let mut new_node = self.split_node_after(&mut orig_node, split_location)?;
-
-        // insert new data
-        if insert_location <= split_location {
-            orig_node.insert_cell(insert_location, data)?;
-        } else {
-            let loc = insert_location - split_location - 1;
-            new_node.insert_cell(loc, data)?;
-        }
-
-        let orig_node_key = orig_node.rightmost_key::<K>()?;
-        let orig_node_id = orig_node.page_id();
-        let orig_node_cell = BTree::make_node_cell(&orig_node_key, orig_node_id)?;
-
-        let new_node_key = new_node.rightmost_key::<K>()?;
-        let new_node_id = new_node.page_id();
-        let new_node_cell = BTree::make_node_cell(&new_node_key, new_node_id)?;
-
-        if let Some(parent_node) = traversal_res.breadcrumbs.pop() {
-            let mut parent_node = parent_node;
-            let search_key_location = match parent_node.binary_search_for_key(&orig_node_key)? {
-                SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => {
-                    assert!(pos < parent_node.member_count(), "The orig_key is always smaller than the prior right-most key, so this should always be true");
-                    pos
-                }
-            };
-            // remove the old key, replace it with one that contains the correct split key for the
-            // orig page
-            parent_node.remove_cell(search_key_location);
-            parent_node.insert_cell(search_key_location, &orig_node_cell)?;
-
-            // now try inserting the new cell
-            match parent_node.insert_cell(search_key_location + 1, &new_node_cell) {
-                Err(BTreeError::Page(PageError::NotEnoughSpace)) => {
-                    traversal_res.leaf = parent_node;
-                    self.split::<K>(traversal_res, search_key_location + 1, &new_node_cell)
-                }
-                Err(err) => Err(err),
-                Ok(_) => Ok(()),
-            }
-        } else {
-            self.make_new_root(&orig_node_cell, &new_node_cell)
-        }
+    fn current_kv_pair(&self) -> (&'a K, &'a V) {
+        (
+            &self.leaf.keys[self.leaf_idx],
+            &self.leaf.values[self.leaf_idx],
+        )
     }
 
-    fn fix_right_keys<K>(
-        &mut self,
-        new_key: &K,
-        traversal_res: TraversalResult,
-    ) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
-    {
-        let mut traversal_res = traversal_res;
-        while let Some(mut node) = traversal_res.breadcrumbs.pop() {
-            let right_pos = node.member_count() - 1;
-            let right_key = node.rightmost_key::<K>()?;
-            if let Ordering::Less = right_key.cmp(new_key) {
-                // update key
-                let child_id = node.page_id_from_cell(right_pos)?;
-                node.remove_cell(right_pos);
-                let new_cell = BTree::make_node_cell(new_key, child_id)?;
-                node.insert_cell(right_pos, &new_cell)?;
-            } else {
-                break;
+    fn step(&mut self) -> Option<()> {
+        self.leaf_idx += 1;
+        if self.leaf_idx >= self.leaf.member_count() {
+            self.ascend_as_needed();
+            if self.queue.is_empty() {
+                return None;
             }
+            self.descend_as_needed();
         }
-        Ok(())
-    }
-
-    pub fn insert<K>(
-        &mut self,
-        key: &K,
-        insertion_data: &HeapInsertionData,
-    ) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        let mut traversal_res = self.traverse_to_leaf(key)?;
-        let leaf_node = &mut traversal_res.leaf;
-        let location = match leaf_node.binary_search_for_key(key)? {
-            SearchResult::NotFound(loc) => loc,
-            SearchResult::Found(_) => return Err(BTreeError::KeyAlreadyExists),
-        };
-        let data = BTree::make_leaf_cell(key, insertion_data)?;
-        if data.len() > self.max_cell_size.into() {
-            return Err(BTreeError::KeyTooLarge);
-        }
-        match leaf_node.insert_cell(location, &data) {
-            Err(BTreeError::Page(PageError::NotEnoughSpace)) => {
-                self.split::<K>(traversal_res, location, &data)?;
-                Ok(())
-            }
-            Err(err) => Err(err),
-            Ok(_) => {
-                if location == leaf_node.member_count() - 1 {
-                    self.fix_right_keys(key, traversal_res)?;
-                }
-                Ok(())
-            }
-        }
+        Some(())
     }
 }
+impl<'a, K: Ord + Clone + Debug, V: Clone> Iterator for BTreeIterator<'a, K, V> {
+    type Item = (&'a K, &'a V);
 
-#[derive(Debug)]
-enum MergeLeafPosition {
-    Left,
-    Right,
-}
-impl MergeLeafPosition {
-    fn invert(&self) -> Self {
-        match self {
-            Self::Left => Self::Right,
-            Self::Right => Self::Left,
-        }
-    }
-}
-
-impl BTree {
-    fn get_left_sibling(&mut self, node: &BTreeNode) -> Result<Option<BTreeNode>, BTreeError> {
-        if let Some(id) = node.left_sibling_id()? {
-            let left_sibling = self.node_from_page_id(id)?;
-            assert_eq!(left_sibling.right_sibling_id()?, Some(node.page_id()));
-            Ok(Some(left_sibling))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get_right_sibling(&mut self, node: &BTreeNode) -> Result<Option<BTreeNode>, BTreeError> {
-        if let Some(id) = node.right_sibling_id()? {
-            let right_sibling = self.node_from_page_id(id)?;
-            assert_eq!(right_sibling.left_sibling_id()?, Some(node.page_id()));
-            Ok(Some(right_sibling))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn promote_to_root(&mut self, node: BTreeNode) -> Result<(), BTreeError> {
-        let current_root = self.get_root_node()?;
-        assert_eq!(current_root.member_count(), 1);
-        assert_eq!(current_root.page_id_from_cell(0)?, node.page_id());
-
-        let mut new_root_ptr_cell = Vec::with_capacity(8);
-        node.page_id().write_to_bytes(&mut new_root_ptr_cell)?;
-
-        let mut pager = self.pager.borrow_mut();
-        let meta_root_ref = pager.get_page(self.fd, 0)?;
-        let mut meta_root_page = meta_root_ref.borrow_mut();
-        meta_root_page.remove_cell(METAROOT_ROOT_PTR_LOCATION);
-        meta_root_page.insert_cell(METAROOT_ROOT_PTR_LOCATION, &new_root_ptr_cell)?;
-        drop(meta_root_page);
-
-        let old_root_id = current_root.page_id();
-        drop(current_root);
-        pager.delete_page(self.fd, old_root_id)?;
-
-        Ok(())
-    }
-
-    fn merge<K>(
-        &mut self,
-        traversal_res: TraversalResult,
-        leaf_position: MergeLeafPosition,
-    ) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
-    {
-        let mut traversal_res = traversal_res;
-        let leaf = traversal_res.leaf;
-        let mut parent = traversal_res.breadcrumbs.pop().unwrap();
-
-        let (mut left_node, right_node) = match leaf_position {
-            MergeLeafPosition::Left => {
-                let other = self.get_right_sibling(&leaf)?.unwrap();
-                (leaf, other)
-            }
-            MergeLeafPosition::Right => (self.get_left_sibling(&leaf)?.unwrap(), leaf),
-        };
-
-        let left_node_pos =
-            match parent.binary_search_for_key::<K>(&left_node.rightmost_key::<K>()?)? {
-                SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => pos,
-            };
-        let right_node_pos =
-            match parent.binary_search_for_key::<K>(&right_node.rightmost_key::<K>()?)? {
-                SearchResult::Found(pos) => pos,
-                SearchResult::NotFound(pos) => pos,
-            };
-        assert_eq!(left_node_pos, right_node_pos - 1);
-
-        // remove parent ptr cells
-        parent.remove_cell(right_node_pos);
-        parent.remove_cell(left_node_pos);
-
-        // copy cells from right to left
-        let left_offset = left_node.member_count();
-        for i in 0..right_node.member_count() {
-            let cell = right_node.get_cell(i);
-            left_node.insert_cell(left_offset + i, &cell)?;
-        }
-
-        // add new pointer to parent
-        let ptr_cell =
-            BTree::make_node_cell(&left_node.rightmost_key::<K>()?, left_node.page_id())?;
-        parent.insert_cell(left_node_pos, &ptr_cell)?;
-
-        // delete right page
-        let mut pager = self.pager.borrow_mut();
-        let right_page_id = right_node.page_id();
-        drop(right_node);
-        pager.delete_page(self.fd, right_page_id)?;
-        drop(pager);
-
-        // if pages remaining above 'leaf', recurse
-        if !traversal_res.breadcrumbs.is_empty() {
-            traversal_res.leaf = parent;
-            self.merge_if_needed::<K>(traversal_res)
-        } else if parent.member_count() == 1 {
-            // if no breadcrumbs (so parent is root) and this parent only has one member, then we can
-            // promot this node to root,
-            drop(parent);
-            self.promote_to_root(left_node)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn merge_if_needed<K>(&mut self, traversal_res: TraversalResult) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()>,
-    {
-        let leaf_node = &traversal_res.leaf;
-        if leaf_node.total_free_space() > (PAGE_BUFFER_SIZE / 2) {
-            if let Some(left_node) = self.get_left_sibling(leaf_node)? {
-                let is_same_parent = {
-                    let parent = traversal_res
-                        .breadcrumbs
-                        .last()
-                        .expect("A node with a sibling should always have a parent");
-                    let parent_leftmost_key = parent.key_from_cell::<K>(0)?;
-                    left_node.rightmost_key::<K>()? >= parent_leftmost_key
-                };
-                // if same parent and under-filled
-                if is_same_parent && left_node.total_free_space() < (PAGE_BUFFER_SIZE / 2) {
-                    drop(left_node);
-                    self.merge::<K>(traversal_res, MergeLeafPosition::Right)?;
-                    return Ok(());
-                }
-            }
-            if let Some(right_node) = self.get_right_sibling(leaf_node)? {
-                let is_same_parent = {
-                    let parent = traversal_res
-                        .breadcrumbs
-                        .last()
-                        .expect("A node with a sibling should always have a parent");
-                    right_node.rightmost_key::<K>()? <= parent.rightmost_key::<K>()?
-                };
-                // if same parent and under-filled
-                if is_same_parent && right_node.total_free_space() < (PAGE_BUFFER_SIZE / 2) {
-                    drop(right_node);
-                    self.merge::<K>(traversal_res, MergeLeafPosition::Left)?;
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn delete<K>(&mut self, key: &K) -> Result<(), BTreeError>
-    where
-        K: Ord + Serialize + Deserialize<ExtraInfo = ()> + Debug,
-    {
-        let mut traversal_res = self.traverse_to_leaf(key)?;
-        let leaf_node = &mut traversal_res.leaf;
-        let location = match leaf_node.binary_search_for_key(key)? {
-            SearchResult::Found(loc) => loc,
-            SearchResult::NotFound(_) => return Ok(()),
-        };
-        leaf_node.remove_cell(location);
-        self.merge_if_needed::<K>(traversal_res)?;
-        Ok(())
+    fn next(&mut self) -> Option<Self::Item> {
+        self.step()?;
+        Some(self.current_kv_pair())
     }
 }
 
 #[cfg(test)]
+impl BTree<u32, u32> {
+    /*
+     * An example description looks something like this:
+    0: [12, 23] (3)
+    0->0: [3, 6, 9] (4)
+    0->1: [15, 17, 20] (4)
+    0->2: [28] (2)
+    0->0->0: L[1, 2, 3] (0)
+    0->0->1: L[4, 5, 6] (0)
+    0->0->2: L[7, 8, 9] (0)
+    0->0->3: L[10, 11, 12] (0)
+    0->1->0: L[13, 14, 15] (0)
+    0->1->1: L[16, 17] (0)
+    0->1->2: L[18, 19, 20] (0)
+    0->1->3: L[21, 22, 23] (0)
+    0->2->0: L[24, 25, 26, 27] (0)
+    0->2->1: L[29, 30, 31] (0)
+        */
+    pub fn from_description(description: &str, fanout_factor: usize) -> BTree<u32, u32> {
+        let mut lines = description
+            .trim()
+            .split('\n')
+            .map(|x| x.trim())
+            .map(DescriptionLine::from_str);
+        let mut root = Node::new(fanout_factor);
+        root.keys = lines.next().unwrap().keys;
+        for line in lines {
+            let mut node = &mut root;
+            for i in &line.traversal_path[1..] {
+                if *i >= node.children.len() {
+                    node.children.push(Node::new(fanout_factor));
+                }
+                node = &mut node.children[*i];
+            }
+            if line.is_leaf {
+                node.values = line.keys.clone();
+            }
+            node.keys = line.keys;
+        }
+
+        assert_subtree_valid(&root);
+        BTree { root }
+    }
+
+    fn to_description(&self) -> String {
+        BTree::node_to_description(&self.root)
+    }
+
+    fn node_to_description(node: &Node<u32, u32>) -> String {
+        use std::collections::VecDeque;
+
+        let mut description = String::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((vec![0], node));
+        while let Some((ancestry, node)) = queue.pop_front() {
+            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
+            let path = path_parts.join("->");
+            if node.is_leaf() {
+                let s = format!("{path}: L{:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            } else {
+                let s = format!("{path}: {:?} ({})\n", node.keys, node.children.len());
+                description.push_str(&s);
+            }
+            queue.extend(node.children.iter().enumerate().map(|(idx, node)| {
+                let mut child_ancestry = ancestry.clone();
+                child_ancestry.push(idx);
+                (child_ancestry, node)
+            }));
+        }
+        description
+    }
+
+    fn display_subtree(root_node: &Node<u32, u32>) {
+        let description = BTree::node_to_description(root_node);
+        print!("{description}");
+    }
+}
+
+#[cfg(test)]
+struct DescriptionLine {
+    traversal_path: Vec<usize>,
+    is_leaf: bool,
+    keys: Vec<u32>,
+    child_count: usize,
+}
+#[cfg(test)]
+impl DescriptionLine {
+    fn from_str(s: &str) -> Self {
+        let mut parts = s.split(": ");
+        let traversal_path = parts
+            .next()
+            .unwrap()
+            .split("->")
+            .map(|x| x.parse::<usize>().unwrap())
+            .collect();
+
+        let second_half = parts.next().unwrap();
+        assert!(second_half.starts_with("L[") || second_half.starts_with("["));
+        let is_leaf = second_half.starts_with("L");
+        let skip_num = if is_leaf { 2 } else { 1 };
+
+        let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
+        let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
+        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+
+        let child_count = second_half[closing_bracket_pos + 3..]
+            .split(")")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        if is_leaf {
+            assert_eq!(child_count, 0);
+        } else {
+            assert_eq!(keys.len() + 1, child_count);
+        }
+
+        DescriptionLine {
+            traversal_path,
+            is_leaf,
+            keys,
+            child_count,
+        }
+    }
+}
+
+#[cfg(test)]
+fn all_leaves_same_level(root: &Node<u32, u32>) -> bool {
+    fn leaf_levels(node: &Node<u32, u32>, level: usize) -> Vec<usize> {
+        if node.is_leaf() {
+            return vec![level];
+        }
+        node.children
+            .iter()
+            .flat_map(|c| leaf_levels(c, level + 1))
+            .collect()
+    }
+
+    let mut levels = leaf_levels(root, 0).into_iter();
+    let first = levels.next().unwrap();
+    levels.all(|x| x == first)
+}
+
+#[cfg(test)]
+fn root_is_sized_correctly(root: &Node<u32, u32>) -> bool {
+    root.is_leaf() || root.children.len() > 1
+}
+
+#[cfg(test)]
+fn all_nodes_sized_correctly(root: &Node<u32, u32>) -> bool {
+    fn all_nodes_sized_correctly_not_root(node: &Node<u32, u32>) -> bool {
+        if node.is_leaf() {
+            return node.member_count() <= node.fanout_factor;
+        }
+        node.member_count() >= node.fanout_factor / 3
+            && node.member_count() <= node.fanout_factor
+            && node.children.iter().all(all_nodes_sized_correctly_not_root)
+    }
+
+    root.children.iter().all(all_nodes_sized_correctly)
+}
+
+#[cfg(test)]
+fn all_nodes_properly_structured(node: &Node<u32, u32>) -> bool {
+    if node.is_leaf() {
+        node.keys.len() == node.values.len()
+    } else {
+        node.keys.len() == node.children.len() - 1
+    }
+}
+
+#[cfg(test)]
+fn tree_keys_fully_ordered(root: &Node<u32, u32>) -> bool {
+    let keys: Vec<_> = root.iter().collect();
+    let mut sorted_keys = keys.clone();
+    sorted_keys.sort();
+    keys == sorted_keys
+}
+
+#[cfg(test)]
+fn all_node_keys_ordered_and_deduped(node: &Node<u32, u32>) -> bool {
+    let mut sorted_keys = node.keys.clone();
+    sorted_keys.sort();
+    sorted_keys.dedup();
+    sorted_keys == node.keys && node.children.iter().all(all_node_keys_ordered_and_deduped)
+}
+
+#[cfg(test)]
+fn all_keys_in_range(node: &Node<u32, u32>, min: u32, max: u32) -> bool {
+    node.keys.iter().all(|k| (min..=max).contains(k))
+}
+
+#[cfg(test)]
+fn all_subnode_keys_ordered_relative_to_node_keys(node: &Node<u32, u32>) -> bool {
+    if node.is_leaf() {
+        return true;
+    }
+    let mut min_key = u32::MIN;
+    for (idx, k) in node.keys.iter().enumerate() {
+        let max_key = *k;
+        if !all_keys_in_range(&node.children[idx], min_key, max_key) {
+            return false;
+        }
+        min_key = k + 1;
+    }
+    all_keys_in_range(&node.children[node.keys.len()], min_key, u32::MAX)
+}
+
+#[cfg(test)]
+fn all_nodes_with_fanout_factor(node: &Node<u32, u32>, fanout_factor: usize) -> bool {
+    node.fanout_factor == fanout_factor
+        && node
+            .children
+            .iter()
+            .all(|child| all_nodes_with_fanout_factor(child, fanout_factor))
+}
+
+#[cfg(test)]
+fn assert_subtree_valid(node: &Node<u32, u32>) {
+    assert!(tree_keys_fully_ordered(node));
+    assert!(all_nodes_properly_structured(node));
+    assert!(all_node_keys_ordered_and_deduped(node));
+    assert!(all_subnode_keys_ordered_relative_to_node_keys(node));
+    assert!(all_nodes_with_fanout_factor(node, node.fanout_factor));
+    assert!(all_nodes_sized_correctly(node));
+    assert!(root_is_sized_correctly(node));
+    assert!(all_leaves_same_level(node));
+}
+
+#[cfg(test)]
 mod tests {
-    use std::{
-        fs::{self, File, OpenOptions},
-        os::fd::AsRawFd,
+    use std::collections::BTreeMap;
+
+    use itertools::Itertools;
+    use proptest::prelude::*;
+    use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
+
+    use super::{
+        all_leaves_same_level, all_node_keys_ordered_and_deduped, all_nodes_properly_structured,
+        all_nodes_sized_correctly, all_nodes_with_fanout_factor,
+        all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
+        root_is_sized_correctly, tree_keys_fully_ordered, BTree,
     };
 
-    use crate::pager::CELL_POINTER_SIZE;
-
-    use super::*;
-
-    struct BTreeCursor<'a> {
-        btree: &'a BTree,
-        traversal_res: TraversalResult,
-    }
-    impl<'a> BTreeCursor<'a> {
-        fn new(btree: &'a BTree) -> Self {
-            let root = btree.get_root_node().unwrap();
-            let traversal_res = TraversalResult {
-                breadcrumbs: Vec::new(),
-                leaf: root,
-            };
-            BTreeCursor {
-                btree,
-                traversal_res,
-            }
-        }
-
-        fn down(&mut self, position: u16) {
-            let page_id = self.traversal_res.leaf.page_id_from_cell(position).unwrap();
-            let node = self.btree.node_from_page_id(page_id).unwrap();
-            self.traversal_res
-                .breadcrumbs
-                .push(self.traversal_res.leaf.clone());
-            self.traversal_res.leaf = node;
-        }
-
-        fn up(&mut self) {
-            self.traversal_res.leaf = self.traversal_res.breadcrumbs.pop().unwrap();
-        }
-
-        fn reset(&mut self) {
-            self.traversal_res.breadcrumbs = Vec::new();
-            self.traversal_res.leaf = self.btree.get_root_node().unwrap();
-        }
-
-        fn current(&self) -> &BTreeNode {
-            &self.traversal_res.leaf
-        }
-    }
-
-    /// Works for up to a 3-level tree
-    fn visualize_tree(btree: &BTree) {
-        println!("------------------------------------------");
-        let mut cursor = BTreeCursor::new(btree);
-        let root_id = cursor.current().page_id();
-        if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-            println!("{root_id}");
-            return;
-        }
-        cursor.down(0);
-        if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-            cursor.up();
-            let node = cursor.current();
-            let children: Vec<PageId> = (0..node.member_count())
-                .map(|x| node.page_id_from_cell(x).unwrap())
-                .collect();
-            println!("{root_id} -> {children:?}");
-        } else {
-            cursor.up();
-            for i in 0..cursor.current().member_count() {
-                cursor.down(i);
-                let node_id = cursor.current().page_id();
-                if matches!(cursor.current().kind(), NodeKind::HeapLeaf) {
-                    println!("{root_id} -> {node_id}");
-                } else {
-                    let node = cursor.current();
-                    let children: Vec<PageId> = (0..node.member_count())
-                        .map(|x| node.page_id_from_cell(x).unwrap())
-                        .collect();
-                    println!("{root_id} -> {node_id} -> {children:?}");
-                }
-                cursor.up();
-                println!("----");
-            }
-        }
-        println!("------------------------------------------");
+    fn trim_lines(s: &str) -> String {
+        s.trim().lines().map(|l| l.trim()).join("\n") + "\n"
     }
 
     #[test]
-    fn size_assumptions() {
-        assert_eq!(PAGE_BUFFER_SIZE % MIN_FANOUT_FACTOR, 0);
-        assert_eq!(PAGE_BUFFER_SIZE % MAX_BTREE_CELL_SIZE, 0);
+    fn description_test() {
+        let input_description = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)";
+        let input_description = trim_lines(input_description);
+
+        let tree = BTree::from_description(&input_description, 4);
+        let output_description = tree.to_description();
+        assert_eq!(output_description, input_description);
     }
 
-    fn make_empty_tree_node() -> BTreeNode {
-        let page_ref = Rc::new(RefCell::new(Page::new(0, PageKind::BTreeNode)));
-        BTreeNode::build_new(page_ref).unwrap()
+    fn first_nonretrievable_inserted_value(
+        tree: &BTree<u32, u32>,
+        ref_tree: &BTreeMap<u32, u32>,
+    ) -> Option<u32> {
+        ref_tree
+            .iter()
+            .find(|(k, v)| tree.get(k) != Some(*v))
+            .map(|(k, v)| {
+                println!("didn't find: ({k}, {v})");
+                println!("actual value: {:?}", tree.get(k));
+                *k
+            })
     }
 
-    fn make_empty_leaf_node() -> BTreeNode {
-        let page_ref = Rc::new(RefCell::new(Page::new(0, PageKind::BTreeLeafHeap)));
-        BTreeNode::build_new(page_ref).unwrap()
+    #[derive(Debug, Clone)]
+    pub struct ReferenceBTree {
+        ref_tree: BTreeMap<u32, u32>,
+        fanout_factor: usize,
     }
+    impl ReferenceStateMachine for ReferenceBTree {
+        type State = Self;
+        type Transition = TreeOperation;
 
-    #[test]
-    fn btree_node_initialization() {
-        let node = make_empty_leaf_node();
-        let page = node.page_ref.borrow();
-        assert_eq!(page.cell_count(), 2); // 2 sibling pointers present
-        drop(page);
-
-        assert_eq!(node.member_count(), 0);
-        assert_eq!(node.left_sibling_id().unwrap(), None);
-        assert_eq!(node.right_sibling_id().unwrap(), None);
-    }
-
-    #[test]
-    fn key_from_cell_works() {
-        let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)];
-        let mut node = make_empty_tree_node();
-
-        for (k, v) in kv_pairs.iter() {
-            let cell = BTree::make_node_cell(k, *v).unwrap();
-            node.insert_cell(*k, &cell).unwrap();
+        fn init_state() -> BoxedStrategy<Self::State> {
+            (5usize..50)
+                .prop_map(|x| ReferenceBTree {
+                    ref_tree: BTreeMap::new(),
+                    fanout_factor: x,
+                })
+                .boxed()
         }
-        for (k, _) in kv_pairs.iter() {
-            let read_key: u16 = node.key_from_cell(*k).unwrap();
-            assert_eq!(read_key, *k);
-        }
-    }
 
-    #[test]
-    fn binary_search_odd_cell_count() {
-        let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)];
-        let mut node = make_empty_tree_node();
-        for (k, v) in kv_pairs.iter() {
-            let cell = BTree::make_node_cell(k, *v).unwrap();
-            node.insert_cell(*k, &cell).unwrap();
-        }
-        for (k, _) in kv_pairs.iter() {
-            let res = node.binary_search_for_key(k).unwrap();
-            assert_eq!(res, SearchResult::Found(*k));
-        }
-    }
-
-    #[test]
-    fn binary_search_even_cell_count() {
-        let kv_pairs: Vec<(u16, u64)> = vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)];
-        let mut node = make_empty_tree_node();
-        for (k, v) in kv_pairs.iter() {
-            let cell = BTree::make_node_cell(k, *v).unwrap();
-            node.insert_cell(*k, &cell).unwrap();
-        }
-        for (k, _) in kv_pairs.iter() {
-            let res = node.binary_search_for_key(k).unwrap();
-            assert_eq!(res, SearchResult::Found(*k));
-        }
-    }
-
-    #[test]
-    fn binary_search_not_found_should_insert_right() {
-        let kv_pairs: Vec<(u16, u16)> = vec![(0, 0), (2, 1), (4, 2), (6, 3), (8, 4), (10, 5)];
-        let mut node = make_empty_tree_node();
-        for (k, v) in kv_pairs.iter() {
-            let cell = BTree::make_node_cell(k, *v as PageId).unwrap();
-            node.insert_cell(*v, &cell).unwrap();
-        }
-        for (k, v) in kv_pairs.iter() {
-            let search_for = *k + 1;
-            let res = node.binary_search_for_key(&search_for).unwrap();
-            assert_eq!(res, SearchResult::NotFound(*v + 1));
-        }
-    }
-
-    #[test]
-    fn binary_search_not_found_should_insert_left() {
-        let kv_pairs: Vec<(u16, u16)> = vec![(3, 0), (5, 0), (7, 1), (9, 2), (11, 3), (13, 4)];
-        let mut node = make_empty_tree_node();
-        for (idx, (k, v)) in kv_pairs.iter().enumerate() {
-            let cell = BTree::make_node_cell(k, *v as PageId).unwrap();
-            node.insert_cell(idx as u16, &cell).unwrap();
-        }
-        for (k, v) in kv_pairs.iter() {
-            let search_for = *k - 3;
-            let res = node.binary_search_for_key(&search_for).unwrap();
-            assert_eq!(res, SearchResult::NotFound(*v));
-        }
-    }
-
-    #[test]
-    fn binary_search_empty_page() {
-        let node = make_empty_tree_node();
-        let res = node.binary_search_for_key(&43).unwrap();
-        assert_eq!(res, SearchResult::NotFound(0));
-    }
-
-    #[test]
-    fn node_cell_construction() {
-        let mut node = make_empty_tree_node();
-        let page_id = 42;
-        let key = String::from("foo");
-        let cell = BTree::make_node_cell(&key, page_id).unwrap();
-        node.insert_cell(0, &cell).unwrap();
-
-        assert_eq!(key, node.key_from_cell::<String>(0).unwrap(),);
-        assert_eq!(page_id, node.page_id_from_cell(0).unwrap(),);
-    }
-
-    #[test]
-    fn leaf_cell_construction() {
-        let mut node = make_empty_leaf_node();
-        let page_id = 42;
-        let page_location = 43;
-        let key = String::from("foo");
-        let heap_data = HeapInsertionData::new(page_id, page_location);
-        let cell = BTree::make_leaf_cell(&key, &heap_data).unwrap();
-        node.insert_cell(0, &cell).unwrap();
-
-        assert_eq!(key, node.key_from_cell::<String>(0).unwrap(),);
-        assert_eq!(
-            heap_data,
-            node.heap_insertion_data_from_leaf_cell(0).unwrap(),
-        );
-    }
-
-    fn insert_values(btree: &mut BTree, values: impl Iterator<Item = u64>) {
-        for v in values {
-            btree.insert(&v, &HeapInsertionData::new(v, 0)).unwrap();
-        }
-    }
-
-    fn delete_values(btree: &mut BTree, values: impl Iterator<Item = u64>) {
-        for v in values {
-            btree.delete(&v).unwrap();
-        }
-    }
-
-    fn lookup_values(btree: &BTree, keys: impl Iterator<Item = u64>) -> Vec<u64> {
-        let mut values = Vec::new();
-        for key in keys {
-            let insertion_info = btree.lookup_value(&key).unwrap().unwrap();
-            values.push(insertion_info.page_id);
-        }
-        values
-    }
-
-    fn lookup_values_options(btree: &BTree, keys: impl Iterator<Item = u64>) -> Vec<Option<u64>> {
-        let mut values = Vec::new();
-        for key in keys {
-            let insertion_info = btree.lookup_value(&key).unwrap();
-            values.push(insertion_info.map(|x| x.page_id));
-        }
-        values
-    }
-
-    fn open_test_file(name: &str) -> File {
-        OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(name)
-            .unwrap()
-    }
-
-    #[test]
-    fn btree_initialization() {
-        let filename = "btree_initialization.test";
-        let file = open_test_file(filename);
-        let fd = file.as_raw_fd();
-
-        let pager = Rc::new(RefCell::new(Pager::new(vec![file])));
-
-        // new btree test
-        let mut btree = BTree::init(pager.clone(), fd).unwrap();
-        let root_node = btree.get_root_node().unwrap();
-        assert_eq!(root_node.page_id(), 1);
-        let page = root_node.page_ref.borrow();
-        assert_eq!(page.cell_count(), 2);
-        drop(page);
-        assert_eq!(root_node.member_count(), 0);
-        drop(root_node);
-
-        // add cell to btree
-        let data = HeapInsertionData::new(42, 43);
-        let key = String::from("foo");
-        btree.insert(&key, &data).unwrap();
-
-        // flush all pages and drop the btree
-        btree.force_flush().unwrap();
-        drop(btree);
-
-        // re-init the btree and check that we have the same data in it
-        let btree = BTree::init(pager.clone(), fd).unwrap();
-        assert_eq!(btree.get_root_page_id().unwrap(), 1);
-
-        let lookup_res = btree.lookup_value(&key).unwrap();
-        assert_eq!(lookup_res, Some(data));
-        drop(btree);
-        fs::remove_file(filename).unwrap();
-    }
-
-    #[test]
-    fn insert_and_split_then_delete_and_merge() {
-        let empty_node = make_empty_tree_node();
-        let leaf_cell = BTree::make_leaf_cell(&1u64, &HeapInsertionData::new(1, 1)).unwrap();
-        let leaf_capacity = empty_node.total_free_space() as u64
-            / (leaf_cell.len() as u64 + CELL_POINTER_SIZE as u64);
-        println!("capacity: {leaf_capacity}");
-
-        let expected_rightmost_after_splits = |page_count: u64| -> u64 {
-            let half_page_size = if leaf_capacity % 2 == 0 {
-                leaf_capacity / 2
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            if !state.ref_tree.is_empty() {
+                let keys: Vec<_> = state.ref_tree.keys().cloned().collect();
+                let removal_key = proptest::sample::select(keys);
+                prop_oneof![
+                    (any::<u32>(), any::<u32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+                    removal_key.prop_map(TreeOperation::Remove)
+                ]
+                .boxed()
             } else {
-                (leaf_capacity / 2) + 1
-            };
-
-            let mut rightmost = leaf_capacity / 2;
-            for _ in 2..=page_count {
-                rightmost += half_page_size;
+                (any::<u32>(), any::<u32>())
+                    .prop_map(|(k, v)| TreeOperation::Insert(k, v))
+                    .boxed()
             }
-            rightmost
-        };
+        }
 
-        // calc how many cells will fit in a leaf
-        // setup btree
-        let filename = "btree_insert_and_split.test";
-        let file = open_test_file(filename);
-        let fd = file.as_raw_fd();
-        let pager = Rc::new(RefCell::new(Pager::new(vec![file])));
-        let mut btree = BTree::init(pager, fd).unwrap();
+        fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
+            match transition {
+                TreeOperation::Insert(k, v) => state.ref_tree.insert(*k, *v),
+                TreeOperation::Remove(k) => state.ref_tree.remove(k),
+            };
+            state
+        }
 
-        // test inserts work
-        insert_values(&mut btree, 0..leaf_capacity);
-        // test lookups work
-        let retrieved_vals = lookup_values(&btree, 0..leaf_capacity);
-        assert_eq!((0..leaf_capacity).collect::<Vec<u64>>(), retrieved_vals);
+        fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+            match transition {
+                TreeOperation::Insert(_, _) => true,
+                TreeOperation::Remove(k) => state.ref_tree.contains_key(k),
+            }
+        }
+    }
 
-        // prove we haven't split yet
-        let root_node = btree.get_root_node().unwrap();
-        assert_eq!(root_node.page_id(), 1);
+    impl StateMachineTest for BTree<u32, u32> {
+        type SystemUnderTest = Self;
+        type Reference = ReferenceBTree;
 
-        // test split root works when full
-        insert_values(&mut btree, leaf_capacity..leaf_capacity + 1);
-        let single_split_root_id = btree.get_root_page_id().unwrap();
-        assert!(
-            single_split_root_id > 1,
-            "Prove that root was split, so we have a new root"
-        );
-        // test lookups work
-        let retrieved_vals = lookup_values(&btree, 0..leaf_capacity + 1);
-        assert_eq!(
-            (0..expected_rightmost_after_splits(2) + 1).collect::<Vec<u64>>(),
-            retrieved_vals
-        );
+        fn init_test(
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            Self::new(ref_state.fanout_factor)
+        }
 
-        // prove some things about the root page
-        let mut cursor = BTreeCursor::new(&btree);
-        let root_node = cursor.current();
-        assert_eq!(root_node.member_count(), 2);
-        assert_eq!(
-            root_node.key_from_cell::<u64>(0).unwrap(),
-            expected_rightmost_after_splits(1)
-        );
-        assert_eq!(
-            root_node.key_from_cell::<u64>(1).unwrap(),
-            expected_rightmost_after_splits(2)
-        );
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            transition: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            match transition {
+                TreeOperation::Remove(k) => {
+                    let res = state.remove(&k);
+                    assert!(res.is_some());
+                    // BTree::display_subtree(&state.root);
+                    assert!(state.get(&k).is_none());
+                }
+                TreeOperation::Insert(k, v) => {
+                    state.insert(k, v);
+                    // BTree::display_subtree(&state.root);
+                    assert_eq!(state.get(&k), Some(&v));
+                }
+            };
+            state
+        }
 
-        // prove some things about the now split pages
-        cursor.down(0);
-        let left_node_members = cursor.current().member_count();
-        cursor.up();
-        cursor.down(1);
-        let right_node_members = cursor.current().member_count();
-        // prove we have the expected number of cells in each node, and that the counts are about
-        // even
-        assert!((right_node_members as i64 - left_node_members as i64).abs() <= 1);
-        assert!((right_node_members as i64 - (leaf_capacity / 2) as i64).abs() <= 1);
-        drop(cursor);
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert!(tree_keys_fully_ordered(&state.root));
+            assert_eq!(
+                first_nonretrievable_inserted_value(state, &ref_state.ref_tree),
+                None
+            );
+            assert!(all_nodes_properly_structured(&state.root));
+            assert!(all_node_keys_ordered_and_deduped(&state.root));
+            assert!(all_subnode_keys_ordered_relative_to_node_keys(&state.root));
+            assert!(all_nodes_with_fanout_factor(
+                &state.root,
+                ref_state.fanout_factor
+            ));
 
-        // insert enough values to make the right leaf split
-        insert_values(
-            &mut btree,
-            expected_rightmost_after_splits(2) + 1..expected_rightmost_after_splits(3) + 1,
-        );
-        let vals = 0..expected_rightmost_after_splits(3) + 1;
-        let retrieved_vals = lookup_values(&btree, vals.clone());
-        assert_eq!(vals.collect::<Vec<u64>>(), retrieved_vals);
+            assert!(all_nodes_sized_correctly(&state.root));
+            assert!(root_is_sized_correctly(&state.root));
+            assert!(all_leaves_same_level(&state.root));
+        }
+    }
 
-        // examine the root
-        let mut cursor = BTreeCursor::new(&btree);
-        let root_node = cursor.current();
-        assert_eq!(root_node.member_count(), 3);
-        assert_eq!(
-            root_node.key_from_cell::<u64>(0).unwrap(),
-            expected_rightmost_after_splits(1)
-        );
-        assert_eq!(
-            root_node.key_from_cell::<u64>(1).unwrap(),
-            expected_rightmost_after_splits(2),
-        );
-        assert_eq!(
-            root_node.key_from_cell::<u64>(2).unwrap(),
-            expected_rightmost_after_splits(3),
-        );
+    #[derive(Debug, Clone)]
+    pub enum TreeOperation {
+        Insert(u32, u32),
+        Remove(u32),
+    }
 
-        // examine the pages
-        cursor.down(0);
-        let left_node = cursor.current().clone();
-        cursor.up();
-        cursor.down(1);
-        let mid_node = cursor.current().clone();
-        cursor.up();
-        cursor.down(2);
-        let high_node = cursor.current().clone();
+    prop_state_machine! {
+        #![proptest_config(ProptestConfig {
+             // Enable verbose mode to make the state machine test print the
+             // transitions for each case.
+             verbose: 1,
+             max_shrink_iters: 8192,
+             cases: 1024,
+             .. ProptestConfig::default()
+         })]
 
-        // prove that all of the leaf occupancies are within 1 of each other
-        let min = left_node
-            .member_count()
-            .min(mid_node.member_count())
-            .min(high_node.member_count());
-        let max = left_node
-            .member_count()
-            .max(mid_node.member_count())
-            .max(high_node.member_count());
-        assert!(max - min <= 1);
-        drop(left_node);
-        drop(mid_node);
-        drop(high_node);
-        drop(cursor);
+         #[test]
+         fn full_tree_test(sequential 1..500 => BTree<u32, u32>);
+    }
 
-        // Insert just enough to be 1 entry short of splitting the root again
-        let node_cell = BTree::make_node_cell(&42u64, 23).unwrap();
-        let node_capacity = empty_node.total_free_space() as u64
-            / (CELL_POINTER_SIZE as u64 + node_cell.len() as u64);
-        println!("node_capacity: {node_capacity}");
-        let required_inserts_to_split_root = expected_rightmost_after_splits(node_capacity + 1);
-        println!("required_inserts_to_split_root: {required_inserts_to_split_root}");
-        let insertion_range =
-            expected_rightmost_after_splits(3) + 1..required_inserts_to_split_root;
+    proptest! {
+        #[test]
+        fn removal_of_nonexistent_val_doesnt_modify_tree(mut vals in prop::collection::vec(prop::num::u32::ANY, 2usize..1000), fanout in 5usize..50) {
+            let to_remove = vals.pop().unwrap();
+            prop_assume!(!vals.contains(&to_remove));
+            let mut t = BTree::new(fanout);
+            for v in vals {
+                t.insert(v, v);
+            }
+            let before_removal = t.to_description();
+            let removed = t.remove(&to_remove);
+            let after_removal = t.to_description();
+            assert!(removed.is_none());
+            assert_eq!(before_removal, after_removal);
+        }
 
-        // to show that required amount is actually what caused the split, not sooner
-        insert_values(&mut btree, insertion_range);
-        assert_eq!(btree.get_root_page_id().unwrap(), single_split_root_id);
-        let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root);
-        assert_eq!(
-            (0..required_inserts_to_split_root).collect::<Vec<u64>>(),
-            retrieved_vals
-        );
+        #[test]
+        fn get_of_nonexistent_val_doesnt_modify_tree(mut vals in prop::collection::vec(prop::num::u32::ANY, 2usize..1000), fanout in 5usize..50) {
+            let to_get = vals.pop().unwrap();
+            prop_assume!(!vals.contains(&to_get));
+            let mut t = BTree::new(fanout);
+            for v in vals {
+                t.insert(v, v);
+            }
+            let before_removal = t.to_description();
+            let got = t.get(&to_get);
+            let after_removal = t.to_description();
+            assert!(got.is_none());
+            assert_eq!(before_removal, after_removal);
+        }
 
-        // now add one more and prove root is split
-        insert_values(
-            &mut btree,
-            required_inserts_to_split_root..required_inserts_to_split_root + 1,
-        );
-        let post_root_split_root_id = btree.get_root_page_id().unwrap();
-        assert_ne!(post_root_split_root_id, single_split_root_id);
-        let retrieved_vals = lookup_values(&btree, 0..required_inserts_to_split_root + 1);
-        assert_eq!(
-            (0..required_inserts_to_split_root + 1).collect::<Vec<u64>>(),
-            retrieved_vals
-        );
+    }
 
-        visualize_tree(&btree);
+    #[test]
+    fn split_as_leaf_insert_right() {
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6, 7] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
 
-        // now for deletion and merge
-        let mut cursor = BTreeCursor::new(&btree);
-        cursor.down(0);
-        let post_merge_root_id = cursor.current().page_id();
-        cursor.down(1);
-        assert_eq!(cursor.current().page_id(), 2);
-        let expected_first_key_after_merge = cursor.current().rightmost_key::<u64>().unwrap();
-        drop(cursor);
+        let output_tree = "
+            0: [3, 5] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5] (0)
+            0->2: L[6, 7, 8] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
 
-        // delete a single key, which should be enough to cause a merge at both the leaves, and the
-        // parents, promoting the merged parent to root.
-        btree.delete::<u64>(&0).unwrap();
-        visualize_tree(&btree);
-        let mut expected_vals = vec![None];
-        expected_vals.extend((1..expected_rightmost_after_splits(2)).map(Some));
-        let retrieved_vals = lookup_values_options(&btree, 0..expected_rightmost_after_splits(2));
-        assert_eq!(expected_vals, retrieved_vals);
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.root.insert(8, 8);
 
-        // show merge happened, all the way up to root
-        let cursor = BTreeCursor::new(&btree);
-        assert_eq!(post_merge_root_id, post_merge_root_id);
-        assert_eq!(cursor.current().member_count(), node_capacity as u16);
-        let left_key = cursor.current().key_from_cell::<u64>(0).unwrap();
-        assert_eq!(
-            expected_first_key_after_merge, left_key,
-            "Leftmost key is now the high key of the cell that was formerly in position 1"
-        );
-        assert_eq!(cursor.current().member_count(), node_capacity as u16);
-        drop(btree);
-        fs::remove_file(filename).unwrap();
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn split_as_leaf_insert_left() {
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[5, 6, 7, 8] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [3, 6] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6] (0)
+            0->2: L[7, 8] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.root.insert(4, 4);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn split_as_node_insert_left() {
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20, 23, 28] (5)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->1->3: L[24, 25, 26, 27] (0)
+            0->1->4: L[29, 30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.insert(19, 19);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn split_as_node_insert_right() {
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20, 23, 28] (5)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->1->3: L[24, 25, 26, 27] (0)
+            0->1->4: L[29, 30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20] (3)
+            0->2: [25, 28] (3)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20] (0)
+            0->1->2: L[21, 22, 23] (0)
+            0->2->0: L[24, 25] (0)
+            0->2->1: L[26, 27, 28] (0)
+            0->2->2: L[29, 30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.insert(28, 28);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn merge_left_leaf() {
+        let input_tree = "
+            0: [2, 6] (3)
+            0->0: L[0, 1, 2] (0)
+            0->1: L[5, 6] (0)
+            0->2: L[7, 8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [6] (2)
+            0->0: L[0, 1, 2, 5] (0)
+            0->1: L[7, 8, 9, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&6);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn merge_right_leaf() {
+        let input_tree = "
+            0: [5, 7] (3)
+            0->0: L[0, 1, 2, 3, 4, 5] (0)
+            0->1: L[6, 7] (0)
+            0->2: L[8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [5] (2)
+            0->0: L[0, 1, 2, 3, 4, 5] (0)
+            0->1: L[6, 8, 9, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&7);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn merge_left_node() {
+        let input_tree = "
+            0: [7, 13] (3)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 11] (3)
+            0->2: [15, 17, 19, 21] (5)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->1->0: L[8, 9] (0)
+            0->1->1: L[10, 11] (0)
+            0->1->2: L[12, 13] (0)
+            0->2->0: L[14, 15] (0)
+            0->2->1: L[16, 17] (0)
+            0->2->2: L[18, 19] (0)
+            0->2->3: L[20, 21] (0)
+            0->2->4: L[22, 23] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [13] (2)
+            0->0: [1, 3, 5, 7, 11] (6)
+            0->1: [15, 17, 19, 21] (5)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[9, 10, 11] (0)
+            0->0->5: L[12, 13] (0)
+            0->1->0: L[14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19] (0)
+            0->1->3: L[20, 21] (0)
+            0->1->4: L[22, 23] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&8);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn merge_right_node() {
+        // A merge-right only happens if the left node can not fit the node
+        let input_tree = "
+            0: [11, 17] (3)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->2: [19, 21, 23] (4)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->1->0: L[12, 13] (0)
+            0->1->1: L[14, 15] (0)
+            0->1->2: L[16, 17] (0)
+            0->2->0: L[18, 19] (0)
+            0->2->1: L[20, 21] (0)
+            0->2->2: L[22, 23] (0)
+            0->2->3: L[24, 25] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [11] (2)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [15, 17, 19, 21, 23] (6)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->1->0: L[12, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19] (0)
+            0->1->3: L[20, 21] (0)
+            0->1->4: L[22, 23] (0)
+            0->1->5: L[24, 25] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&13);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_left_leaf() {
+        let input_tree = "
+            0: [7, 10] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7] (0)
+            0->1: L[8, 9, 10] (0)
+            0->2: L[11, 12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4, 10] (3)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 6, 7, 8, 9] (0)
+            0->2: L[11, 12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&10);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_left_leaf_edge() {
+        let input_tree = "
+            0: [7] (2)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7] (0)
+            0->1: L[8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4] (2)
+            0->0: L[0, 1, 2, 3, 4] (0)
+            0->1: L[5, 6, 7, 8, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&9);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_leaf() {
+        let input_tree = "
+            0: [8, 11] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7, 8] (0)
+            0->1: L[9, 10, 11] (0)
+            0->2: L[12, 13, 14, 15, 16, 17, 18, 19] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [8, 14] (3)
+            0->0: L[0, 1, 2, 3, 4, 5, 6, 7, 8] (0)
+            0->1: L[9, 10, 12, 13, 14] (0)
+            0->2: L[15, 16, 17, 18, 19] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&11);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_leaf_edge() {
+        let input_tree = "
+            0: [2] (2)
+            0->0: L[0, 1, 2] (0)
+            0->1: L[3, 4, 5, 6, 7, 8, 9, 10] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [5] (2)
+            0->0: L[0, 1, 3, 4, 5] (0)
+            0->1: L[6, 7, 8, 9, 10] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 9);
+        t.remove(&2);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_left_node() {
+        let input_tree = "
+            0: [11, 17] (3)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->2: [19, 21, 23, 25, 27, 29] (7)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->1->0: L[12, 13] (0)
+            0->1->1: L[14, 15] (0)
+            0->1->2: L[16, 17] (0)
+            0->2->0: L[18, 19] (0)
+            0->2->1: L[20, 21] (0)
+            0->2->2: L[22, 23] (0)
+            0->2->3: L[24, 25] (0)
+            0->2->4: L[26, 27] (0)
+            0->2->5: L[28, 29] (0)
+            0->2->6: L[30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [7, 17] (3)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 11, 15] (4)
+            0->2: [19, 21, 23, 25, 27, 29] (7)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->1->0: L[8, 9] (0)
+            0->1->1: L[10, 11] (0)
+            0->1->2: L[12, 13, 15] (0)
+            0->1->3: L[16, 17] (0)
+            0->2->0: L[18, 19] (0)
+            0->2->1: L[20, 21] (0)
+            0->2->2: L[22, 23] (0)
+            0->2->3: L[24, 25] (0)
+            0->2->4: L[26, 27] (0)
+            0->2->5: L[28, 29] (0)
+            0->2->6: L[30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&14);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_node() {
+        let input_tree = "
+            0: [13, 19] (3)
+            0->0: [1, 3, 5, 7, 9, 11] (7)
+            0->1: [15, 17] (3)
+            0->2: [21, 23, 25, 27, 29] (6)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->0->6: L[12, 13] (0)
+            0->1->0: L[14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19] (0)
+            0->2->0: L[20, 21] (0)
+            0->2->1: L[22, 23] (0)
+            0->2->2: L[24, 25] (0)
+            0->2->3: L[26, 27] (0)
+            0->2->4: L[28, 29] (0)
+            0->2->5: L[30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [13, 23] (3)
+            0->0: [1, 3, 5, 7, 9, 11] (7)
+            0->1: [17, 19, 21] (4)
+            0->2: [25, 27, 29] (4)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->0->6: L[12, 13] (0)
+            0->1->0: L[14, 15, 17] (0)
+            0->1->1: L[18, 19] (0)
+            0->1->2: L[20, 21] (0)
+            0->1->3: L[22, 23] (0)
+            0->2->0: L[24, 25] (0)
+            0->2->1: L[26, 27] (0)
+            0->2->2: L[28, 29] (0)
+            0->2->3: L[30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&16);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_left_node_edge() {
+        let input_tree = "
+            0: [11] (2)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->0->4: L[8, 9] (0)
+            0->0->5: L[10, 11] (0)
+            0->1->0: L[12, 13] (0)
+            0->1->1: L[14, 15] (0)
+            0->1->2: L[16, 17] (0)
+       ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [7] (2)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 11, 15] (4)
+            0->0->0: L[0, 1] (0)
+            0->0->1: L[2, 3] (0)
+            0->0->2: L[4, 5] (0)
+            0->0->3: L[6, 7] (0)
+            0->1->0: L[8, 9] (0)
+            0->1->1: L[10, 11] (0)
+            0->1->2: L[12, 13, 15] (0)
+            0->1->3: L[16, 17] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&14);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+
+    #[test]
+    fn steal_from_right_node_edge() {
+        let input_tree = "
+            0: [19] (2)
+            0->0: [15, 17] (3)
+            0->1: [21, 23, 25, 27, 29] (6)
+            0->0->0: L[14, 15] (0)
+            0->0->1: L[16, 17] (0)
+            0->0->2: L[18, 19] (0)
+            0->1->0: L[20, 21] (0)
+            0->1->1: L[22, 23] (0)
+            0->1->2: L[24, 25] (0)
+            0->1->3: L[26, 27] (0)
+            0->1->4: L[28, 29] (0)
+            0->1->5: L[30, 31] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [23] (2)
+            0->0: [17, 19, 21] (4)
+            0->1: [25, 27, 29] (4)
+            0->0->0: L[14, 15, 17] (0)
+            0->0->1: L[18, 19] (0)
+            0->0->2: L[20, 21] (0)
+            0->0->3: L[22, 23] (0)
+            0->1->0: L[24, 25] (0)
+            0->1->1: L[26, 27] (0)
+            0->1->2: L[28, 29] (0)
+            0->1->3: L[30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 6);
+        t.remove(&16);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
     }
 }

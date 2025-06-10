@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt::Display,
     io::{self, Read, Write},
+    mem,
     rc::Rc,
     string,
 };
@@ -44,6 +45,8 @@ type Result<T> = std::result::Result<T, SerdeError>;
 
 pub trait Serialize {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()>;
+
+    fn bytes_needed(&self) -> usize;
 }
 pub trait Deserialize
 where
@@ -57,6 +60,10 @@ impl Serialize for u16 {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
         dest.write_all(&self.to_be_bytes())?;
         Ok(())
+    }
+
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<Self>()
     }
 }
 impl Deserialize for u16 {
@@ -73,6 +80,10 @@ impl Serialize for u32 {
         dest.write_all(&self.to_be_bytes())?;
         Ok(())
     }
+
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<Self>()
+    }
 }
 impl Deserialize for u32 {
     type ExtraInfo = ();
@@ -87,6 +98,9 @@ impl Serialize for u64 {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
         dest.write_all(&self.to_be_bytes())?;
         Ok(())
+    }
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<Self>()
     }
 }
 impl Deserialize for u64 {
@@ -103,6 +117,9 @@ impl Serialize for i32 {
         dest.write_all(&self.to_be_bytes())?;
         Ok(())
     }
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<Self>()
+    }
 }
 impl Deserialize for i32 {
     type ExtraInfo = ();
@@ -117,6 +134,9 @@ impl Serialize for f64 {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
         dest.write_all(&self.to_be_bytes())?;
         Ok(())
+    }
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<Self>()
     }
 }
 impl Deserialize for f64 {
@@ -134,6 +154,10 @@ impl Serialize for String {
         dest.write_all(self.as_bytes())?;
 
         Ok(())
+    }
+
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<u64>() + self.as_bytes().len()
     }
 }
 impl Deserialize for String {
@@ -157,6 +181,10 @@ impl Serialize for NumericValueSign {
         dest.write_all(&[byte])?;
         Ok(())
     }
+
+    fn bytes_needed(&self) -> usize {
+        1
+    }
 }
 impl Deserialize for NumericValueSign {
     type ExtraInfo = ();
@@ -179,6 +207,17 @@ impl Serialize for NumericValue {
             digit_group.write_to_bytes(dest)?;
         }
         Ok(())
+    }
+
+    // TODO: Figure out how to make this derivable
+    fn bytes_needed(&self) -> usize {
+        let mut needed = self.total_digits.bytes_needed()
+            + self.first_group_weight.bytes_needed()
+            + self.sign.bytes_needed();
+        for digit_group in self.digits.iter() {
+            needed += digit_group.bytes_needed();
+        }
+        needed
     }
 }
 impl Deserialize for NumericValue {
@@ -213,6 +252,10 @@ impl Serialize for Char {
         dest.write_all(self.v.as_bytes())?;
         Ok(())
     }
+
+    fn bytes_needed(&self) -> usize {
+        self.v.bytes_needed()
+    }
 }
 impl Deserialize for Char {
     type ExtraInfo = u32; // string size
@@ -228,6 +271,10 @@ impl Serialize for Timestamp {
     fn write_to_bytes(&self, dest: &mut impl Write) -> Result<()> {
         self.v.write_to_bytes(dest)?;
         Ok(())
+    }
+
+    fn bytes_needed(&self) -> usize {
+        self.v.bytes_needed()
     }
 }
 impl Deserialize for Timestamp {
@@ -249,6 +296,17 @@ impl Serialize for DbValue {
             Self::Char(c) => c.write_to_bytes(dest),
             Self::Double(d) => d.write_to_bytes(dest),
             Self::Timestamp(t) => t.write_to_bytes(dest),
+        }
+    }
+
+    fn bytes_needed(&self) -> usize {
+        match self {
+            Self::Numeric(nv) => nv.bytes_needed(),
+            Self::Integer(i) => i.bytes_needed(),
+            Self::Varchar(s) => s.bytes_needed(),
+            Self::Char(c) => c.bytes_needed(),
+            Self::Double(d) => d.bytes_needed(),
+            Self::Timestamp(t) => t.bytes_needed(),
         }
     }
 }
@@ -274,6 +332,10 @@ impl Serialize for Row {
         }
         Ok(())
     }
+
+    fn bytes_needed(&self) -> usize {
+        self.data.iter().map(|x| x.bytes_needed()).sum()
+    }
 }
 impl Deserialize for Row {
     type ExtraInfo = Rc<Schema>;
@@ -296,6 +358,10 @@ impl<T: Serialize> Serialize for Vec<T> {
             item.write_to_bytes(dest)?;
         }
         Ok(())
+    }
+
+    fn bytes_needed(&self) -> usize {
+        mem::size_of::<u64>() + self.iter().map(|x| x.bytes_needed()).sum::<usize>()
     }
 }
 impl<T: Deserialize<ExtraInfo = ()>> Deserialize for Vec<T> {

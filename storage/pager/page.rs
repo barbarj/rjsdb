@@ -118,12 +118,10 @@ impl PageFlags {
 #[repr(u8)]
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PageKind {
-    Heap,
-    BTreeMetaRoot,
-    BTreeNode,
-    BTreeLeafHeap,
-    BTreeLeafNotHeap,
     Unitialized,
+    Heap,
+    BTreeNode,
+    BTreeLeaf,
 }
 
 // TODO: Add CRC check in addition to the checksum
@@ -233,6 +231,10 @@ impl Page {
 
     pub fn total_free_space(&self) -> u16 {
         self.header.total_free_space
+    }
+
+    pub fn can_fit_data(&self, size: u16) -> bool {
+        size + CELL_POINTER_SIZE <= self.total_free_space()
     }
 
     pub fn kind(&self) -> PageKind {
@@ -453,16 +455,19 @@ impl Page {
         ptr.size
     }
 
-    pub fn get_cell(&self, cell_position: u16) -> Vec<u8> {
+    pub fn get_cell_owned(&self, cell_position: u16) -> Vec<u8> {
+        let slice = self.cell_bytes(cell_position);
+        let mut cell = Vec::with_capacity(slice.len());
+        cell.extend_from_slice(slice);
+        cell
+    }
+
+    pub fn cell_bytes(&self, cell_position: u16) -> &[u8] {
         assert!(cell_position < self.header.cell_count);
         let pointer = self.get_cell_pointer(cell_position);
         let start = (pointer.end_position - pointer.size) as usize;
         let end = pointer.end_position as usize;
-        let slice = &self.data.data[start..end];
-
-        let mut cell = Vec::with_capacity(pointer.size as usize);
-        cell.extend_from_slice(slice);
-        cell
+        &self.data.data[start..end]
     }
 }
 
@@ -488,6 +493,10 @@ impl Serialize for CellPointer {
         self.end_position.write_to_bytes(dest)?;
         self.size.write_to_bytes(dest)?;
         Ok(())
+    }
+
+    fn bytes_needed(&self) -> usize {
+        CELL_POINTER_SIZE.into()
     }
 }
 impl Deserialize for CellPointer {
@@ -539,7 +548,7 @@ mod tests {
     fn get_all_cells(page: &Page) -> Vec<Vec<u32>> {
         let mut read_cells: Vec<Vec<u32>> = Vec::new();
         for idx in 0..page.header.cell_count {
-            let data = page.get_cell(idx);
+            let data = page.get_cell_owned(idx);
             let mut reader = &data[..];
             read_cells.push(Vec::from_bytes(&mut reader, &()).unwrap());
         }

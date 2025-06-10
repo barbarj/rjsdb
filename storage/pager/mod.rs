@@ -350,7 +350,7 @@ mod tests {
         let page_ref = pager.get_page(fd.as_raw_fd(), page_id).unwrap();
         let page = page_ref.borrow();
         assert_eq!(page.id(), page_id);
-        let actual_bytes = page.get_cell(0);
+        let actual_bytes = page.get_cell_owned(0);
         let mut reader = &actual_bytes[..];
         Vec::from_bytes(&mut reader, &()).unwrap()
     }
