@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("This serialization format is only supported on 64-bit systems");
 
-struct Serializer<W: Write> {
+pub struct Serializer<W: Write> {
     writer: W,
 }
 impl<W: Write> Serializer<W> {
@@ -105,12 +105,14 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.serialize_u64(v.len() as u64)?;
         self.writer.write_all(v)?;
         Ok(())
     }
 
     fn serialize_none(self) -> Result<()> {
-        self.serialize_unit()
+        self.serialize_u8(0)?;
+        Ok(())
     }
 
     // TODO: Figure out how to meaningfully distinguish between arbitrary some/none values
@@ -118,6 +120,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     where
         T: ?Sized + Serialize,
     {
+        self.serialize_u8(1)?;
         value.serialize(self)
     }
 
