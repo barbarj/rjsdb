@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{io, rc::Rc};
 
 use generate::{Generate, Rng};
@@ -38,7 +39,7 @@ impl From<io::Error> for StorageError {
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct NumericCfg {
     // TODO: Both of these values should probably be a smaller type.
     // Figure out what that type should be.

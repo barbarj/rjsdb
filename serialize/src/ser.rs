@@ -4,9 +4,6 @@ use serde::{ser, Serialize};
 
 use crate::error::{Error, Result};
 
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("This serialization format is only supported on 64-bit systems");
-
 pub struct Serializer<W: Write> {
     writer: W,
 }
@@ -48,51 +45,63 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_i8(self, v: i8) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_i16(self, v: i16) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_i32(self, v: i32) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_i64(self, v: i64) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_i128(self, v: i128) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_u8(self, v: u8) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_u16(self, v: u16) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_u32(self, v: u32) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_u64(self, v: u64) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_u128(self, v: u128) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_f32(self, v: f32) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_f64(self, v: f64) -> Result<()> {
-        self.serialize_bytes(&v.to_le_bytes())
+        self.writer.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
 
     fn serialize_char(self, v: char) -> Result<()> {
@@ -100,7 +109,6 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
-        self.serialize_u64(v.len() as u64)?;
         self.serialize_bytes(v.as_bytes())
     }
 
@@ -170,8 +178,8 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
         Ok(self)
     }
 
-    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
-        self.serialize_seq(Some(len))
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
+        Ok(self)
     }
 
     fn serialize_tuple_struct(
