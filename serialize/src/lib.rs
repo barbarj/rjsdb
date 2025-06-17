@@ -9,6 +9,15 @@ pub use ser::{to_bytes, to_writer, Serializer};
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("This serialization format is only supported on 64-bit systems");
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize)]
+struct FooBar {
+    a: usize,
+    b: String,
+    c: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -112,5 +121,12 @@ mod tests {
             },
         };
         assert_value_serdes_correctly(input)
+    }
+
+    #[test]
+    fn option() {
+        assert_value_serdes_correctly::<Option<u32>>(None);
+        assert_value_serdes_correctly(Some(421));
+        assert_value_serdes_correctly(Some(UnitEnum::Baz));
     }
 }

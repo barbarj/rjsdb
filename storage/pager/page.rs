@@ -1,4 +1,6 @@
 use core::slice;
+use serde::{Deserialize, Serialize};
+use serialize::{from_reader, to_bytes, to_writer, Error as SerdeError};
 use std::{
     io::{Error as IoError, Write},
     mem,
@@ -6,8 +8,6 @@ use std::{
     ops::Range,
     os::unix::fs::FileExt,
 };
-
-use crate::serialize::{Deserialize, SerdeError, Serialize};
 
 /*
 * Page Requirements
@@ -343,7 +343,7 @@ impl Page {
             CELL_POINTER_SIZE * cell_position,
             CELL_POINTER_SIZE as usize,
         );
-        cell_pointer.write_to_bytes(&mut pointer_writer)?;
+        to_writer(&mut pointer_writer, &cell_pointer)?;
         drop(pointer_writer);
         self.header.cell_count += 1;
         self.header.free_space_start += CELL_POINTER_SIZE;
@@ -383,7 +383,6 @@ impl Page {
     fn force_defragment(&mut self) -> Result<(), PageError> {
         let mut tmp_buffer = PageBuffer::new();
         let mut dest_end = PAGE_BUFFER_SIZE;
-        let mut ptr_buf = Vec::with_capacity(CELL_POINTER_SIZE as usize);
         for i in 0..self.header.cell_count {
             let mut pointer = self.get_cell_pointer(i);
             let cell_start = pointer.end_position - pointer.size;
@@ -395,10 +394,10 @@ impl Page {
 
             // write updated pointer
             pointer.end_position = dest_end;
-            pointer.write_to_bytes(&mut ptr_buf)?;
-            let ptr_data = &ptr_buf[..];
+            let ptr_data = &to_bytes(&pointer)?;
+            // TODO: make it so that the serialization goes directly to the tmp buffer instead of
+            // to bytes first
             tmp_buffer.write_to(CELL_POINTER_SIZE * i, ptr_data)?;
-            ptr_buf.clear();
 
             dest_end -= pointer.size;
         }
@@ -447,7 +446,7 @@ impl Page {
         let offset_start = (position * CELL_POINTER_SIZE) as usize;
         let offset_size = CELL_POINTER_SIZE as usize;
         let mut pointer_slice = &self.data.data[offset_start..offset_start + offset_size];
-        CellPointer::from_bytes(&mut pointer_slice, &()).unwrap()
+        from_reader(&mut pointer_slice).unwrap()
     }
 
     pub fn cell_size(&self, position: u16) -> u16 {
@@ -477,38 +476,16 @@ fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
     let mut sum = 0;
     let chunks = data.len() / 8;
     for _ in 0..chunks {
-        let v = u64::from_bytes(&mut reader, &())?;
+        let v: u64 = from_reader(&mut reader)?;
         sum += v;
     }
     Ok(sum)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CellPointer {
     end_position: PageBufferOffset,
     size: PageBufferOffset,
-}
-impl Serialize for CellPointer {
-    fn write_to_bytes(&self, dest: &mut impl std::io::Write) -> Result<(), SerdeError> {
-        self.end_position.write_to_bytes(dest)?;
-        self.size.write_to_bytes(dest)?;
-        Ok(())
-    }
-
-    fn bytes_needed(&self) -> usize {
-        CELL_POINTER_SIZE.into()
-    }
-}
-impl Deserialize for CellPointer {
-    type ExtraInfo = ();
-    fn from_bytes(
-        from: &mut impl std::io::Read,
-        _extra: &Self::ExtraInfo,
-    ) -> Result<Self, SerdeError> {
-        let end_position = PageBufferOffset::from_bytes(from, &())?;
-        let size = PageBufferOffset::from_bytes(from, &())?;
-        Ok(CellPointer { end_position, size })
-    }
 }
 
 #[cfg(test)]
@@ -536,11 +513,12 @@ mod tests {
     #[test]
     fn test_checksum() {
         let mut bytes = Vec::new();
-        100u64.write_to_bytes(&mut bytes).unwrap();
-        200u64.write_to_bytes(&mut bytes).unwrap();
-        300u64.write_to_bytes(&mut bytes).unwrap();
-        0u32.write_to_bytes(&mut bytes).unwrap();
-        100u32.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &100u64).unwrap();
+        to_writer(&mut bytes, &200u64).unwrap();
+        to_writer(&mut bytes, &300u64).unwrap();
+        to_writer(&mut bytes, &0u32).unwrap();
+        to_writer(&mut bytes, &100u32).unwrap();
+
         let res = checksum(&bytes[..]).unwrap();
         assert_eq!(res, 700);
     }
@@ -550,7 +528,7 @@ mod tests {
         for idx in 0..page.header.cell_count {
             let data = page.get_cell_owned(idx);
             let mut reader = &data[..];
-            read_cells.push(Vec::from_bytes(&mut reader, &()).unwrap());
+            read_cells.push(from_reader(&mut reader).unwrap());
         }
         read_cells
     }
@@ -573,7 +551,7 @@ mod tests {
         let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page.insert_cell(idx as u16, &buffer[..]).unwrap();
             data_sizes.push(buffer.len());
             buffer.clear();
@@ -611,16 +589,15 @@ mod tests {
 
         // add in middle
         let mut buffer = Vec::new();
-        vec![10u32, 9, 8, 7].write_to_bytes(&mut buffer).unwrap();
+
+        to_writer(&mut buffer, &vec![10u32, 9, 8, 7]).unwrap();
         let middle_cell_size = buffer.len();
         page.insert_cell(2, &buffer[..]).unwrap();
         buffer.clear();
         print_pointers(&page);
         println!("----------");
 
-        vec![11u32, 12, 13, 14, 15]
-            .write_to_bytes(&mut buffer)
-            .unwrap();
+        to_writer(&mut buffer, &vec![11u32, 12, 13, 14, 15]).unwrap();
         let end_cell_size = buffer.len();
         page.insert_cell(1, &buffer[..]).unwrap();
         print_pointers(&page);
@@ -654,9 +631,9 @@ mod tests {
         let cell10s = vec![10u32, 10, 10, 10, 10];
         let cell20s = vec![20u32, 20, 20, 20, 20];
         let mut bytes10s = Vec::new();
-        cell10s.write_to_bytes(&mut bytes10s).unwrap();
+        to_writer(&mut bytes10s, &cell10s).unwrap();
         let mut bytes20s = Vec::new();
-        cell20s.write_to_bytes(&mut bytes20s).unwrap();
+        to_writer(&mut bytes20s, &cell20s).unwrap();
         let cell_size = bytes10s.len() as u16;
 
         let mut cell_count = 0;
@@ -724,19 +701,19 @@ mod tests {
         let cell1 = vec![30u32, 30, 30, 30];
 
         let mut bytes = Vec::new();
-        cell0.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell0).unwrap();
         page.insert_cell(0, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        cell2.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell2).unwrap();
         page.insert_cell(1, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        cell1.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell1).unwrap();
         page.insert_cell(1, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
@@ -760,19 +737,19 @@ mod tests {
         let cell1 = vec![30u32, 30, 30, 30];
 
         let mut bytes = Vec::new();
-        cell0.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell0).unwrap();
         page.insert_cell(0, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        cell_deleted.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell_deleted).unwrap();
         page.insert_cell(1, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        cell2.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell2).unwrap();
         page.insert_cell(2, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
@@ -780,7 +757,7 @@ mod tests {
 
         page.remove_cell(1);
 
-        cell1.write_to_bytes(&mut bytes).unwrap();
+        to_writer(&mut bytes, &cell1).unwrap();
         page.insert_cell(1, &bytes).unwrap();
         bytes.clear();
         print_pointers(&page);
@@ -816,7 +793,7 @@ mod tests {
         let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page.insert_cell(idx as u16, &buffer[..]).unwrap();
             data_sizes.push(buffer.len());
             buffer.clear();
@@ -855,7 +832,7 @@ mod tests {
         let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page.insert_cell(idx as u16, &buffer[..]).unwrap();
             data_sizes.push(buffer.len());
             buffer.clear();
@@ -887,7 +864,7 @@ mod tests {
         let cells0 = vec![vec![10, 11, 12, 13]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells0.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page0.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }
@@ -897,7 +874,7 @@ mod tests {
         let cells1 = vec![vec![20, 21, 22, 23]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells1.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page1.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }
@@ -907,7 +884,7 @@ mod tests {
         let cells2 = vec![vec![30, 31, 32, 33]];
         let mut buffer = Vec::new();
         for (idx, cell) in cells2.iter().enumerate() {
-            cell.write_to_bytes(&mut buffer).unwrap();
+            to_writer(&mut buffer, &cell).unwrap();
             page2.insert_cell(idx as u16, &buffer[..]).unwrap();
             buffer.clear();
         }

@@ -25,7 +25,6 @@ mod btree;
 mod btree_disk;
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
-mod serialize;
 
 #[derive(Debug)]
 pub enum StorageError {

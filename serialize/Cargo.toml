@@ -1,5 +1,5 @@
 [package]
-name = "rjsdb_serialize"
+name = "serialize"
 version.workspace = true
 edition.workspace = true
 

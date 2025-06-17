@@ -12,7 +12,7 @@ use std::{collections::HashMap, os::fd::AsRawFd};
 pub type PageId = page::PageId;
 pub use page::{Page, PageError, PageKind, PAGE_SIZE};
 
-use crate::serialize::SerdeError;
+use serialize::Error as SerdeError;
 pub const CELL_POINTER_SIZE: u16 = page::CELL_POINTER_SIZE;
 pub const PAGE_BUFFER_SIZE: u16 = page::PAGE_BUFFER_SIZE;
 
@@ -324,7 +324,7 @@ impl Pager {
 mod tests {
     use std::fs::{self, OpenOptions};
 
-    use crate::serialize::{Deserialize, Serialize};
+    use serialize::{from_reader, to_bytes};
 
     use super::*;
 
@@ -337,8 +337,7 @@ mod tests {
         let id = page.id();
         let fill_val = starting_at + (id * 10);
         let data = vec![fill_val, fill_val, fill_val];
-        let mut bytes = Vec::new();
-        data.write_to_bytes(&mut bytes).unwrap();
+        let bytes = to_bytes(&data).unwrap();
         page.insert_cell(page.cell_count(), &bytes[..]).unwrap();
     }
 
@@ -352,7 +351,7 @@ mod tests {
         assert_eq!(page.id(), page_id);
         let actual_bytes = page.get_cell_owned(0);
         let mut reader = &actual_bytes[..];
-        Vec::from_bytes(&mut reader, &()).unwrap()
+        from_reader(&mut reader).unwrap()
     }
 
     fn open_test_file(name: &str) -> File {
