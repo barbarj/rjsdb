@@ -39,73 +39,73 @@ impl<R: Read> Deserializer<R> {
     fn parse_i8(&mut self) -> Result<i8> {
         let mut buf = [0; 1];
         self.reader.read_exact(&mut buf)?;
-        Ok(i8::from_le_bytes(buf))
+        Ok(i8::from_be_bytes(buf))
     }
 
     fn parse_i16(&mut self) -> Result<i16> {
         let mut buf = [0; 2];
         self.reader.read_exact(&mut buf)?;
-        Ok(i16::from_le_bytes(buf))
+        Ok(i16::from_be_bytes(buf))
     }
 
     fn parse_i32(&mut self) -> Result<i32> {
         let mut buf = [0; 4];
         self.reader.read_exact(&mut buf)?;
-        Ok(i32::from_le_bytes(buf))
+        Ok(i32::from_be_bytes(buf))
     }
 
     fn parse_i64(&mut self) -> Result<i64> {
         let mut buf = [0; 8];
         self.reader.read_exact(&mut buf)?;
-        Ok(i64::from_le_bytes(buf))
+        Ok(i64::from_be_bytes(buf))
     }
 
     fn parse_i128(&mut self) -> Result<i128> {
         let mut buf = [0; 16];
         self.reader.read_exact(&mut buf)?;
-        Ok(i128::from_le_bytes(buf))
+        Ok(i128::from_be_bytes(buf))
     }
 
     fn parse_u8(&mut self) -> Result<u8> {
         let mut buf = [0; 1];
         self.reader.read_exact(&mut buf)?;
-        Ok(u8::from_le_bytes(buf))
+        Ok(u8::from_be_bytes(buf))
     }
 
     fn parse_u16(&mut self) -> Result<u16> {
         let mut buf = [0; 2];
         self.reader.read_exact(&mut buf)?;
-        Ok(u16::from_le_bytes(buf))
+        Ok(u16::from_be_bytes(buf))
     }
 
     fn parse_u32(&mut self) -> Result<u32> {
         let mut buf = [0; 4];
         self.reader.read_exact(&mut buf)?;
-        Ok(u32::from_le_bytes(buf))
+        Ok(u32::from_be_bytes(buf))
     }
 
     fn parse_u64(&mut self) -> Result<u64> {
         let mut buf = [0; 8];
         self.reader.read_exact(&mut buf)?;
-        Ok(u64::from_le_bytes(buf))
+        Ok(u64::from_be_bytes(buf))
     }
 
     fn parse_u128(&mut self) -> Result<u128> {
         let mut buf = [0; 16];
         self.reader.read_exact(&mut buf)?;
-        Ok(u128::from_le_bytes(buf))
+        Ok(u128::from_be_bytes(buf))
     }
 
     fn parse_f32(&mut self) -> Result<f32> {
         let mut buf = [0; 4];
         self.reader.read_exact(&mut buf)?;
-        Ok(f32::from_le_bytes(buf))
+        Ok(f32::from_be_bytes(buf))
     }
 
     fn parse_f64(&mut self) -> Result<f64> {
         let mut buf = [0; 8];
         self.reader.read_exact(&mut buf)?;
-        Ok(f64::from_le_bytes(buf))
+        Ok(f64::from_be_bytes(buf))
     }
 
     fn parse_byte_slice(&mut self) -> Result<Vec<u8>> {

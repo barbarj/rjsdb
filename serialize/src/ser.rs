@@ -45,62 +45,62 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_i8(self, v: i8) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_i16(self, v: i16) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_i32(self, v: i32) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_i64(self, v: i64) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_i128(self, v: i128) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_u8(self, v: u8) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_u16(self, v: u16) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_u32(self, v: u32) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_u64(self, v: u64) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_u128(self, v: u128) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_f32(self, v: f32) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 
     fn serialize_f64(self, v: f64) -> Result<()> {
-        self.writer.write_all(&v.to_le_bytes())?;
+        self.writer.write_all(&v.to_be_bytes())?;
         Ok(())
     }
 

@@ -477,6 +477,7 @@ fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
     let chunks = data.len() / 8;
     for _ in 0..chunks {
         let v: u64 = from_reader(&mut reader)?;
+        println!("v: {v}");
         sum += v;
     }
     Ok(sum)
