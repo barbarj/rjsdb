@@ -11,10 +11,12 @@ impl SerializedSize {
     }
 }
 
-pub fn serialized_size<T: Serialize>(value: &T) -> Result<usize> {
+pub fn serialized_size<T: Serialize>(value: &T) -> usize {
     let mut ser = SerializedSize::new();
-    value.serialize(&mut ser)?;
-    Ok(ser.size)
+    value
+        .serialize(&mut ser)
+        .expect("Determining serialized size should always work");
+    ser.size
 }
 
 impl<'a> ser::Serializer for &'a mut SerializedSize {
