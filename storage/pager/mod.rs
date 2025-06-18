@@ -3,6 +3,7 @@
 mod page;
 
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::Error as IoError;
 use std::os::unix::fs::MetadataExt;
@@ -59,23 +60,33 @@ const MAX_PAGE_COUNT: usize = MAX_PAGER_MEMORY / PAGE_SIZE as usize;
 
 #[derive(Debug)]
 pub enum PagerError {
-    IoError(IoError),
-    PageError(PageError),
-    SerdeError(SerdeError),
+    Io(IoError),
+    Page(PageError),
+    Serde(SerdeError),
 }
 impl From<IoError> for PagerError {
     fn from(value: IoError) -> Self {
-        Self::IoError(value)
+        Self::Io(value)
     }
 }
 impl From<PageError> for PagerError {
     fn from(value: PageError) -> Self {
-        Self::PageError(value)
+        Self::Page(value)
     }
 }
 impl From<SerdeError> for PagerError {
     fn from(value: SerdeError) -> Self {
-        Self::SerdeError(value)
+        Self::Serde(value)
+    }
+}
+impl std::error::Error for PagerError {}
+impl Display for PagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f)
+            Self::Page(error) => error.fmt(f)
+            Self::Serde(error) => error.fmt(f)
+        }
     }
 }
 
