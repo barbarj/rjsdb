@@ -2,6 +2,7 @@ use core::slice;
 use serde::{Deserialize, Serialize};
 use serialize::{from_reader, to_bytes, to_writer, Error as SerdeError};
 use std::{
+    fmt::Display,
     io::{Error as IoError, Write},
     mem,
     num::NonZeroU64,
@@ -80,6 +81,17 @@ impl From<IoError> for PageError {
 impl From<SerdeError> for PageError {
     fn from(value: SerdeError) -> Self {
         Self::SerdeError(value)
+    }
+}
+impl std::error::Error for PageError {}
+impl Display for PageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IoError(error) => error.fmt(f),
+            Self::SerdeError(error) => error.fmt(f),
+            Self::NotEnoughSpace => f.write_str("Page error: Not enough space"),
+            Self::Corrupted => f.write_str("Page error: Corrupted"),
+        }
     }
 }
 
@@ -485,8 +497,8 @@ fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CellPointer {
-    end_position: PageBufferOffset,
-    size: PageBufferOffset,
+    pub end_position: PageBufferOffset,
+    pub size: PageBufferOffset,
 }
 
 #[cfg(test)]
