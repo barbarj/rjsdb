@@ -100,10 +100,25 @@ impl<Fd: AsRawFd + Copy> PagerRef<Fd> {
         let new_page = pager.new_page(self.backing_fd, kind)?;
         Ok(new_page)
     }
+
+    fn get_page(&mut self, page_id: PageId) -> Result<Rc<RefCell<Page>>> {
+        let mut pager = self.pager_ref.borrow_mut();
+        let page = pager.get_page(self.backing_fd, page_id)?;
+        Ok(page)
+    }
+
+    fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<K, V>>
+    where
+        K: Ord + Debug + Serialize + DeserializeOwned,
+        V: Serialize + DeserializeOwned,
+    {
+        let page = self.get_page(page_id)?;
+        Ok(Node::new(page))
+    }
 }
 
-enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug, V: Serialize + DeserializeOwned> {
-    Split(K, Node<K, V>),
+enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug> {
+    Split(K, PageId),
     Done,
 }
 
@@ -128,7 +143,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         page.cell_count()
     }
 
-    fn can_fit(&self, key: &K, value: &V) -> bool {
+    fn can_fit<T: Serialize>(&self, key: &K, value: &T) -> bool {
         let needed_space = serialized_size(&(key, value));
         assert!(needed_space <= u16::MAX.into());
         let page = self.page_ref.borrow();
@@ -145,6 +160,11 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         matches!(page.kind(), PageKind::BTreeNode)
     }
 
+    fn page_id(&self) -> PageId {
+        let page = self.page_ref.borrow();
+        page.id()
+    }
+
     fn key_from_cell(&self, pos: u16) -> K {
         let page = self.page_ref.borrow();
         let cell = page.get_cell_owned(pos);
@@ -155,6 +175,15 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             let (cell_key, _): (K, PageId) = from_reader(&cell[..]).unwrap();
             cell_key
         }
+    }
+
+    // TODO: Remove unwraps
+    fn page_id_from_cell(&self, pos: u16) -> PageId {
+        assert!(self.is_node());
+        let page = self.page_ref.borrow();
+        let cell = page.get_cell_owned(pos);
+        let (_, page_id): (K, PageId) = from_reader(&cell[..]).unwrap();
+        page_id
     }
 
     // TODO: Test
@@ -220,7 +249,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         key: K,
         value: V,
         pager_ref: &mut PagerRef<Fd>,
-    ) -> Result<InsertResult<K, V>> {
+    ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
         if !self.can_fit(&key, &value) {
             let (split_key, mut new_node) = self.split(pager_ref)?;
@@ -230,7 +259,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             } else {
                 self.insert_as_leaf(key, value, pager_ref)?;
             }
-            Ok(InsertResult::Split(split_key, new_node))
+            Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
             match self.binary_search_keys(&key) {
                 Ok(pos) => {
@@ -247,14 +276,56 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             Ok(InsertResult::Done)
         }
     }
+    /// For node searches, we only care about which child to descend to,
+    /// so an exact match isn't necessary
+    fn search_keys_as_node(&self, key: &K) -> u16 {
+        match self.binary_search_keys(key) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        }
+    }
+
+    fn add_child_as_node(&mut self, key: K, page_id: PageId, pos: u16) -> Result<()> {
+        assert!(self.is_node());
+        assert!(self.can_fit(&key, &page_id));
+        let mut page = self.page_ref.borrow_mut();
+        page.insert_cell(pos, &to_bytes(&(key, page_id))?)?;
+        Ok(())
+    }
 
     fn insert_as_node<Fd: AsRawFd + Copy>(
         &mut self,
         key: K,
         value: V,
         pager_ref: &mut PagerRef<Fd>,
-    ) -> Result<InsertResult<K, V>> {
-        unimplemented!();
+    ) -> Result<InsertResult<K>> {
+        assert!(self.is_node());
+        let pos = self.search_keys_as_node(&key);
+        let mut child_node = pager_ref.page_node(self.page_id_from_cell(pos))?;
+        if let InsertResult::Split(split_key, new_page_id) =
+            child_node.insert(key, value, pager_ref)?
+        {
+            if !self.can_fit(&split_key, &new_page_id) {
+                let (parent_split_key, mut parent_new_node) = self.split(pager_ref)?;
+                assert!(parent_new_node.is_node());
+                let node_to_add_to = if split_key > parent_split_key {
+                    &mut parent_new_node
+                } else {
+                    self
+                };
+                let parent_pos = node_to_add_to.search_keys_as_node(&split_key);
+                node_to_add_to.add_child_as_node(split_key, new_page_id, parent_pos)?;
+                Ok(InsertResult::Split(
+                    parent_split_key,
+                    parent_new_node.page_id(),
+                ))
+            } else {
+                self.add_child_as_node(split_key, new_page_id, pos)?;
+                Ok(InsertResult::Done)
+            }
+        } else {
+            Ok(InsertResult::Done)
+        }
     }
 
     fn insert<Fd: AsRawFd + Copy>(
@@ -262,7 +333,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         key: K,
         value: V,
         pager_ref: &mut PagerRef<Fd>,
-    ) -> Result<InsertResult<K, V>> {
+    ) -> Result<InsertResult<K>> {
         if self.is_leaf() {
             self.insert_as_leaf(key, value, pager_ref)
         } else {
