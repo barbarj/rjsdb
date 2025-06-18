@@ -177,13 +177,17 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         }
     }
 
+    fn value_from_cell<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
+        let page = self.page_ref.borrow();
+        let cell = page.get_cell_owned(pos);
+        let (_, val): (K, T) = from_reader(&cell[..]).unwrap();
+        Ok(val)
+    }
+
     // TODO: Remove unwraps
     fn page_id_from_cell(&self, pos: u16) -> PageId {
         assert!(self.is_node());
-        let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(pos);
-        let (_, page_id): (K, PageId) = from_reader(&cell[..]).unwrap();
-        page_id
+        self.value_from_cell(pos).unwrap()
     }
 
     // TODO: Test
@@ -293,6 +297,16 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         Ok(())
     }
 
+    fn get_descendent_by_key<Fd: AsRawFd + Copy>(
+        &self,
+        key: &K,
+        pager_ref: &mut PagerRef<Fd>,
+    ) -> Result<(u16, Node<K, V>)> {
+        let pos = self.search_keys_as_node(&key);
+        let descendent = pager_ref.page_node(self.page_id_from_cell(pos))?;
+        Ok((pos, descendent))
+    }
+
     fn insert_as_node<Fd: AsRawFd + Copy>(
         &mut self,
         key: K,
@@ -300,8 +314,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         pager_ref: &mut PagerRef<Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_node());
-        let pos = self.search_keys_as_node(&key);
-        let mut child_node = pager_ref.page_node(self.page_id_from_cell(pos))?;
+        let (pos, mut child_node) = self.get_descendent_by_key(&key, pager_ref)?;
         if let InsertResult::Split(split_key, new_page_id) =
             child_node.insert(key, value, pager_ref)?
         {
@@ -340,6 +353,17 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             self.insert_as_node(key, value, pager_ref)
         }
     }
-}
 
-// TODO: Page operations
+    fn get<Fd: AsRawFd + Copy>(&self, key: &K, pager_ref: &mut PagerRef<Fd>) -> Result<Option<V>> {
+        if self.is_leaf() {
+            match self.binary_search_keys(key) {
+                Ok(pos) => Ok(Some(self.value_from_cell(pos)?)),
+                Err(_) => Ok(None),
+            }
+        } else {
+            assert!(self.is_node());
+            let (_, child_node) = self.get_descendent_by_key(key, pager_ref)?;
+            child_node.get(key, pager_ref)
+        }
+    }
+}
