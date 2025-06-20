@@ -18,9 +18,10 @@ use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 ///
 /// # Notes on Page Structure
 /// - Leaf node cells are (K, V)
-/// - Internal node cells are also (K, PageId), except the last cell, which is always just PageId.
-/// This allows the keys to split the search space and avoid needing a max-key that complicates the
-/// insert logic
+/// - Internal nodes alternate PageIds and keys, so the cell order looks like:
+///    PageId | Key | PageId | Key | PageId... etc.
+///    The sequence always starts and end with PageIds. The Keys split the search space that the
+///    PageIds represent.
 ///
 
 #[derive(Debug)]
@@ -107,9 +108,11 @@ impl<
             }
             let new_page_id_left = new_page_left.id();
             drop(new_page_left);
+
             // update root with new children
-            root_page.insert_cell(0, &to_bytes(&(split_key, new_page_id_left))?)?;
-            root_page.insert_cell(1, &to_bytes(&new_page_id_right)?)?;
+            root_page.insert_cell(0, &to_bytes(&new_page_id_left)?)?;
+            root_page.insert_cell(1, &to_bytes(&split_key)?)?;
+            root_page.insert_cell(2, &to_bytes(&new_page_id_right)?)?;
         }
         Ok(())
     }
@@ -177,13 +180,23 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         if self.is_leaf() {
             page.cell_count()
         } else {
-            assert!(page.cell_count() > 0);
-            page.cell_count() - 1
+            (page.cell_count() - 1) / 2
         }
     }
 
-    fn can_fit<T: Serialize>(&self, value: &T) -> bool {
-        let needed_space: usize = serialized_size(value) + CELL_POINTER_SIZE as usize;
+    fn can_fit_leaf(&self, key: &K, value: &V) -> bool {
+        assert!(self.is_leaf());
+        let needed_space: usize = serialized_size(&(key, value)) + CELL_POINTER_SIZE as usize;
+        assert!(needed_space <= u16::MAX.into());
+        let page = self.page_ref.borrow();
+        page.can_fit_data(needed_space as u16)
+    }
+
+    fn can_fit_node(&self, key: &K) -> bool {
+        assert!(self.is_node());
+        let dummy_id: PageId = 42;
+        let needed_space =
+            serialized_size(&key) + serialized_size(&dummy_id) + (2 * CELL_POINTER_SIZE as usize);
         assert!(needed_space <= u16::MAX.into());
         let page = self.page_ref.borrow();
         page.can_fit_data(needed_space as u16)
@@ -209,51 +222,75 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         page.kind()
     }
 
-    fn key_from_cell_tuple(&self, pos: u16) -> K {
-        assert!(self.is_leaf() || pos < self.key_count());
+    fn key_from_leaf(&self, pos: u16) -> Result<K> {
+        assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         let cell = page.get_cell_owned(pos);
-        if self.is_leaf() {
-            let (cell_key, _): (K, V) = from_reader(&cell[..]).unwrap();
-            cell_key
-        } else {
-            let (cell_key, _): (K, PageId) = from_reader(&cell[..]).unwrap();
-            cell_key
-        }
+        let (key, _): (K, V) = from_reader(&cell[..])?;
+        Ok(key)
     }
 
-    fn value_from_cell_tuple<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
+    fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
+        assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         let cell = page.get_cell_owned(pos);
         let (_, val): (K, T) = from_reader(&cell[..]).unwrap();
         Ok(val)
     }
 
-    fn page_id_from_last_cell(&self) -> Result<PageId> {
+    fn key_pos_to_cell_pos(key_pos: u16) -> u16 {
+        (key_pos * 2) + 1
+    }
+
+    fn id_pos_to_cell_pos(id_pos: u16) -> u16 {
+        id_pos * 2
+    }
+
+    /// Returns None if this cell position will not contain a key
+    fn cell_pos_to_key_pos(cell_pos: u16) -> Option<u16> {
+        if cell_pos % 2 == 0 {
+            None
+        } else {
+            Some(cell_pos / 2) // integer division makes the division of an odd number (2n + 1) by
+                               // 2 result in the same number as if the input were the odd number's
+                               // even counterpart (2n)
+        }
+    }
+
+    fn key_from_inner_node(&self, key_pos: u16) -> Result<K> {
         assert!(self.is_node());
+        let pos = Self::key_pos_to_cell_pos(key_pos);
         let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(self.key_count());
-        let page_id = from_reader(&cell[..]).unwrap();
+        let cell = page.get_cell_owned(pos);
+        let key = from_reader(&cell[..])?;
+        Ok(key)
+    }
+
+    fn page_id_from_inner_node(&self, id_pos: u16) -> Result<PageId> {
+        assert!(self.is_node());
+        let pos = Self::id_pos_to_cell_pos(id_pos);
+        let page = self.page_ref.borrow();
+        let cell = page.get_cell_owned(pos);
+        let page_id = from_reader(&cell[..])?;
         Ok(page_id)
     }
 
-    // TODO: Remove unwraps
-    fn page_id_from_cell(&self, pos: u16) -> PageId {
-        assert!(self.is_node());
-        if pos < self.key_count() {
-            self.value_from_cell_tuple(pos).unwrap()
+    fn key_at_pos(&self, pos: u16) -> Result<K> {
+        if self.is_node() {
+            self.key_from_inner_node(pos)
         } else {
-            self.page_id_from_last_cell().unwrap()
+            self.key_from_leaf(pos)
         }
     }
 
     // TODO: Test
+    // TODO: Figure out if I should remove unwraps
     fn binary_search_keys(&self, key: &K) -> std::result::Result<u16, u16> {
         let mut low = 0;
         let mut high = self.key_count();
         while low < high {
             let mid = (low + high) / 2;
-            let cell_key = self.key_from_cell_tuple(mid);
+            let cell_key = self.key_at_pos(mid).unwrap();
             match &cell_key.cmp(key) {
                 Ordering::Equal => return Ok(mid),
                 Ordering::Less => {
@@ -264,7 +301,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
                 }
             }
         }
-        let cell_key = self.key_from_cell_tuple(low);
+        let cell_key = self.key_at_pos(low).unwrap();
         if &cell_key == key {
             Ok(low)
         } else {
@@ -272,25 +309,73 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         }
     }
 
-    fn split<Fd: AsRawFd + Copy>(
+    fn split_inner_node<Fd: AsRawFd + Copy>(
         &mut self,
-        pager_ref: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<Fd>,
+    ) -> Result<(K, Node<K, V>)> {
+        let half = PAGE_BUFFER_SIZE / 2;
+        // TODO: Assert used space > half
+        let mut used_space = 0;
+        let mut idx = 0;
+        let mut page = self.page_ref.borrow_mut();
+
+        // Find the index of the first cell that begins past the halfway point
+        while used_space < half {
+            let ptr = page.get_cell_pointer(idx);
+            used_space += ptr.size;
+            idx += 1;
+        }
+        if idx % 2 == 0 {
+            // cell at idx contains a pageId, so we actually want to use the key to the left of it.
+            idx -= 1;
+        }
+
+        // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
+        // that before asking for the key
+        let split_key = self.key_from_inner_node(Self::cell_pos_to_key_pos(idx).unwrap())?;
+
+        // get new page
+        let new_page_ref = pager_info.new_page(page.kind())?;
+        let mut new_page = new_page_ref.borrow_mut();
+
+        // copy cells to new page and remove cells from old page
+        let new_page_start_idx = idx + 1;
+        for i in new_page_start_idx..page.cell_count() {
+            let cell = page.get_cell_owned(new_page_start_idx);
+            new_page.insert_cell(i, &cell[..])?;
+            page.remove_cell(new_page_start_idx);
+        }
+        drop(new_page);
+
+        // remove the now hanging right key from this node
+        page.remove_cell(idx);
+
+        let new_node = Node::new(new_page_ref);
+        Ok((split_key, new_node))
+    }
+
+    fn split_leaf<Fd: AsRawFd + Copy>(
+        &mut self,
+        pager_info: &mut PagerInfo<Fd>,
     ) -> Result<(K, Node<K, V>)> {
         let half = PAGE_BUFFER_SIZE / 2;
         let mut used_space = 0;
         let mut idx = 0;
         let mut page = self.page_ref.borrow_mut();
 
-        // determine split point
+        // Find the index of the first cell that begins past the halfway point
         while used_space < half {
             let ptr = page.get_cell_pointer(idx);
             used_space += ptr.size;
             idx += 1;
         }
-        let split_key = self.key_from_cell_tuple(idx - 1);
+        // keys point left, and cell number idx is going to be the first cell in the new page,
+        // so the split key should be one to the left.
+        assert!(idx > 0);
+        let split_key = self.key_from_leaf(idx - 1)?;
 
         // get new page
-        let new_page_ref = pager_ref.new_page(page.kind())?;
+        let new_page_ref = pager_info.new_page(page.kind())?;
         let mut new_page = new_page_ref.borrow_mut();
 
         // copy cells to new page and remove cells from old page
@@ -300,13 +385,6 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             page.remove_cell(idx);
         }
         drop(new_page);
-        // inner nodes don't have a key on the rightmost cell, so we need to fix that
-        if self.is_node() {
-            let cell = page.get_cell_owned(idx - 1);
-            let (_, page_id): (K, PageId) = from_reader(&cell[..])?;
-            page.remove_cell(idx - 1);
-            page.insert_cell(idx - 1, &to_bytes(&page_id)?)?;
-        }
 
         let new_node = Node::new(new_page_ref);
         Ok((split_key, new_node))
@@ -319,8 +397,8 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         pager_ref: &mut PagerInfo<Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
-        if !self.can_fit(&(&key, &value)) {
-            let (split_key, mut new_node) = self.split(pager_ref)?;
+        if !self.can_fit_leaf(&key, &value) {
+            let (split_key, mut new_node) = self.split_leaf(pager_ref)?;
             assert!(new_node.is_leaf());
             if key > split_key {
                 new_node.insert_as_leaf(key, value, pager_ref)?;
@@ -344,21 +422,14 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             Ok(InsertResult::Done)
         }
     }
+
     /// For node searches, we only care about which child to descend to,
-    /// so an exact match isn't necessary
+    /// so an exact match doesn't provide any additional information
     fn search_keys_as_node(&self, key: &K) -> u16 {
         match self.binary_search_keys(key) {
             Ok(pos) => pos,
             Err(pos) => pos,
         }
-    }
-
-    fn add_child_as_node(&mut self, key: K, page_id: PageId, pos: u16) -> Result<()> {
-        assert!(self.is_node());
-        assert!(self.can_fit(&(&key, &page_id)));
-        let mut page = self.page_ref.borrow_mut();
-        page.insert_cell(pos, &to_bytes(&(key, page_id))?)?;
-        Ok(())
     }
 
     fn get_descendent_by_key<Fd: AsRawFd + Copy>(
@@ -368,37 +439,32 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     ) -> Result<(u16, Node<K, V>)> {
         assert!(self.is_node());
         let pos = self.search_keys_as_node(&key);
-        let descendent = pager_ref.page_node(self.page_id_from_cell(pos))?;
+        let descendent = pager_ref.page_node(self.page_id_from_inner_node(pos)?)?;
         Ok((pos, descendent))
     }
 
-    fn as_node_insert_interior_postsplit_child(
-        &self,
+    fn insert_split_results_into_node(
+        &mut self,
         pos: u16,
-        split_key: K,
+        split_key: &K,
         new_page_id: PageId,
     ) -> Result<()> {
-        let (prior_key, left_page_id): (K, PageId) = self.value_from_cell_tuple(pos)?;
+        let prior_key = self.replace_inner_node_key(pos, split_key)?;
+        let id_cell_pos = Self::id_pos_to_cell_pos(pos + 1);
         let mut page = self.page_ref.borrow_mut();
-        page.remove_cell(pos);
-        page.insert_cell(pos, &to_bytes(&(split_key, left_page_id))?)?;
-        page.insert_cell(pos + 1, &to_bytes(&(prior_key, new_page_id))?)?;
+        page.insert_cell(id_cell_pos, &to_bytes(&new_page_id)?)?;
+        page.insert_cell(id_cell_pos + 1, &to_bytes(&prior_key)?)?;
         Ok(())
     }
 
-    fn as_node_insert_rightmost_postsplit_child(
-        &self,
-        split_key: K,
-        new_page_id: PageId,
-    ) -> Result<()> {
-        let cell_pos = self.key_count();
+    /// replaces the key at key position pos with the new key, and returns the old key
+    fn replace_inner_node_key(&mut self, pos: u16, new_key: &K) -> Result<K> {
+        let old_key = self.key_from_inner_node(pos)?;
+        let cell_idx = Self::key_pos_to_cell_pos(pos);
         let mut page = self.page_ref.borrow_mut();
-        let cell_page_id: PageId = from_reader(&page.get_cell_owned(cell_pos)[..])?;
-        page.remove_cell(cell_pos);
-        page.insert_cell(cell_pos, &to_bytes(&(&split_key, &cell_page_id))?)?;
-        page.insert_cell(cell_pos + 1, &to_bytes(&new_page_id)?)?;
-        assert_eq!(cell_pos + 1, self.key_count());
-        Ok(())
+        page.remove_cell(cell_idx);
+        page.insert_cell(cell_idx, &to_bytes(new_key)?)?;
+        Ok(old_key)
     }
 
     fn insert_as_node<Fd: AsRawFd + Copy>(
@@ -412,68 +478,25 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         if let InsertResult::Split(split_key, new_page_id) =
             child_node.insert(key, value, pager_ref)?
         {
-            // last item
-            if pos == self.key_count() {
-                // This isn't actually what the added bytes will be, but it does conveniently have
-                // the same size, and this is easier to check.
-                if !self.can_fit(&(&split_key, &new_page_id)) {
-                    let (parent_split_key, parent_new_node) = self.split(pager_ref)?;
-                    assert!(parent_new_node.is_node());
+            if !self.can_fit_node(&split_key) {
+                let (parent_split_key, mut parent_new_node) = self.split_inner_node(pager_ref)?;
+                assert!(parent_new_node.is_node());
 
-                    // in this case, we are always updating the rightmost cell in the new node
-                    parent_new_node
-                        .as_node_insert_rightmost_postsplit_child(split_key, new_page_id)?;
-                    Ok(InsertResult::Split(
-                        parent_split_key,
-                        parent_new_node.page_id(),
-                    ))
+                if pos < self.key_count() {
+                    self.insert_split_results_into_node(pos, &split_key, new_page_id)?
                 } else {
-                    self.as_node_insert_rightmost_postsplit_child(split_key, new_page_id)?;
-                    Ok(InsertResult::Done)
+                    // after the split, there's one less key between the two nodes, so account for
+                    // that
+                    let pos = pos - self.key_count() - 1;
+                    parent_new_node.insert_split_results_into_node(pos, &split_key, new_page_id)?;
                 }
+                Ok(InsertResult::Split(
+                    parent_split_key,
+                    parent_new_node.page_id(),
+                ))
             } else {
-                // This isn't actually what the added bytes will be, but it does conveniently have
-                // the same size, and this is easier to check.
-                if !self.can_fit(&(&split_key, &new_page_id)) {
-                    let (parent_split_key, parent_new_node) = self.split(pager_ref)?;
-                    assert!(parent_new_node.is_node());
-
-                    match pos.cmp(&self.key_count()) {
-                        Ordering::Less => {
-                            self.as_node_insert_interior_postsplit_child(
-                                pos,
-                                split_key,
-                                new_page_id,
-                            )?;
-                        }
-                        Ordering::Equal => {
-                            self.as_node_insert_rightmost_postsplit_child(split_key, new_page_id)?;
-                        }
-                        Ordering::Greater => {
-                            let new_page_pos = pos - self.key_count();
-                            assert!(new_page_pos <= parent_new_node.key_count());
-                            if new_page_pos == parent_new_node.key_count() {
-                                parent_new_node.as_node_insert_rightmost_postsplit_child(
-                                    split_key,
-                                    new_page_id,
-                                )?;
-                            } else {
-                                parent_new_node.as_node_insert_interior_postsplit_child(
-                                    new_page_pos,
-                                    split_key,
-                                    new_page_id,
-                                )?;
-                            };
-                        }
-                    }
-                    Ok(InsertResult::Split(
-                        parent_split_key,
-                        parent_new_node.page_id(),
-                    ))
-                } else {
-                    self.as_node_insert_interior_postsplit_child(pos, split_key, new_page_id)?;
-                    Ok(InsertResult::Done)
-                }
+                self.insert_split_results_into_node(pos, &split_key, new_page_id)?;
+                Ok(InsertResult::Done)
             }
         } else {
             Ok(InsertResult::Done)
@@ -496,7 +519,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn get<Fd: AsRawFd + Copy>(&self, key: &K, pager_ref: &mut PagerInfo<Fd>) -> Result<Option<V>> {
         if self.is_leaf() {
             match self.binary_search_keys(key) {
-                Ok(pos) => Ok(Some(self.value_from_cell_tuple(pos)?)),
+                Ok(pos) => Ok(Some(self.value_from_leaf(pos)?)),
                 Err(_) => Ok(None),
             }
         } else {
