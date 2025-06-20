@@ -97,15 +97,17 @@ impl<
         let mut pager_info = self.pager_info();
         let insert_res = self.root.insert(key, value, &mut pager_info)?;
         if let InsertResult::Split(split_key, new_page_id_right) = insert_res {
-            // move current root to a new page
+            // get a new page to move data to, representing the left side of the split
             let new_page_left_ref = pager_info.new_page(self.root.page_kind())?;
             let mut new_page_left = new_page_left_ref.borrow_mut();
-            let mut root_page = self.root.page_ref.borrow_mut();
 
+            // move data currently on the root page to the new page
+            let mut root_page = self.root.page_ref.borrow_mut();
             for (i, bytes) in root_page.cell_bytes_iter().enumerate() {
                 new_page_left.insert_cell(i as u16, bytes)?;
             }
             root_page.clear_data();
+
             let new_page_id_left = new_page_left.id();
             drop(new_page_left);
 
@@ -398,16 +400,16 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_ref: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
         if !self.can_fit_leaf(&key, &value) {
-            let (split_key, mut new_node) = self.split_leaf(pager_ref)?;
+            let (split_key, mut new_node) = self.split_leaf(pager_info)?;
             assert!(new_node.is_leaf());
             if key > split_key {
-                new_node.insert_as_leaf(key, value, pager_ref)?;
+                new_node.insert_as_leaf(key, value, pager_info)?;
             } else {
-                self.insert_as_leaf(key, value, pager_ref)?;
+                self.insert_as_leaf(key, value, pager_info)?;
             }
             Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
@@ -439,11 +441,11 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn get_descendent_by_key<Fd: AsRawFd + Copy>(
         &self,
         key: &K,
-        pager_ref: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<Fd>,
     ) -> Result<(u16, Node<K, V>)> {
         assert!(self.is_node());
         let pos = self.search_keys_as_node(key);
-        let descendent = pager_ref.page_node(self.page_id_from_inner_node(pos)?)?;
+        let descendent = pager_info.page_node(self.page_id_from_inner_node(pos)?)?;
         Ok((pos, descendent))
     }
 
@@ -475,15 +477,15 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_ref: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_node());
-        let (pos, mut child_node) = self.get_descendent_by_key(&key, pager_ref)?;
+        let (pos, mut child_node) = self.get_descendent_by_key(&key, pager_info)?;
         if let InsertResult::Split(split_key, new_page_id) =
-            child_node.insert(key, value, pager_ref)?
+            child_node.insert(key, value, pager_info)?
         {
             if !self.can_fit_node(&split_key) {
-                let (parent_split_key, mut parent_new_node) = self.split_inner_node(pager_ref)?;
+                let (parent_split_key, mut parent_new_node) = self.split_inner_node(pager_info)?;
                 assert!(parent_new_node.is_node());
 
                 if pos < self.key_count() {
@@ -511,16 +513,20 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_ref: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<Fd>,
     ) -> Result<InsertResult<K>> {
         if self.is_leaf() {
-            self.insert_as_leaf(key, value, pager_ref)
+            self.insert_as_leaf(key, value, pager_info)
         } else {
-            self.insert_as_node(key, value, pager_ref)
+            self.insert_as_node(key, value, pager_info)
         }
     }
 
-    fn get<Fd: AsRawFd + Copy>(&self, key: &K, pager_ref: &mut PagerInfo<Fd>) -> Result<Option<V>> {
+    fn get<Fd: AsRawFd + Copy>(
+        &self,
+        key: &K,
+        pager_info: &mut PagerInfo<Fd>,
+    ) -> Result<Option<V>> {
         if self.is_leaf() {
             match self.binary_search_keys(key) {
                 Ok(pos) => Ok(Some(self.value_from_leaf(pos)?)),
@@ -528,8 +534,8 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             }
         } else {
             assert!(self.is_node());
-            let (_, child_node) = self.get_descendent_by_key(key, pager_ref)?;
-            child_node.get(key, pager_ref)
+            let (_, child_node) = self.get_descendent_by_key(key, pager_info)?;
+            child_node.get(key, pager_info)
         }
     }
 }

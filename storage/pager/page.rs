@@ -471,12 +471,10 @@ impl Page {
         &self.data.data[start..end]
     }
 
-    // TODO: Test
     pub fn cell_bytes_iter(&self) -> CellBytesIter {
         CellBytesIter::new(self)
     }
 
-    // TODO: Test
     pub fn clear_data(&mut self) {
         self.header.free_space_start = 0;
         self.header.free_space_end = PAGE_BUFFER_SIZE;
