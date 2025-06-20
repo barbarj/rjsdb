@@ -54,7 +54,7 @@ mod tests {
         T: Serialize,
     {
         let bytes = to_bytes(input).unwrap();
-        let size = serialized_size(input).unwrap();
+        let size = serialized_size(input);
         assert_eq!(bytes.len(), size);
     }
 

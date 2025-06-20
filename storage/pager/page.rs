@@ -1,12 +1,11 @@
 use core::slice;
 use serde::{Deserialize, Serialize};
-use serialize::{from_reader, to_bytes, to_writer, Error as SerdeError};
+use serialize::{from_reader, to_writer, Error as SerdeError};
 use std::{
     fmt::Display,
-    io::{Error as IoError, Read, Write},
+    io::{Error as IoError, Write},
     mem,
     num::NonZeroU64,
-    ops::Range,
     os::unix::fs::FileExt,
 };
 
@@ -184,15 +183,21 @@ impl PageBuffer {
         }
     }
 
-    fn write_to(&mut self, offset: PageBufferOffset, data: &[u8]) -> Result<(), PageError> {
-        let mut writer = self.get_writer(offset, data.len());
-        writer.write_all(data)?;
+    fn write_to_serialized<T: Serialize>(
+        &mut self,
+        offset: PageBufferOffset,
+        value: &T,
+    ) -> Result<(), PageError> {
+        let offset = offset as usize;
+        to_writer(&mut self.data[offset..], value)?;
         Ok(())
     }
 
-    fn get_writer(&mut self, offset: PageBufferOffset, data_size: usize) -> impl Write + '_ {
+    fn write_to_raw(&mut self, offset: PageBufferOffset, data: &[u8]) -> Result<(), PageError> {
         let offset = offset as usize;
-        &mut self.data[offset..offset + data_size]
+        let mut writer = &mut self.data[offset..offset + data.len()];
+        writer.write_all(data)?;
+        Ok(())
     }
 }
 
@@ -322,11 +327,6 @@ impl Page {
         Ok(())
     }
 
-    // TODO: Remove
-    pub fn free_space_end(&self) -> u16 {
-        self.header.free_space_end
-    }
-
     pub fn insert_cell(
         &mut self,
         cell_position: u16, // must be <= cell count
@@ -351,20 +351,15 @@ impl Page {
             end_position: cell_end,
             size: data_size,
         };
-        let mut pointer_writer = self.data.get_writer(
-            CELL_POINTER_SIZE * cell_position,
-            CELL_POINTER_SIZE as usize,
-        );
-        to_writer(&mut pointer_writer, &cell_pointer)?;
-        drop(pointer_writer);
+        self.data
+            .write_to_serialized(CELL_POINTER_SIZE * cell_position, &cell_pointer)?;
         self.header.cell_count += 1;
         self.header.free_space_start += CELL_POINTER_SIZE;
 
         //write data
         let write_start = cell_end - data_size;
-        self.data.write_to(write_start, data)?;
+        self.data.write_to_raw(write_start, data)?;
         self.header.free_space_end -= data_size;
-
         self.header.total_free_space -= total_space_needed;
         self.header.flags.set_dirty(true);
 
@@ -397,23 +392,18 @@ impl Page {
         let mut dest_end = PAGE_BUFFER_SIZE;
         for i in 0..self.header.cell_count {
             let mut pointer = self.get_cell_pointer(i);
-            let cell_start = pointer.end_position - pointer.size;
-            let src_range: Range<usize> = cell_start.into()..pointer.end_position.into();
-            let data = &self.data.data[src_range];
+            let data = self.cell_bytes(i);
 
             // write cell
-            tmp_buffer.write_to(dest_end - pointer.size, data)?;
+            tmp_buffer.write_to_raw(dest_end - pointer.size, data)?;
 
             // write updated pointer
             pointer.end_position = dest_end;
-            let ptr_data = &to_bytes(&pointer)?;
-            // TODO: make it so that the serialization goes directly to the tmp buffer instead of
-            // to bytes first
-            tmp_buffer.write_to(CELL_POINTER_SIZE * i, ptr_data)?;
+            tmp_buffer.write_to_serialized(CELL_POINTER_SIZE * i, &pointer)?;
 
             dest_end -= pointer.size;
         }
-        self.data.write_to(0, &tmp_buffer.data[..])?;
+        self.data.write_to_raw(0, &tmp_buffer.data[..])?;
         self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
         Ok(())
