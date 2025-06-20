@@ -117,7 +117,10 @@ impl<
         Ok(())
     }
 
-    // TODO: get
+    pub fn get(&self, key: &K) -> Result<Option<V>> {
+        let mut pager_info = self.pager_info();
+        self.root.get(key, &mut pager_info)
+    }
 }
 
 struct PagerInfo<Fd: AsRawFd + Copy> {
