@@ -26,31 +26,31 @@ use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
 #[derive(Debug)]
 pub enum Error {
-    PageError(PageError),
-    PagerError(PagerError),
-    SerdeError(SerdeError),
+    Page(PageError),
+    Pager(PagerError),
+    Serde(SerdeError),
 }
 impl From<PageError> for Error {
     fn from(value: PageError) -> Self {
-        Self::PageError(value)
+        Self::Page(value)
     }
 }
 impl From<PagerError> for Error {
     fn from(value: PagerError) -> Self {
-        Self::PagerError(value)
+        Self::Pager(value)
     }
 }
 impl From<SerdeError> for Error {
     fn from(value: SerdeError) -> Self {
-        Self::SerdeError(value)
+        Self::Serde(value)
     }
 }
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PageError(error) => std::fmt::Display::fmt(&error, f),
-            Self::PagerError(error) => std::fmt::Display::fmt(&error, f),
-            Self::SerdeError(error) => std::fmt::Display::fmt(&error, f),
+            Self::Page(error) => std::fmt::Display::fmt(&error, f),
+            Self::Pager(error) => std::fmt::Display::fmt(&error, f),
+            Self::Serde(error) => std::fmt::Display::fmt(&error, f),
         }
     }
 }
@@ -442,7 +442,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         pager_ref: &mut PagerInfo<Fd>,
     ) -> Result<(u16, Node<K, V>)> {
         assert!(self.is_node());
-        let pos = self.search_keys_as_node(&key);
+        let pos = self.search_keys_as_node(key);
         let descendent = pager_ref.page_node(self.page_id_from_inner_node(pos)?)?;
         Ok((pos, descendent))
     }

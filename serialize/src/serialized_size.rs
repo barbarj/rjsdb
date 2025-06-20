@@ -86,12 +86,12 @@ impl<'a> ser::Serializer for &'a mut SerializedSize {
         Ok(())
     }
 
-    fn serialize_f32(self, v: f32) -> Result<()> {
+    fn serialize_f32(self, _v: f32) -> Result<()> {
         self.size += 4;
         Ok(())
     }
 
-    fn serialize_f64(self, v: f64) -> Result<()> {
+    fn serialize_f64(self, _v: f64) -> Result<()> {
         self.size += 8;
         Ok(())
     }
