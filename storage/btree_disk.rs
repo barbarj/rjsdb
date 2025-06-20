@@ -101,11 +101,11 @@ impl<
             let new_page_left_ref = pager_info.new_page(self.root.page_kind())?;
             let mut new_page_left = new_page_left_ref.borrow_mut();
             let mut root_page = self.root.page_ref.borrow_mut();
-            for i in 0..root_page.cell_count() {
-                let cell = root_page.get_cell_owned(0);
-                new_page_left.insert_cell(i, &cell[..])?;
-                root_page.remove_cell(0);
+
+            for (i, bytes) in root_page.cell_bytes_iter().enumerate() {
+                new_page_left.insert_cell(i as u16, bytes)?;
             }
+            root_page.clear_data();
             let new_page_id_left = new_page_left.id();
             drop(new_page_left);
 
@@ -228,16 +228,14 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn key_from_leaf(&self, pos: u16) -> Result<K> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(pos);
-        let (key, _): (K, V) = from_reader(&cell[..])?;
+        let (key, _): (K, V) = from_reader(page.cell_bytes(pos))?;
         Ok(key)
     }
 
     fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(pos);
-        let (_, val): (K, T) = from_reader(&cell[..]).unwrap();
+        let (_, val): (K, T) = from_reader(page.cell_bytes(pos)).unwrap();
         Ok(val)
     }
 
@@ -264,8 +262,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         assert!(self.is_node());
         let pos = Self::key_pos_to_cell_pos(key_pos);
         let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(pos);
-        let key = from_reader(&cell[..])?;
+        let key = from_reader(page.cell_bytes(pos))?;
         Ok(key)
     }
 
@@ -273,8 +270,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         assert!(self.is_node());
         let pos = Self::id_pos_to_cell_pos(id_pos);
         let page = self.page_ref.borrow();
-        let cell = page.get_cell_owned(pos);
-        let page_id = from_reader(&cell[..])?;
+        let page_id = from_reader(page.cell_bytes(pos))?;
         Ok(page_id)
     }
 
@@ -341,12 +337,13 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         let new_page_ref = pager_info.new_page(page.kind())?;
         let mut new_page = new_page_ref.borrow_mut();
 
-        // copy cells to new page and remove cells from old page
-        let new_page_start_idx = idx + 1;
-        for i in new_page_start_idx..page.cell_count() {
-            let cell = page.get_cell_owned(new_page_start_idx);
-            new_page.insert_cell(i, &cell[..])?;
-            page.remove_cell(new_page_start_idx);
+        // copy cells to new page, starting with the cell after the split key
+        for (i, bytes) in page.cell_bytes_iter().enumerate().skip((idx + 1).into()) {
+            new_page.insert_cell(i as u16, bytes)?;
+        }
+        // remove moved cells, plus the now hanging right key from this node
+        for i in page.cell_count() - 1..=idx {
+            page.remove_cell(i);
         }
         drop(new_page);
 
@@ -383,8 +380,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
 
         // copy cells to new page and remove cells from old page
         for i in idx..page.cell_count() {
-            let cell = page.get_cell_owned(idx);
-            new_page.insert_cell(i, &cell[..])?;
+            new_page.insert_cell(i, page.cell_bytes(idx))?;
             page.remove_cell(idx);
         }
         drop(new_page);

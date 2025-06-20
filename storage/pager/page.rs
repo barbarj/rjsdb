@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serialize::{from_reader, to_bytes, to_writer, Error as SerdeError};
 use std::{
     fmt::Display,
-    io::{Error as IoError, Write},
+    io::{Error as IoError, Read, Write},
     mem,
     num::NonZeroU64,
     ops::Range,
@@ -480,6 +480,22 @@ impl Page {
         let end = pointer.end_position as usize;
         &self.data.data[start..end]
     }
+
+    // TODO: Test
+    pub fn cell_bytes_iter(&self) -> CellBytesIter {
+        CellBytesIter::new(self)
+    }
+
+    // TODO: Test
+    pub fn clear_data(&mut self) {
+        self.header.free_space_start = 0;
+        self.header.free_space_end = PAGE_BUFFER_SIZE;
+        self.header.total_free_space = PAGE_BUFFER_SIZE;
+        self.header.cell_count = 0;
+        self.header.overflow_page_id = None;
+        self.header.flags.set_dirty(true);
+        self.header.flags.set_compactible(false)
+    }
 }
 
 fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
@@ -499,6 +515,30 @@ fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
 pub struct CellPointer {
     pub end_position: PageBufferOffset,
     pub size: PageBufferOffset,
+}
+
+pub struct CellBytesIter<'a> {
+    page: &'a Page,
+    idx: u16,
+}
+impl<'a> CellBytesIter<'a> {
+    pub fn new(page: &'a Page) -> Self {
+        CellBytesIter { page, idx: 0 }
+    }
+}
+
+impl<'a> Iterator for CellBytesIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx < self.page.cell_count() {
+            let bytes = self.page.cell_bytes(self.idx);
+            self.idx += 1;
+            Some(bytes)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]

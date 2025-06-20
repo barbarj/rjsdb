@@ -83,9 +83,9 @@ impl std::error::Error for PagerError {}
 impl Display for PagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(error) => error.fmt(f)
-            Self::Page(error) => error.fmt(f)
-            Self::Serde(error) => error.fmt(f)
+            Self::Io(error) => error.fmt(f),
+            Self::Page(error) => error.fmt(f),
+            Self::Serde(error) => error.fmt(f),
         }
     }
 }
