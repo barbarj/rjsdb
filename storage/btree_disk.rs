@@ -225,6 +225,11 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         page.kind()
     }
 
+    fn page_free_space(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        page.total_free_space()
+    }
+
     fn key_from_leaf(&self, pos: u16) -> Result<K> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
@@ -313,7 +318,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         pager_info: &mut PagerInfo<Fd>,
     ) -> Result<(K, Node<K, V>)> {
         let half = PAGE_BUFFER_SIZE / 2;
-        // TODO: Assert used space > half
+        assert!(self.page_free_space() < half);
         let mut used_space = 0;
         let mut idx = 0;
         let mut page = self.page_ref.borrow_mut();
