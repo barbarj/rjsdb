@@ -538,6 +538,8 @@ mod tests {
         mem,
     };
 
+    use serialize::to_bytes;
+
     use super::*;
 
     #[test]
@@ -591,13 +593,11 @@ mod tests {
             vec![10u32, 20, 30, 40, 50],
             vec![100u32, 200, 300, 400, 500],
         ];
-        let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page.insert_cell(idx as u16, &buffer[..]).unwrap();
-            data_sizes.push(buffer.len());
-            buffer.clear();
+            let bytes = to_bytes(&cell).unwrap();
+            page.insert_cell(idx as u16, &bytes[..]).unwrap();
+            data_sizes.push(bytes.len());
         }
         let data_sizes_sum: usize = data_sizes.iter().sum();
         let free_space_end = PAGE_BUFFER_SIZE - data_sizes_sum as u16;
@@ -631,18 +631,16 @@ mod tests {
         println!("----------");
 
         // add in middle
-        let mut buffer = Vec::new();
 
-        to_writer(&mut buffer, &vec![10u32, 9, 8, 7]).unwrap();
-        let middle_cell_size = buffer.len();
-        page.insert_cell(2, &buffer[..]).unwrap();
-        buffer.clear();
+        let bytes = to_bytes(&vec![10u32, 9, 8, 7]).unwrap();
+        let middle_cell_size = bytes.len();
+        page.insert_cell(2, &bytes).unwrap();
         print_pointers(&page);
         println!("----------");
 
-        to_writer(&mut buffer, &vec![11u32, 12, 13, 14, 15]).unwrap();
-        let end_cell_size = buffer.len();
-        page.insert_cell(1, &buffer[..]).unwrap();
+        let bytes = to_bytes(&vec![11u32, 12, 13, 14, 15]).unwrap();
+        let end_cell_size = bytes.len();
+        page.insert_cell(1, &bytes).unwrap();
         print_pointers(&page);
         println!("----------");
 
@@ -673,10 +671,8 @@ mod tests {
         let mut page = Page::new(1, PageKind::Heap);
         let cell10s = vec![10u32, 10, 10, 10, 10];
         let cell20s = vec![20u32, 20, 20, 20, 20];
-        let mut bytes10s = Vec::new();
-        to_writer(&mut bytes10s, &cell10s).unwrap();
-        let mut bytes20s = Vec::new();
-        to_writer(&mut bytes20s, &cell20s).unwrap();
+        let bytes10s = to_bytes(&cell10s).unwrap();
+        let bytes20s = to_bytes(&cell20s).unwrap();
         let cell_size = bytes10s.len() as u16;
 
         let mut cell_count = 0;
@@ -743,22 +739,18 @@ mod tests {
         let cell2 = vec![20u32, 20, 20];
         let cell1 = vec![30u32, 30, 30, 30];
 
-        let mut bytes = Vec::new();
-        to_writer(&mut bytes, &cell0).unwrap();
+        let bytes = to_bytes(&cell0).unwrap();
         page.insert_cell(0, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        to_writer(&mut bytes, &cell2).unwrap();
+        let bytes = to_bytes(&cell2).unwrap();
         page.insert_cell(1, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        to_writer(&mut bytes, &cell1).unwrap();
+        let bytes = to_bytes(&cell1).unwrap();
         page.insert_cell(1, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
@@ -779,30 +771,25 @@ mod tests {
         let cell2 = vec![20u32, 20, 20];
         let cell1 = vec![30u32, 30, 30, 30];
 
-        let mut bytes = Vec::new();
-        to_writer(&mut bytes, &cell0).unwrap();
+        let bytes = to_bytes(&cell0).unwrap();
         page.insert_cell(0, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        to_writer(&mut bytes, &cell_deleted).unwrap();
+        let bytes = to_bytes(&cell_deleted).unwrap();
         page.insert_cell(1, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
-        to_writer(&mut bytes, &cell2).unwrap();
+        let bytes = to_bytes(&cell2).unwrap();
         page.insert_cell(2, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
         page.remove_cell(1);
 
-        to_writer(&mut bytes, &cell1).unwrap();
+        let bytes = to_bytes(&cell1).unwrap();
         page.insert_cell(1, &bytes).unwrap();
-        bytes.clear();
         print_pointers(&page);
         println!("--------------");
 
@@ -833,13 +820,11 @@ mod tests {
             vec![10u32, 20, 30, 40, 50],
             vec![100u32, 200, 300, 400, 500],
         ];
-        let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page.insert_cell(idx as u16, &buffer[..]).unwrap();
-            data_sizes.push(buffer.len());
-            buffer.clear();
+            let bytes = to_bytes(&cell).unwrap();
+            page.insert_cell(idx as u16, &bytes).unwrap();
+            data_sizes.push(bytes.len());
         }
 
         page.write_to_disk(&mut file).unwrap();
@@ -872,13 +857,11 @@ mod tests {
             vec![10u32, 20, 30, 40, 50],
             vec![100u32, 200, 300, 400, 500],
         ];
-        let mut buffer = Vec::new();
         let mut data_sizes = Vec::new();
         for (idx, cell) in cells.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page.insert_cell(idx as u16, &buffer[..]).unwrap();
-            data_sizes.push(buffer.len());
-            buffer.clear();
+            let bytes = to_bytes(&cell).unwrap();
+            page.insert_cell(idx as u16, &bytes).unwrap();
+            data_sizes.push(bytes.len());
         }
 
         page.write_to_disk(&mut file).unwrap();
@@ -905,31 +888,28 @@ mod tests {
 
         let mut page0 = Page::new(0, PageKind::Heap);
         let cells0 = vec![vec![10, 11, 12, 13]];
-        let mut buffer = Vec::new();
         for (idx, cell) in cells0.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page0.insert_cell(idx as u16, &buffer[..]).unwrap();
-            buffer.clear();
+            page0
+                .insert_cell(idx as u16, &to_bytes(&cell).unwrap())
+                .unwrap();
         }
         page0.write_to_disk(&mut file).unwrap();
 
         let mut page1 = Page::new(1, PageKind::Heap);
         let cells1 = vec![vec![20, 21, 22, 23]];
-        let mut buffer = Vec::new();
         for (idx, cell) in cells1.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page1.insert_cell(idx as u16, &buffer[..]).unwrap();
-            buffer.clear();
+            page1
+                .insert_cell(idx as u16, &to_bytes(&cell).unwrap())
+                .unwrap();
         }
         page1.write_to_disk(&mut file).unwrap();
 
         let mut page2 = Page::new(2, PageKind::Heap);
         let cells2 = vec![vec![30, 31, 32, 33]];
-        let mut buffer = Vec::new();
         for (idx, cell) in cells2.iter().enumerate() {
-            to_writer(&mut buffer, &cell).unwrap();
-            page2.insert_cell(idx as u16, &buffer[..]).unwrap();
-            buffer.clear();
+            page2
+                .insert_cell(idx as u16, &to_bytes(&cell).unwrap())
+                .unwrap();
         }
         page2.write_to_disk(&mut file).unwrap();
 
@@ -948,5 +928,26 @@ mod tests {
 
         drop(file);
         fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn test_cell_bytes_iter() {
+        // add cells
+        let mut page = Page::new(0, PageKind::Heap);
+        let cells = vec![
+            vec![1u32, 2, 3, 4, 5],
+            vec![10u32, 20, 30, 40, 50],
+            vec![100u32, 200, 300, 400, 500],
+        ];
+        for (idx, cell) in cells.iter().enumerate() {
+            page.insert_cell(idx as u16, &to_bytes(&cell).unwrap())
+                .unwrap();
+        }
+        assert_eq!(page.cell_bytes_iter().count(), cells.len());
+        let read_cells: Vec<Vec<u32>> = page
+            .cell_bytes_iter()
+            .map(|bytes| from_reader(bytes).unwrap())
+            .collect();
+        assert_eq!(cells, read_cells);
     }
 }
