@@ -55,7 +55,7 @@ use std::{
 */
 
 pub type PageId = u64;
-type PageBufferOffset = u16;
+pub type PageBufferOffset = u16;
 
 pub const PAGE_SIZE: PageBufferOffset = 4096 * 4; // 16KB
 pub const PAGE_BUFFER_SIZE: PageBufferOffset =

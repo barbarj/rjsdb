@@ -4,25 +4,25 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     fmt::{Debug, Display},
+    iter::Peekable,
     marker::PhantomData,
     os::fd::AsRawFd,
     rc::Rc,
 };
 
 use crate::pager::{
-    Page, PageError, PageId, PageKind, Pager, PagerError, CELL_POINTER_SIZE, PAGE_BUFFER_SIZE,
+    Page, PageBufferOffset, PageError, PageId, PageKind, Pager, PagerError, CELL_POINTER_SIZE,
+    PAGE_BUFFER_SIZE,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
-///
 /// # Notes on Page Structure
 /// - Leaf node cells are (K, V)
 /// - Internal nodes alternate PageIds and keys, so the cell order looks like:
 ///    PageId | Key | PageId | Key | PageId... etc.
 ///    The sequence always starts and end with PageIds. The Keys split the search space that the
 ///    PageIds represent.
-///
 
 #[derive(Debug)]
 pub enum Error {
@@ -157,12 +157,32 @@ impl<Fd: AsRawFd + Copy> PagerInfo<Fd> {
         let page = self.get_page(page_id)?;
         Ok(Node::new(page))
     }
+
+    fn new_page_node<K, V>(&mut self, kind: PageKind) -> Result<Node<K, V>>
+    where
+        K: Ord + Debug + Serialize + DeserializeOwned,
+        V: Serialize + DeserializeOwned,
+    {
+        let page = self.new_page(kind)?;
+        Ok(Node::new(page))
+    }
 }
 
 enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug> {
     Split(K, PageId),
     Done,
 }
+
+#[cfg(not(test))]
+const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = PAGE_BUFFER_SIZE;
+
+#[cfg(test)]
+// We'll use a smaller buffer size during tests because doing enables us to "fill up" a page while
+// not needing to fiddle with the rest of the paging code, nor needing 1000s of items
+// For tests, all values are u32, which use 4 bytes. The only other thing in the page buffer are
+// cell pointers, which also use 4 bytes. So any small multiple of 4 bytes should be sufficient for
+// our tests.
+const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = 256;
 
 // TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
 // get serialization format to support borrowed data
@@ -319,7 +339,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         pager_info: &mut PagerInfo<Fd>,
     ) -> Result<(K, Node<K, V>)> {
-        let half = PAGE_BUFFER_SIZE / 2;
+        let half = CONFIGURED_PAGE_BUFFER_SIZE / 2;
         assert!(self.page_free_space() < half);
         let mut used_space = 0;
         let mut idx = 0;
@@ -341,8 +361,8 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         let split_key = self.key_from_inner_node(Self::cell_pos_to_key_pos(idx).unwrap())?;
 
         // get new page
-        let new_page_ref = pager_info.new_page(page.kind())?;
-        let mut new_page = new_page_ref.borrow_mut();
+        let new_node = pager_info.new_page_node(page.kind())?;
+        let mut new_page = new_node.page_ref.borrow_mut();
 
         // copy cells to new page, starting with the cell after the split key
         for (i, bytes) in page.cell_bytes_iter().enumerate().skip((idx + 1).into()) {
@@ -357,7 +377,6 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         // remove the now hanging right key from this node
         page.remove_cell(idx);
 
-        let new_node = Node::new(new_page_ref);
         Ok((split_key, new_node))
     }
 
@@ -365,7 +384,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         pager_info: &mut PagerInfo<Fd>,
     ) -> Result<(K, Node<K, V>)> {
-        let half = PAGE_BUFFER_SIZE / 2;
+        let half = CONFIGURED_PAGE_BUFFER_SIZE / 2;
         let mut used_space = 0;
         let mut idx = 0;
         let mut page = self.page_ref.borrow_mut();
@@ -536,6 +555,215 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
             assert!(self.is_node());
             let (_, child_node) = self.get_descendent_by_key(key, pager_info)?;
             child_node.get(key, pager_info)
+        }
+    }
+}
+
+#[cfg(test)]
+impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
+    /*
+     * An example description looks something like this:
+    0: [12, 23] (3)
+    0->0: [3, 6, 9] (4)
+    0->1: [15, 17, 20] (4)
+    0->2: [28] (2)
+    0->0->0: L[1, 2, 3] (0)
+    0->0->1: L[4, 5, 6] (0)
+    0->0->2: L[7, 8, 9] (0)
+    0->0->3: L[10, 11, 12] (0)
+    0->1->0: L[13, 14, 15] (0)
+    0->1->1: L[16, 17] (0)
+    0->1->2: L[18, 19, 20] (0)
+    0->1->3: L[21, 22, 23] (0)
+    0->2->0: L[24, 25, 26, 27] (0)
+    0->2->1: L[29, 30, 31] (0)
+        */
+    pub fn from_description(
+        description: &str,
+        pager_ref: Rc<RefCell<Pager>>,
+        backing_fd: Fd,
+    ) -> BTree<Fd, u32, u32> {
+        /*
+         * How to do this?
+         * - Leaf nodes are easy. Just do KV pairs.
+         * - for the rest, I could fill with keys and dummy page ids (0 or something)
+         *   and then recursively descend to create each child node, get its page id,
+         *   and replace the dummy value.
+         *   Or actually, to do that, I may not even need the dummy ids
+         */
+
+        let mut lines = description
+            .trim()
+            .split('\n')
+            .map(|x| x.trim())
+            .map(DescriptionLine::from_str)
+            .peekable();
+
+        // initalize pages
+        let mut pager_info = PagerInfo::new(pager_ref.clone(), backing_fd);
+        let _root = Node::from_description_lines(&mut pager_info, &mut lines);
+
+        BTree::init(pager_ref, backing_fd).unwrap()
+    }
+
+    fn to_description(&self) -> String {
+        let mut pager_info = self.pager_info();
+        Self::node_to_description(&mut pager_info, self.root.page_id())
+    }
+
+    fn node_to_description(pager_info: &mut PagerInfo<Fd>, page_id: PageId) -> String {
+        use std::collections::VecDeque;
+
+        let mut description = String::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((vec![0], page_id));
+        while let Some((ancestry, page_id)) = queue.pop_front() {
+            let node = pager_info.page_node(page_id).unwrap();
+            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
+            let path = path_parts.join("->");
+            if node.is_leaf() {
+                let s = format!("{path}: L{:?} ({})\n", node.keys(), node.descendent_count());
+                description.push_str(&s);
+            } else {
+                let s = format!("{path}: {:?} ({})\n", node.keys(), node.descendent_count());
+                description.push_str(&s);
+            }
+            queue.extend(node.descendent_page_ids().into_iter().enumerate().map(
+                |(idx, page_id)| {
+                    let mut child_ancestry = ancestry.clone();
+                    child_ancestry.push(idx);
+                    (child_ancestry, page_id)
+                },
+            ));
+        }
+        description
+    }
+
+    fn display_subtree(pager_info: &mut PagerInfo<Fd>, root_page_id: PageId) {
+        let description = Self::node_to_description(pager_info, root_page_id);
+        print!("{description}");
+    }
+}
+
+#[cfg(test)]
+impl Node<u32, u32> {
+    fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine>>(
+        pager_info: &mut PagerInfo<Fd>,
+        lines: &mut Peekable<I>,
+    ) -> Node<u32, u32> {
+        let line = lines.next().unwrap();
+        if line.is_leaf {
+            let new_node = pager_info.new_page_node(PageKind::BTreeLeaf).unwrap();
+            let mut page = new_node.page_ref.borrow_mut();
+            for (i, key) in line.keys.iter().enumerate() {
+                let cell_pos = i as u16 * 2;
+                page.insert_cell(cell_pos, &to_bytes(key).unwrap()).unwrap();
+                page.insert_cell(cell_pos + 1, &to_bytes(key).unwrap())
+                    .unwrap();
+            }
+            drop(page);
+            new_node
+        } else {
+            let new_node = pager_info.new_page_node(PageKind::BTreeNode).unwrap();
+            let mut page = new_node.page_ref.borrow_mut();
+            let mut keys_iter = line.keys.iter();
+
+            let mut idx = 0;
+            while lines
+                .peek()
+                .filter(|l| l.traversal_path[0..line.traversal_path.len()] == line.traversal_path)
+                .is_some()
+            {
+                let child_node = Self::from_description_lines(pager_info, lines);
+                let page_id = child_node.page_id();
+                drop(child_node);
+                page.insert_cell(idx, &to_bytes(&page_id).unwrap()).unwrap();
+                page.insert_cell(idx + 1, &to_bytes(keys_iter.next().unwrap()).unwrap())
+                    .unwrap();
+                idx += 2;
+            }
+            let child_node = Self::from_description_lines(pager_info, lines);
+            let page_id = child_node.page_id();
+            drop(child_node);
+            page.insert_cell(idx, &to_bytes(&page_id).unwrap()).unwrap();
+            drop(page);
+            new_node
+        }
+    }
+
+    fn keys(&self) -> Vec<u32> {
+        if self.is_leaf() {
+            (0..self.key_count())
+                .map(|i| self.key_from_leaf(i).unwrap())
+                .collect()
+        } else {
+            (0..self.key_count())
+                .map(|i| self.key_from_inner_node(i).unwrap())
+                .collect()
+        }
+    }
+
+    fn descendent_page_ids(&self) -> Vec<PageId> {
+        if self.is_leaf() {
+            Vec::new()
+        } else {
+            (0..=self.key_count())
+                .map(|i| self.page_id_from_inner_node(i).unwrap())
+                .collect()
+        }
+    }
+
+    fn descendent_count(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        page.cell_count() - self.key_count()
+    }
+}
+
+#[cfg(test)]
+struct DescriptionLine {
+    traversal_path: Vec<usize>,
+    is_leaf: bool,
+    keys: Vec<u32>,
+    child_count: usize,
+}
+#[cfg(test)]
+impl DescriptionLine {
+    fn from_str(s: &str) -> Self {
+        let mut parts = s.split(": ");
+        let traversal_path = parts
+            .next()
+            .unwrap()
+            .split("->")
+            .map(|x| x.parse::<usize>().unwrap())
+            .collect();
+
+        let second_half = parts.next().unwrap();
+        assert!(second_half.starts_with("L[") || second_half.starts_with("["));
+        let is_leaf = second_half.starts_with("L");
+        let skip_num = if is_leaf { 2 } else { 1 };
+
+        let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
+        let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
+        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+
+        let child_count = second_half[closing_bracket_pos + 3..]
+            .split(")")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        if is_leaf {
+            assert_eq!(child_count, 0);
+        } else {
+            assert_eq!(keys.len() + 1, child_count);
+        }
+
+        DescriptionLine {
+            traversal_path,
+            is_leaf,
+            keys,
+            child_count,
         }
     }
 }

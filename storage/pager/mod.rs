@@ -11,11 +11,10 @@ use std::rc::Rc;
 use std::{collections::HashMap, os::fd::AsRawFd};
 
 pub type PageId = page::PageId;
-pub use page::{Page, PageError, PageKind, PAGE_SIZE};
+pub type PageBufferOffset = page::PageBufferOffset;
+pub use page::{Page, PageError, PageKind, CELL_POINTER_SIZE, PAGE_BUFFER_SIZE, PAGE_SIZE};
 
 use serialize::Error as SerdeError;
-pub const CELL_POINTER_SIZE: u16 = page::CELL_POINTER_SIZE;
-pub const PAGE_BUFFER_SIZE: u16 = page::PAGE_BUFFER_SIZE;
 
 /*
  * Pager Requirements:
