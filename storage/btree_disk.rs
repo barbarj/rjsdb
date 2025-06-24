@@ -4,16 +4,21 @@ use std::{
     cell::RefCell,
     cmp::Ordering,
     fmt::{Debug, Display},
-    iter::Peekable,
     marker::PhantomData,
     os::fd::AsRawFd,
     rc::Rc,
 };
 
+#[cfg(test)]
+use std::iter::Peekable;
+
+#[cfg(not(test))]
+use crate::pager::PAGE_BUFFER_SIZE;
 use crate::pager::{
     Page, PageBufferOffset, PageError, PageId, PageKind, Pager, PagerError, CELL_POINTER_SIZE,
-    PAGE_BUFFER_SIZE,
 };
+
+use itertools::Itertools;
 use serde::{de::DeserializeOwned, Serialize};
 use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
@@ -181,8 +186,9 @@ const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = PAGE_BUFFER_SIZE;
 // not needing to fiddle with the rest of the paging code, nor needing 1000s of items
 // For tests, all values are u32, which use 4 bytes. The only other thing in the page buffer are
 // cell pointers, which also use 4 bytes. So any small multiple of 4 bytes should be sufficient for
-// our tests.
-const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = 256;
+// our tests. For tests using u32 keys and values, a size of 60 bytes gives us a leaf size of 5
+// entries.
+const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = 60;
 
 // TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
 // get serialization format to support borrowed data
@@ -262,7 +268,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let (_, val): (K, T) = from_reader(page.cell_bytes(pos)).unwrap();
+        let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
         Ok(val)
     }
 
@@ -583,15 +589,6 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
         pager_ref: Rc<RefCell<Pager>>,
         backing_fd: Fd,
     ) -> BTree<Fd, u32, u32> {
-        /*
-         * How to do this?
-         * - Leaf nodes are easy. Just do KV pairs.
-         * - for the rest, I could fill with keys and dummy page ids (0 or something)
-         *   and then recursively descend to create each child node, get its page id,
-         *   and replace the dummy value.
-         *   Or actually, to do that, I may not even need the dummy ids
-         */
-
         let mut lines = description
             .trim()
             .split('\n')
@@ -599,9 +596,24 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
             .map(DescriptionLine::from_str)
             .peekable();
 
+        assert!(lines.peek().is_some());
+
         // initalize pages
         let mut pager_info = PagerInfo::new(pager_ref.clone(), backing_fd);
-        let _root = Node::from_description_lines(&mut pager_info, &mut lines);
+
+        // init root page
+        let first_line = lines.next().unwrap();
+        let root_kind = match first_line.is_leaf {
+            true => PageKind::BTreeLeaf,
+            false => PageKind::BTreeNode,
+        };
+        let root: Node<u32, u32> = pager_info.new_page_node(root_kind).unwrap();
+        let first_page_id = root.page_id();
+        assert_eq!(first_page_id, 0);
+        drop(root);
+
+        let _root =
+            Node::from_description_lines(&mut pager_info, first_line, &mut lines, first_page_id);
 
         BTree::init(pager_ref, backing_fd).unwrap()
     }
@@ -649,46 +661,59 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
 impl Node<u32, u32> {
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine>>(
         pager_info: &mut PagerInfo<Fd>,
+        this_node_line: DescriptionLine,
         lines: &mut Peekable<I>,
+        this_page_id: PageId,
     ) -> Node<u32, u32> {
-        let line = lines.next().unwrap();
-        if line.is_leaf {
-            let new_node = pager_info.new_page_node(PageKind::BTreeLeaf).unwrap();
-            let mut page = new_node.page_ref.borrow_mut();
-            for (i, key) in line.keys.iter().enumerate() {
-                let cell_pos = i as u16 * 2;
-                page.insert_cell(cell_pos, &to_bytes(key).unwrap()).unwrap();
-                page.insert_cell(cell_pos + 1, &to_bytes(key).unwrap())
-                    .unwrap();
-            }
-            drop(page);
-            new_node
-        } else {
-            let new_node = pager_info.new_page_node(PageKind::BTreeNode).unwrap();
-            let mut page = new_node.page_ref.borrow_mut();
-            let mut keys_iter = line.keys.iter();
+        let new_node = pager_info.page_node(this_page_id).unwrap();
+        let mut page = new_node.page_ref.borrow_mut();
 
-            let mut idx = 0;
-            while lines
-                .peek()
-                .filter(|l| l.traversal_path[0..line.traversal_path.len()] == line.traversal_path)
-                .is_some()
-            {
-                let child_node = Self::from_description_lines(pager_info, lines);
-                let page_id = child_node.page_id();
-                drop(child_node);
-                page.insert_cell(idx, &to_bytes(&page_id).unwrap()).unwrap();
-                page.insert_cell(idx + 1, &to_bytes(keys_iter.next().unwrap()).unwrap())
-                    .unwrap();
-                idx += 2;
+        if this_node_line.is_leaf {
+            for (i, key) in this_node_line.keys.iter().enumerate() {
+                let bytes = to_bytes(&(key, key)).unwrap();
+                page.insert_cell(i as u16, &bytes).unwrap();
             }
-            let child_node = Self::from_description_lines(pager_info, lines);
-            let page_id = child_node.page_id();
-            drop(child_node);
-            page.insert_cell(idx, &to_bytes(&page_id).unwrap()).unwrap();
-            drop(page);
-            new_node
+        } else {
+            let child_lines: Vec<_> = lines
+                .peeking_take_while(|l| this_node_line.is_child_line(l))
+                .collect();
+            assert_eq!(child_lines.len(), this_node_line.child_count);
+            assert_eq!(this_node_line.keys.len() + 1, this_node_line.child_count);
+            let mut children = Vec::new();
+
+            for (idx, child_line) in child_lines.into_iter().enumerate() {
+                // init child page so we can get the page id
+                let kind = match child_line.is_leaf {
+                    true => PageKind::BTreeLeaf,
+                    false => PageKind::BTreeNode,
+                };
+                let child_node: Self = pager_info.new_page_node(kind).unwrap();
+                let page_id = child_node.page_id();
+                children.push((child_line, page_id)); // store for later
+                drop(child_node);
+
+                let page_id_bytes = to_bytes(&page_id).unwrap();
+                page.insert_cell(Self::id_pos_to_cell_pos(idx as u16), &page_id_bytes)
+                    .unwrap();
+
+                // Because we know that there is always 1 more child line that there is keys,
+                // this will only be None on the last child line
+                if idx < this_node_line.keys.len() {
+                    let key = &this_node_line.keys[idx];
+                    let key_bytes = to_bytes(key).unwrap();
+                    page.insert_cell(Self::key_pos_to_cell_pos(idx as u16), &key_bytes)
+                        .unwrap();
+                }
+            }
+
+            // Process the children we set aside earlier
+            for (child_line, page_id) in children.into_iter() {
+                Self::from_description_lines(pager_info, child_line, lines, page_id);
+            }
         }
+
+        drop(page);
+        new_node
     }
 
     fn keys(&self) -> Vec<u32> {
@@ -720,6 +745,7 @@ impl Node<u32, u32> {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone)]
 struct DescriptionLine {
     traversal_path: Vec<usize>,
     is_leaf: bool,
@@ -765,5 +791,72 @@ impl DescriptionLine {
             keys,
             child_count,
         }
+    }
+
+    fn is_child_line(&self, candidate: &DescriptionLine) -> bool {
+        let tvlen = self.traversal_path.len();
+        candidate.traversal_path.len() == tvlen + 1
+            && candidate.traversal_path[0..tvlen] == self.traversal_path
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use std::{
+        cell::RefCell,
+        fs::{self, File, OpenOptions},
+        os::fd::AsRawFd,
+        rc::Rc,
+    };
+
+    use itertools::Itertools;
+
+    use crate::pager::Pager;
+
+    use super::BTree;
+
+    fn trim_lines(s: &str) -> String {
+        s.trim().lines().map(|l| l.trim()).join("\n") + "\n"
+    }
+
+    fn open_file(filename: &str) -> File {
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(filename)
+            .unwrap()
+    }
+
+    #[test]
+    fn end_to_end_description() {
+        let input_description = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)";
+        let input_description = trim_lines(input_description);
+
+        let filename = "end_to_end_description.test";
+        let file = open_file(filename);
+        let backing_fd = file.as_raw_fd();
+        let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
+
+        let tree = BTree::from_description(&input_description, pager_ref, backing_fd);
+        assert_eq!(tree.root.page_id(), 0);
+        assert_eq!(&tree.to_description(), &input_description);
+        drop(tree);
+        fs::remove_file(filename).unwrap();
     }
 }

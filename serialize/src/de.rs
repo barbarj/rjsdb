@@ -182,7 +182,6 @@ impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        println!("getting u8");
         visitor.visit_u8(self.parse_u8()?)
     }
 
@@ -401,7 +400,6 @@ impl<'a, 'de, R: Read> SeqAccess<'de> for SequenceWithLength<'a, R> {
     where
         T: de::DeserializeSeed<'de>,
     {
-        println!("items left: {}", self.items_left);
         if self.items_left == 0 {
             Ok(None)
         } else {
