@@ -82,9 +82,15 @@ impl<
 {
     pub fn init(pager_ref: Rc<RefCell<Pager>>, backing_fd: Fd) -> Result<Self> {
         let mut pager = pager_ref.borrow_mut();
-        let root_page = pager.get_page(backing_fd, 0)?; // page 0 is always the root
+        let root_page_ref = if pager.file_has_page(&backing_fd, 0) {
+            pager.get_page(backing_fd, 0)?
+        } else {
+            pager.new_page(backing_fd, PageKind::BTreeLeaf)?
+        };
         drop(pager);
-        let root = Node::new(root_page);
+
+        let root = Node::new(root_page_ref);
+        assert_eq!(root.page_id(), 0);
         Ok(BTree {
             pager_ref,
             backing_fd,
@@ -318,26 +324,27 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     // TODO: Test
     // TODO: Figure out if I should remove unwraps
     fn binary_search_keys(&self, key: &K) -> std::result::Result<u16, u16> {
+        if self.key_count() == 0 {
+            return Err(0);
+        }
         let mut low = 0;
-        let mut high = self.key_count();
+        let mut high = self.key_count() - 1;
         while low < high {
             let mid = (low + high) / 2;
             let cell_key = self.key_at_pos(mid).unwrap();
             match &cell_key.cmp(key) {
-                Ordering::Equal => return Ok(mid),
                 Ordering::Less => {
                     low = mid + 1;
                 }
-                Ordering::Greater => {
-                    high = mid - 1;
-                }
+                Ordering::Equal => return Ok(mid),
+                Ordering::Greater => high = mid,
             }
         }
         let cell_key = self.key_at_pos(low).unwrap();
-        if &cell_key == key {
-            Ok(low)
-        } else {
-            Err(low)
+        match &cell_key.cmp(key) {
+            Ordering::Greater => Err(low),
+            Ordering::Equal => Ok(low),
+            Ordering::Less => Err(low + 1),
         }
     }
 
@@ -801,7 +808,7 @@ impl DescriptionLine {
 }
 
 #[cfg(test)]
-mod description_tests {
+mod tests {
     use std::{
         cell::RefCell,
         fs::{self, File, OpenOptions},
@@ -829,6 +836,25 @@ mod description_tests {
             .unwrap()
     }
 
+    fn init_tree_from_description_in_file(
+        filename: &str,
+        description: &str,
+    ) -> BTree<i32, u32, u32> {
+        let file = open_file(filename);
+        let backing_fd = file.as_raw_fd();
+        let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
+
+        BTree::from_description(description, pager_ref, backing_fd)
+    }
+
+    fn init_tree_in_file(filename: &str) -> BTree<i32, u32, u32> {
+        let file = open_file(filename);
+        let backing_fd = file.as_raw_fd();
+        let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
+
+        BTree::init(pager_ref, backing_fd).unwrap()
+    }
+
     #[test]
     fn end_to_end_description() {
         let input_description = "
@@ -849,13 +875,118 @@ mod description_tests {
         let input_description = trim_lines(input_description);
 
         let filename = "end_to_end_description.test";
-        let file = open_file(filename);
-        let backing_fd = file.as_raw_fd();
-        let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
+        let tree = init_tree_from_description_in_file(filename, &input_description);
 
-        let tree = BTree::from_description(&input_description, pager_ref, backing_fd);
         assert_eq!(tree.root.page_id(), 0);
         assert_eq!(&tree.to_description(), &input_description);
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn binary_search_keys_empty() {
+        let filename = "binary_search_keys_empty.test";
+
+        let tree = init_tree_in_file(filename);
+
+        assert!(matches!(tree.root.binary_search_keys(&42), Err(0)));
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn binary_search_keys_single() {
+        let filename = "binary_search_keys_single.test";
+        let description = "0: L[2] (0)";
+
+        let tree = init_tree_from_description_in_file(filename, description);
+
+        // less
+        assert_eq!(tree.root.binary_search_keys(&1), Err(0));
+        // equal
+        assert_eq!(tree.root.binary_search_keys(&2), Ok(0));
+        // greater
+        assert_eq!(tree.root.binary_search_keys(&3), Err(1));
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn binary_search_keys_multiple() {
+        // smaller
+        let filename = "binary_search_keys_multiple.test";
+        let description = "0: L[2, 4, 6] (0)";
+
+        let tree = init_tree_from_description_in_file(filename, description);
+
+        assert_eq!(tree.root.binary_search_keys(&1), Err(0));
+        assert_eq!(tree.root.binary_search_keys(&2), Ok(0));
+        assert_eq!(tree.root.binary_search_keys(&3), Err(1));
+        assert_eq!(tree.root.binary_search_keys(&4), Ok(1));
+        assert_eq!(tree.root.binary_search_keys(&5), Err(2));
+        assert_eq!(tree.root.binary_search_keys(&6), Ok(2));
+        assert_eq!(tree.root.binary_search_keys(&7), Err(3));
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+
+        // bigger
+        let filename = "binary_search_keys_multiple.test";
+        let description = "0: L[2, 4, 6, 8, 10] (0)";
+
+        let tree = init_tree_from_description_in_file(filename, description);
+
+        assert_eq!(tree.root.binary_search_keys(&1), Err(0));
+        assert_eq!(tree.root.binary_search_keys(&2), Ok(0));
+        assert_eq!(tree.root.binary_search_keys(&3), Err(1));
+        assert_eq!(tree.root.binary_search_keys(&4), Ok(1));
+        assert_eq!(tree.root.binary_search_keys(&5), Err(2));
+        assert_eq!(tree.root.binary_search_keys(&6), Ok(2));
+        assert_eq!(tree.root.binary_search_keys(&7), Err(3));
+        assert_eq!(tree.root.binary_search_keys(&8), Ok(3));
+        assert_eq!(tree.root.binary_search_keys(&9), Err(4));
+        assert_eq!(tree.root.binary_search_keys(&10), Ok(4));
+        assert_eq!(tree.root.binary_search_keys(&11), Err(5));
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn single_insertion() {
+        let filename = "leaf_root_insertion.test";
+        let expected_tree = "0: L[1] (0)";
+        let expected_tree = trim_lines(expected_tree);
+
+        let mut tree = init_tree_in_file(filename);
+        tree.insert(1, 1).unwrap();
+
+        assert_eq!(&tree.to_description(), &expected_tree);
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn leaf_root_insertion() {
+        let filename = "leaf_root_insertion.test";
+        let expected_tree = "
+            0: L[1, 2, 3, 4, 5] (0)
+        ";
+        let expected_tree = trim_lines(expected_tree);
+
+        let mut tree = init_tree_in_file(filename);
+
+        for i in 1..=5 {
+            tree.insert(i, i).unwrap();
+            println!("inserted {i}");
+        }
+
+        assert_eq!(&tree.to_description(), &expected_tree);
+
         drop(tree);
         fs::remove_file(filename).unwrap();
     }

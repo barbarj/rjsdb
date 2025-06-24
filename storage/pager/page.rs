@@ -129,7 +129,7 @@ impl PageFlags {
 #[repr(u8)]
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PageKind {
-    Unitialized,
+    Uninitialized,
     Heap,
     BTreeNode,
     BTreeLeaf,
@@ -256,6 +256,10 @@ impl Page {
 
     pub fn kind(&self) -> PageKind {
         self.header.page_kind
+    }
+
+    pub fn set_kind(&mut self, new_kind: PageKind) {
+        self.header.page_kind = new_kind;
     }
 
     pub fn from_disk<F: FileExt>(source: &F, page_id: PageId) -> Result<Self, PageError> {

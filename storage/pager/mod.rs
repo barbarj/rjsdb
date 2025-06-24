@@ -105,6 +105,10 @@ impl NextPageId {
         self.raw_fd == fd.as_raw_fd()
     }
 
+    fn peek_id(&self) -> &PageId {
+        &self.next_id
+    }
+
     fn use_id(&mut self) -> PageId {
         let next_id = self.next_id;
         self.next_id += 1;
@@ -188,7 +192,7 @@ impl Pager {
     fn with_page_count(file_refs: Vec<File>, page_count: usize) -> Self {
         Pager {
             pages: (0..page_count)
-                .map(|_| Rc::new(RefCell::new(Page::new(0, PageKind::Unitialized))))
+                .map(|_| Rc::new(RefCell::new(Page::new(0, PageKind::Uninitialized))))
                 .collect(),
             page_locations: HashMap::with_capacity(page_count),
             location_fd_mapping: HashMap::with_capacity(page_count),
@@ -216,11 +220,16 @@ impl Pager {
         Ok(())
     }
 
+    pub fn file_has_page<Fd: AsRawFd>(&self, fd: &Fd, page_id: PageId) -> bool {
+        &page_id < self.next_id_for_fd(fd).peek_id()
+    }
+
     pub fn get_page<Fd: AsRawFd>(
         &mut self,
         fd: Fd,
         page_id: PageId,
     ) -> Result<Rc<RefCell<Page>>, PagerError> {
+        assert!(self.file_has_page(&fd, page_id));
         match self.page_locations.get(&(fd.as_raw_fd(), page_id)) {
             Some(loc) => {
                 self.clock_cache.set_use_bit(*loc);
@@ -302,17 +311,26 @@ impl Pager {
         Ok(page_ref.clone())
     }
 
+    fn next_id_for_fd<Fd: AsRawFd>(&self, fd: &Fd) -> &NextPageId {
+        self.next_page_ids
+            .iter()
+            .find(|npid| npid.matches_fd(fd.as_raw_fd()))
+            .unwrap()
+    }
+
+    fn next_id_for_fd_mut<Fd: AsRawFd>(&mut self, fd: &Fd) -> &mut NextPageId {
+        self.next_page_ids
+            .iter_mut()
+            .find(|npid| npid.matches_fd(fd.as_raw_fd()))
+            .unwrap()
+    }
+
     pub fn new_page<Fd: AsRawFd>(
         &mut self,
         fd: Fd,
         kind: PageKind,
     ) -> Result<Rc<RefCell<Page>>, PagerError> {
-        let page_id = self
-            .next_page_ids
-            .iter_mut()
-            .find(|npid| npid.matches_fd(fd.as_raw_fd()))
-            .unwrap()
-            .use_id();
+        let page_id = self.next_id_for_fd_mut(&fd).use_id();
 
         let location = self.evict_page()?;
         let page_ref = self.pages.get(location).unwrap();
