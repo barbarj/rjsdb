@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn single_insertion() {
-        let filename = "leaf_root_insertion.test";
+        let filename = "single_insertion.test";
         let expected_tree = "0: L[1] (0)";
         let expected_tree = trim_lines(expected_tree);
 
