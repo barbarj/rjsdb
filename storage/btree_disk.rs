@@ -129,6 +129,8 @@ impl<
             root_page.insert_cell(0, &to_bytes(&new_page_id_left)?)?;
             root_page.insert_cell(1, &to_bytes(&split_key)?)?;
             root_page.insert_cell(2, &to_bytes(&new_page_id_right)?)?;
+
+            root_page.set_kind(PageKind::BTreeNode);
         }
         Ok(())
     }
@@ -352,7 +354,7 @@ impl<
         }
     }
 
-    fn split_inner_node<Fd: AsRawFd + Copy>(
+    fn split_node<Fd: AsRawFd + Copy>(
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
@@ -365,7 +367,7 @@ impl<
         // Find the index of the first cell that begins past the halfway point
         while used_space < half {
             let ptr = page.get_cell_pointer(idx);
-            used_space += ptr.size;
+            used_space += ptr.size + CELL_POINTER_SIZE;
             idx += 1;
         }
         if idx % 2 == 0 {
@@ -401,15 +403,15 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let half = pager_info.buffer_size();
+        let half = pager_info.buffer_size() / 2;
         let mut used_space = 0;
         let mut idx = 0;
-        let mut page = self.page_ref.borrow_mut();
+        let page = self.page_ref.borrow();
 
         // Find the index of the first cell that begins past the halfway point
         while used_space < half {
             let ptr = page.get_cell_pointer(idx);
-            used_space += ptr.size;
+            used_space += ptr.size + CELL_POINTER_SIZE;
             idx += 1;
         }
         // keys point left, and cell number idx is going to be the first cell in the new page,
@@ -418,12 +420,14 @@ impl<
         let split_key = self.key_from_leaf(idx - 1)?;
 
         // get new page
-        let new_page_ref = pager_info.new_page(page.kind())?;
+        let new_page_ref = pager_info.new_page(self.page_kind())?;
         let mut new_page = new_page_ref.borrow_mut();
 
+        drop(page);
+        let mut page = self.page_ref.borrow_mut();
         // copy cells to new page and remove cells from old page
-        for i in idx..page.cell_count() {
-            new_page.insert_cell(i, page.cell_bytes(idx))?;
+        for (i, _) in (idx..page.cell_count()).enumerate() {
+            new_page.insert_cell(i as u16, page.cell_bytes(idx))?;
             page.remove_cell(idx);
         }
         drop(new_page);
@@ -521,7 +525,7 @@ impl<
             child_node.insert(key, value, pager_info)?
         {
             if !self.can_fit_node(&split_key) {
-                let (parent_split_key, mut parent_new_node) = self.split_inner_node(pager_info)?;
+                let (parent_split_key, mut parent_new_node) = self.split_node(pager_info)?;
                 assert!(parent_new_node.is_node());
 
                 if pos < self.key_count() {
@@ -577,7 +581,8 @@ impl<
 }
 
 #[cfg(test)]
-const TEST_BUFFER_SIZE: u16 = 60;
+/// This size allows for nodes with 5 keys and leaves with 8
+const TEST_BUFFER_SIZE: u16 = 112;
 #[cfg(test)]
 struct TestPageBuffer {
     data: [u8; TEST_BUFFER_SIZE as usize],
@@ -854,8 +859,12 @@ mod tests {
     };
 
     use itertools::Itertools;
+    use serialize::serialized_size;
 
-    use crate::pager::Pager;
+    use crate::{
+        btree_disk::TEST_BUFFER_SIZE,
+        pager::{PageId, Pager, CELL_POINTER_SIZE},
+    };
 
     use super::{BTree, TestPageBuffer};
 
@@ -890,6 +899,33 @@ mod tests {
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
 
         BTree::init(pager_ref, backing_fd).unwrap()
+    }
+
+    #[test]
+    fn sizing_proofs() {
+        // These constants may change in the future. They're just tested here to prove that my
+        // assumptions about tree construction during the tests are correct.
+
+        let leaf_key_size = serialized_size(&(42u32, 52u32));
+        assert_eq!(leaf_key_size, 8);
+        let node_key_size = serialized_size(&42u32);
+        assert_eq!(node_key_size, 4);
+        let page_id: PageId = 42;
+        let node_page_id_size = serialized_size(&page_id);
+        assert_eq!(node_page_id_size, 8);
+
+        let leaf_entry_size = CELL_POINTER_SIZE as usize + leaf_key_size;
+        assert_eq!(leaf_entry_size, 12);
+        assert_eq!(TEST_BUFFER_SIZE as usize / leaf_entry_size, 9);
+
+        let node_key_entry_size = CELL_POINTER_SIZE as usize + node_key_size;
+        let node_page_id_entry_size = CELL_POINTER_SIZE as usize + node_page_id_size;
+        assert_eq!(node_key_entry_size, 8);
+        assert_eq!(node_page_id_entry_size, 12);
+
+        let enough_space_for_5_node_keys =
+            (node_key_entry_size * 5) + (node_page_id_entry_size * 6);
+        assert_eq!(TEST_BUFFER_SIZE as usize, enough_space_for_5_node_keys);
     }
 
     #[test]
@@ -1019,7 +1055,6 @@ mod tests {
 
         for i in 1..=5 {
             tree.insert(i, i).unwrap();
-            println!("inserted {i}");
         }
 
         assert_eq!(&tree.to_description(), &expected_tree);
@@ -1030,19 +1065,18 @@ mod tests {
 
     #[test]
     fn leaf_root_split() {
-        let filename = "leaf_root_insertion.test";
+        let filename = "leaf_root_split.test";
         let expected_tree = "
-            0: [3] (2)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[4, 5, 6] (0)
+            0: [5] (2)
+            0->0: L[1, 2, 3, 4, 5] (0)
+            0->1: L[6, 7, 8, 9, 10] (0)
         ";
         let expected_tree = trim_lines(expected_tree);
 
         let mut tree = init_tree_in_file(filename);
 
-        for i in 1..=6 {
+        for i in 1..=10 {
             tree.insert(i, i).unwrap();
-            println!("inserted {i}");
         }
 
         assert_eq!(&tree.to_description(), &expected_tree);

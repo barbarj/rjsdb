@@ -534,6 +534,11 @@ pub struct CellPointer {
     pub end_position: PageBufferOffset,
     pub size: PageBufferOffset,
 }
+impl CellPointer {
+    fn new(end_position: PageBufferOffset, size: PageBufferOffset) -> Self {
+        Self { end_position, size }
+    }
+}
 
 pub struct CellBytesIter<'a, PB: PageBuffer> {
     page: &'a Page<PB>,
@@ -566,7 +571,7 @@ mod tests {
         mem,
     };
 
-    use serialize::to_bytes;
+    use serialize::{serialized_size, to_bytes};
 
     use super::*;
 
@@ -581,6 +586,10 @@ mod tests {
         assert_eq!(mem::size_of::<Page<PageBufferProd>>(), PAGE_SIZE as usize);
         assert_eq!(PAGE_BUFFER_SIZE % 8, 0);
         assert_eq!(mem::size_of::<CellPointer>(), 4);
+        assert_eq!(
+            CELL_POINTER_SIZE as usize,
+            serialized_size(&CellPointer::new(0, 0))
+        );
     }
 
     #[test]
