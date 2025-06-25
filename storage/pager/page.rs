@@ -171,17 +171,19 @@ pub struct PageHeader {
     total_free_space: PageBufferOffset,       // 2, 40
 }
 
-#[repr(C)]
-#[derive(Debug, PartialEq)]
-struct PageBuffer {
-    data: [u8; PAGE_BUFFER_SIZE as usize],
-}
-impl PageBuffer {
-    fn new() -> Self {
-        PageBuffer {
-            data: [0; PAGE_BUFFER_SIZE as usize],
-        }
-    }
+// TODO: Make this a trait that just defines a buffer size, add a production implementation using
+// the default size. Tests elsewhere can define a smaller buffer and use those
+
+pub trait PageBuffer {
+    fn new() -> Self
+    where
+        Self: Sized;
+
+    fn buffer_size() -> u16;
+
+    fn data(&self) -> &[u8];
+
+    fn data_mut(&mut self) -> &mut [u8];
 
     fn write_to_serialized<T: Serialize>(
         &mut self,
@@ -189,13 +191,13 @@ impl PageBuffer {
         value: &T,
     ) -> Result<(), PageError> {
         let offset = offset as usize;
-        to_writer(&mut self.data[offset..], value)?;
+        to_writer(&mut self.data_mut()[offset..], value)?;
         Ok(())
     }
 
     fn write_to_raw(&mut self, offset: PageBufferOffset, data: &[u8]) -> Result<(), PageError> {
         let offset = offset as usize;
-        let mut writer = &mut self.data[offset..offset + data.len()];
+        let mut writer = &mut self.data_mut()[offset..offset + data.len()];
         writer.write_all(data)?;
         Ok(())
     }
@@ -203,11 +205,36 @@ impl PageBuffer {
 
 #[repr(C)]
 #[derive(Debug, PartialEq)]
-pub struct Page {
-    pub header: PageHeader,
-    data: PageBuffer,
+pub struct PageBufferProd {
+    data: [u8; PAGE_BUFFER_SIZE as usize],
 }
-impl Page {
+impl PageBuffer for PageBufferProd {
+    fn new() -> Self {
+        PageBufferProd {
+            data: [0; PAGE_BUFFER_SIZE as usize],
+        }
+    }
+
+    fn buffer_size() -> u16 {
+        PAGE_BUFFER_SIZE
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, PartialEq)]
+pub struct Page<PB: PageBuffer> {
+    pub header: PageHeader,
+    data: PB,
+}
+impl<PB: PageBuffer> Page<PB> {
     pub fn new(id: PageId, kind: PageKind) -> Self {
         let header = PageHeader {
             checksum: 0,
@@ -218,13 +245,13 @@ impl Page {
             _padding1: 0,
             alignment_guard: ALIGNMENT_GUARD_VALUE,
             free_space_start: 0,
-            free_space_end: PAGE_BUFFER_SIZE,
-            total_free_space: PAGE_BUFFER_SIZE,
+            free_space_end: PB::buffer_size(),
+            total_free_space: PB::buffer_size(),
             page_id: id,
             overflow_page_id: None,
         };
 
-        let data = PageBuffer::new();
+        let data = PB::new();
 
         Page { header, data }
     }
@@ -277,7 +304,7 @@ impl Page {
         let buf = self.as_slice_mut();
         let offset = page_id * PAGE_SIZE as u64;
         // make read all
-        Page::read_entire_page(source, buf, offset)?;
+        Self::read_entire_page(source, buf, offset)?;
 
         // new page should now have values from disk
         let checksum = self.calc_checksum();
@@ -325,7 +352,7 @@ impl Page {
         self.header.flags.set_dirty(false);
         self.header.checksum = self.calc_checksum();
         let buf = self.as_slice();
-        Page::write_entire_page(dest, buf, offset).inspect_err(|_err| {
+        Self::write_entire_page(dest, buf, offset).inspect_err(|_err| {
             self.header.flags.set_dirty(dirty_val);
         })?;
         Ok(())
@@ -392,8 +419,8 @@ impl Page {
     }
 
     fn force_defragment(&mut self) -> Result<(), PageError> {
-        let mut tmp_buffer = PageBuffer::new();
-        let mut dest_end = PAGE_BUFFER_SIZE;
+        let mut tmp_buffer = PB::new();
+        let mut dest_end = PB::buffer_size();
         for i in 0..self.header.cell_count {
             let mut pointer = self.get_cell_pointer(i);
             let data = self.cell_bytes(i);
@@ -407,7 +434,7 @@ impl Page {
 
             dest_end -= pointer.size;
         }
-        self.data.write_to_raw(0, &tmp_buffer.data[..])?;
+        self.data.write_to_raw(0, &tmp_buffer.data())?;
         self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
         Ok(())
@@ -417,8 +444,8 @@ impl Page {
         self.header.page_id = page_id;
         self.header.page_kind = kind;
         self.header.free_space_start = 0;
-        self.header.free_space_end = PAGE_BUFFER_SIZE;
-        self.header.total_free_space = PAGE_BUFFER_SIZE;
+        self.header.free_space_end = PB::buffer_size();
+        self.header.total_free_space = PB::buffer_size();
         self.header.cell_count = 0;
         self.header.overflow_page_id = None;
         self.header.flags = PageFlags { flags: 0 };
@@ -433,7 +460,7 @@ impl Page {
         let start = (cell_position * CELL_POINTER_SIZE) as usize;
         let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
         let dest = start + (CELL_POINTER_SIZE as usize);
-        self.data.data.copy_within(start..end, dest);
+        self.data.data_mut().copy_within(start..end, dest);
     }
 
     fn remove_pointer(&mut self, cell_position: u16) {
@@ -444,14 +471,14 @@ impl Page {
         let start = ((cell_position + 1) * CELL_POINTER_SIZE) as usize;
         let end = (self.header.cell_count * CELL_POINTER_SIZE) as usize;
         let dest = (cell_position * CELL_POINTER_SIZE) as usize;
-        self.data.data.copy_within(start..end, dest);
+        self.data.data_mut().copy_within(start..end, dest);
     }
 
     pub fn get_cell_pointer(&self, position: u16) -> CellPointer {
         assert!(position < self.header.cell_count);
         let offset_start = (position * CELL_POINTER_SIZE) as usize;
         let offset_size = CELL_POINTER_SIZE as usize;
-        let mut pointer_slice = &self.data.data[offset_start..offset_start + offset_size];
+        let mut pointer_slice = &self.data.data()[offset_start..offset_start + offset_size];
         from_reader(&mut pointer_slice).unwrap()
     }
 
@@ -472,17 +499,17 @@ impl Page {
         let pointer = self.get_cell_pointer(cell_position);
         let start = (pointer.end_position - pointer.size) as usize;
         let end = pointer.end_position as usize;
-        &self.data.data[start..end]
+        &self.data.data()[start..end]
     }
 
-    pub fn cell_bytes_iter(&self) -> CellBytesIter {
+    pub fn cell_bytes_iter(&self) -> CellBytesIter<PB> {
         CellBytesIter::new(self)
     }
 
     pub fn clear_data(&mut self) {
         self.header.free_space_start = 0;
-        self.header.free_space_end = PAGE_BUFFER_SIZE;
-        self.header.total_free_space = PAGE_BUFFER_SIZE;
+        self.header.free_space_end = PB::buffer_size();
+        self.header.total_free_space = PB::buffer_size();
         self.header.cell_count = 0;
         self.header.overflow_page_id = None;
         self.header.flags.set_dirty(true);
@@ -508,17 +535,17 @@ pub struct CellPointer {
     pub size: PageBufferOffset,
 }
 
-pub struct CellBytesIter<'a> {
-    page: &'a Page,
+pub struct CellBytesIter<'a, PB: PageBuffer> {
+    page: &'a Page<PB>,
     idx: u16,
 }
-impl<'a> CellBytesIter<'a> {
-    pub fn new(page: &'a Page) -> Self {
+impl<'a, PB: PageBuffer> CellBytesIter<'a, PB> {
+    pub fn new(page: &'a Page<PB>) -> Self {
         CellBytesIter { page, idx: 0 }
     }
 }
 
-impl<'a> Iterator for CellBytesIter<'a> {
+impl<'a, PB: PageBuffer> Iterator for CellBytesIter<'a, PB> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -550,8 +577,8 @@ mod tests {
         assert_eq!(mem::size_of::<Option<PageId>>(), 16);
         assert_eq!(mem::size_of::<Option<u16>>(), 4);
         assert_eq!(mem::size_of::<PageHeader>(), 40);
-        assert_eq!(mem::size_of::<PageBuffer>(), PAGE_BUFFER_SIZE as usize);
-        assert_eq!(mem::size_of::<Page>(), PAGE_SIZE as usize);
+        assert_eq!(mem::size_of::<PageBufferProd>(), PAGE_BUFFER_SIZE as usize);
+        assert_eq!(mem::size_of::<Page<PageBufferProd>>(), PAGE_SIZE as usize);
         assert_eq!(PAGE_BUFFER_SIZE % 8, 0);
         assert_eq!(mem::size_of::<CellPointer>(), 4);
     }
@@ -569,7 +596,7 @@ mod tests {
         assert_eq!(res, 700);
     }
 
-    fn get_all_cells(page: &Page) -> Vec<Vec<u32>> {
+    fn get_all_cells(page: &Page<PageBufferProd>) -> Vec<Vec<u32>> {
         let mut read_cells: Vec<Vec<u32>> = Vec::new();
         for idx in 0..page.header.cell_count {
             let data = page.get_cell_owned(idx);
@@ -579,7 +606,7 @@ mod tests {
         read_cells
     }
 
-    fn print_pointers(page: &Page) {
+    fn print_pointers(page: &Page<PageBufferProd>) {
         for idx in 0..page.header.cell_count {
             println!("{idx}: {:?}", page.get_cell_pointer(idx));
         }
@@ -680,7 +707,7 @@ mod tests {
         let mut idx = 0;
         let mut used_slots = 0;
 
-        let has_space = |page: &Page| {
+        let has_space = |page: &Page<PageBufferProd>| {
             page.header.free_space_end - page.header.free_space_start
                 > (2 * (bytes10s.len() as u16 + CELL_POINTER_SIZE))
         };
@@ -934,7 +961,7 @@ mod tests {
     #[test]
     fn test_cell_bytes_iter() {
         // add cells
-        let mut page = Page::new(0, PageKind::Heap);
+        let mut page = Page::<PageBufferProd>::new(0, PageKind::Heap);
         let cells = vec![
             vec![1u32, 2, 3, 4, 5],
             vec![10u32, 20, 30, 40, 50],

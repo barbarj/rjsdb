@@ -10,9 +10,11 @@ use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 use std::{collections::HashMap, os::fd::AsRawFd};
 
+pub type PageRef<PB> = Rc<RefCell<Page<PB>>>;
 pub type PageId = page::PageId;
 pub type PageBufferOffset = page::PageBufferOffset;
-pub use page::{Page, PageError, PageKind, CELL_POINTER_SIZE, PAGE_BUFFER_SIZE, PAGE_SIZE};
+
+pub use page::{Page, PageBuffer, PageError, PageKind, CELL_POINTER_SIZE, PAGE_SIZE};
 
 use serialize::Error as SerdeError;
 
@@ -176,15 +178,15 @@ impl ClockCacheHandler {
  */
 // TODO: Try to get a safer way of knowing which file a page id is associated with than using raw
 // fds
-pub struct Pager {
-    pages: Vec<Rc<RefCell<Page>>>,
+pub struct Pager<PB: PageBuffer> {
+    pages: Vec<PageRef<PB>>,
     page_locations: HashMap<PageLookupKey, usize>,
     location_fd_mapping: HashMap<usize, RawFd>,
     next_page_ids: Vec<NextPageId>,
     clock_cache: ClockCacheHandler,
     fd_to_file_mapping: HashMap<RawFd, File>,
 }
-impl Pager {
+impl<PB: PageBuffer> Pager<PB> {
     pub fn new(file_refs: Vec<File>) -> Self {
         Self::with_page_count(file_refs, MAX_PAGE_COUNT)
     }
@@ -199,7 +201,7 @@ impl Pager {
             next_page_ids: file_refs
                 .iter()
                 .map(|file| {
-                    let next_id = Pager::calc_page_count(file).unwrap();
+                    let next_id = Self::calc_page_count(file).unwrap();
                     NextPageId::new(file.as_raw_fd(), next_id)
                 })
                 .collect(),
@@ -228,7 +230,7 @@ impl Pager {
         &mut self,
         fd: Fd,
         page_id: PageId,
-    ) -> Result<Rc<RefCell<Page>>, PagerError> {
+    ) -> Result<PageRef<PB>, PagerError> {
         assert!(self.file_has_page(&fd, page_id));
         match self.page_locations.get(&(fd.as_raw_fd(), page_id)) {
             Some(loc) => {
@@ -291,7 +293,7 @@ impl Pager {
         &mut self,
         replacement_fd: Fd,
         replacement_page_id: PageId,
-    ) -> Result<Rc<RefCell<Page>>, PagerError> {
+    ) -> Result<PageRef<PB>, PagerError> {
         let location = self.evict_page()?;
         let page_ref = self.pages.get(location).unwrap();
 
@@ -329,7 +331,7 @@ impl Pager {
         &mut self,
         fd: Fd,
         kind: PageKind,
-    ) -> Result<Rc<RefCell<Page>>, PagerError> {
+    ) -> Result<PageRef<PB>, PagerError> {
         let page_id = self.next_id_for_fd_mut(&fd).use_id();
 
         let location = self.evict_page()?;
@@ -352,6 +354,7 @@ impl Pager {
 mod tests {
     use std::fs::{self, OpenOptions};
 
+    use page::PageBufferProd;
     use serialize::{from_reader, to_bytes};
 
     use super::*;
@@ -361,7 +364,7 @@ mod tests {
         assert!(MAX_PAGER_MEMORY % PAGE_SIZE as usize == 0);
     }
 
-    fn fill_page(page: &mut Page, starting_at: u64) {
+    fn fill_page(page: &mut Page<PageBufferProd>, starting_at: u64) {
         let id = page.id();
         let fill_val = starting_at + (id * 10);
         let data = vec![fill_val, fill_val, fill_val];
@@ -370,7 +373,7 @@ mod tests {
     }
 
     fn get_first_cell_from_page<Fd: AsRawFd>(
-        pager: &mut Pager,
+        pager: &mut Pager<PageBufferProd>,
         fd: Fd,
         page_id: PageId,
     ) -> Vec<u64> {
@@ -518,7 +521,7 @@ mod tests {
         fs::remove_file(file2).unwrap();
     }
 
-    fn count_pages_in_cache_from_fd(pager: &Pager, fd: RawFd) -> usize {
+    fn count_pages_in_cache_from_fd(pager: &Pager<PageBufferProd>, fd: RawFd) -> usize {
         pager
             .location_fd_mapping
             .iter()

@@ -12,13 +12,14 @@ use std::{
 #[cfg(test)]
 use std::iter::Peekable;
 
-#[cfg(not(test))]
-use crate::pager::PAGE_BUFFER_SIZE;
 use crate::pager::{
-    Page, PageBufferOffset, PageError, PageId, PageKind, Pager, PagerError, CELL_POINTER_SIZE,
+    PageBuffer, PageBufferOffset, PageError, PageId, PageKind, PageRef, Pager, PagerError,
+    CELL_POINTER_SIZE,
 };
 
+#[cfg(test)]
 use itertools::Itertools;
+
 use serde::{de::DeserializeOwned, Serialize};
 use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
@@ -65,22 +66,24 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct BTree<
     Fd: AsRawFd,
+    PB: PageBuffer,
     K: Ord + Serialize + DeserializeOwned + Debug,
     V: Serialize + DeserializeOwned,
 > {
-    pager_ref: Rc<RefCell<Pager>>,
+    pager_ref: Rc<RefCell<Pager<PB>>>,
     backing_fd: Fd,
-    root: Node<K, V>,
+    root: Node<PB, K, V>,
     _key: PhantomData<K>,
     _value: PhantomData<V>,
 }
 impl<
         Fd: AsRawFd + Copy,
+        PB: PageBuffer,
         K: Ord + Serialize + DeserializeOwned + Debug,
         V: Serialize + DeserializeOwned,
-    > BTree<Fd, K, V>
+    > BTree<Fd, PB, K, V>
 {
-    pub fn init(pager_ref: Rc<RefCell<Pager>>, backing_fd: Fd) -> Result<Self> {
+    pub fn init(pager_ref: Rc<RefCell<Pager<PB>>>, backing_fd: Fd) -> Result<Self> {
         let mut pager = pager_ref.borrow_mut();
         let root_page_ref = if pager.file_has_page(&backing_fd, 0) {
             pager.get_page(backing_fd, 0)?
@@ -100,7 +103,7 @@ impl<
         })
     }
 
-    fn pager_info(&self) -> PagerInfo<Fd> {
+    fn pager_info(&self) -> PagerInfo<PB, Fd> {
         PagerInfo::new(self.pager_ref.clone(), self.backing_fd)
     }
 
@@ -136,31 +139,31 @@ impl<
     }
 }
 
-struct PagerInfo<Fd: AsRawFd + Copy> {
-    pager_ref: Rc<RefCell<Pager>>,
+struct PagerInfo<PB: PageBuffer, Fd: AsRawFd + Copy> {
+    pager_ref: Rc<RefCell<Pager<PB>>>,
     backing_fd: Fd,
 }
-impl<Fd: AsRawFd + Copy> PagerInfo<Fd> {
-    fn new(pager_ref: Rc<RefCell<Pager>>, backing_fd: Fd) -> Self {
+impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
+    fn new(pager_ref: Rc<RefCell<Pager<PB>>>, backing_fd: Fd) -> Self {
         PagerInfo {
             pager_ref,
             backing_fd,
         }
     }
 
-    fn new_page(&mut self, kind: PageKind) -> Result<Rc<RefCell<Page>>> {
+    fn new_page(&mut self, kind: PageKind) -> Result<PageRef<PB>> {
         let mut pager = self.pager_ref.borrow_mut();
         let new_page = pager.new_page(self.backing_fd, kind)?;
         Ok(new_page)
     }
 
-    fn get_page(&mut self, page_id: PageId) -> Result<Rc<RefCell<Page>>> {
+    fn get_page(&mut self, page_id: PageId) -> Result<PageRef<PB>> {
         let mut pager = self.pager_ref.borrow_mut();
         let page = pager.get_page(self.backing_fd, page_id)?;
         Ok(page)
     }
 
-    fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<K, V>>
+    fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<PB, K, V>>
     where
         K: Ord + Debug + Serialize + DeserializeOwned,
         V: Serialize + DeserializeOwned,
@@ -169,13 +172,17 @@ impl<Fd: AsRawFd + Copy> PagerInfo<Fd> {
         Ok(Node::new(page))
     }
 
-    fn new_page_node<K, V>(&mut self, kind: PageKind) -> Result<Node<K, V>>
+    fn new_page_node<K, V>(&mut self, kind: PageKind) -> Result<Node<PB, K, V>>
     where
         K: Ord + Debug + Serialize + DeserializeOwned,
         V: Serialize + DeserializeOwned,
     {
         let page = self.new_page(kind)?;
         Ok(Node::new(page))
+    }
+
+    fn buffer_size(&self) -> PageBufferOffset {
+        PB::buffer_size()
     }
 }
 
@@ -184,27 +191,24 @@ enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug> {
     Done,
 }
 
-#[cfg(not(test))]
-const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = PAGE_BUFFER_SIZE;
-
-#[cfg(test)]
-// We'll use a smaller buffer size during tests because doing enables us to "fill up" a page while
-// not needing to fiddle with the rest of the paging code, nor needing 1000s of items
-// For tests, all values are u32, which use 4 bytes. The only other thing in the page buffer are
-// cell pointers, which also use 4 bytes. So any small multiple of 4 bytes should be sufficient for
-// our tests. For tests using u32 keys and values, a size of 60 bytes gives us a leaf size of 5
-// entries.
-const CONFIGURED_PAGE_BUFFER_SIZE: PageBufferOffset = 60;
-
 // TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
 // get serialization format to support borrowed data
-struct Node<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> {
-    page_ref: Rc<RefCell<Page>>,
+struct Node<
+    PB: PageBuffer,
+    K: Ord + Debug + Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+> {
+    page_ref: PageRef<PB>,
     _key: PhantomData<K>,
     _value: PhantomData<V>,
 }
-impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Node<K, V> {
-    fn new(page_ref: Rc<RefCell<Page>>) -> Self {
+impl<
+        PB: PageBuffer,
+        K: Ord + Debug + Serialize + DeserializeOwned,
+        V: Serialize + DeserializeOwned,
+    > Node<PB, K, V>
+{
+    fn new(page_ref: PageRef<PB>) -> Self {
         Node {
             page_ref,
             _key: PhantomData,
@@ -350,9 +354,9 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
 
     fn split_inner_node<Fd: AsRawFd + Copy>(
         &mut self,
-        pager_info: &mut PagerInfo<Fd>,
-    ) -> Result<(K, Node<K, V>)> {
-        let half = CONFIGURED_PAGE_BUFFER_SIZE / 2;
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<(K, Node<PB, K, V>)> {
+        let half = pager_info.buffer_size() / 2;
         assert!(self.page_free_space() < half);
         let mut used_space = 0;
         let mut idx = 0;
@@ -395,9 +399,9 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
 
     fn split_leaf<Fd: AsRawFd + Copy>(
         &mut self,
-        pager_info: &mut PagerInfo<Fd>,
-    ) -> Result<(K, Node<K, V>)> {
-        let half = CONFIGURED_PAGE_BUFFER_SIZE / 2;
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<(K, Node<PB, K, V>)> {
+        let half = pager_info.buffer_size();
         let mut used_space = 0;
         let mut idx = 0;
         let mut page = self.page_ref.borrow_mut();
@@ -432,7 +436,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_info: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
         if !self.can_fit_leaf(&key, &value) {
@@ -473,8 +477,8 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn get_descendent_by_key<Fd: AsRawFd + Copy>(
         &self,
         key: &K,
-        pager_info: &mut PagerInfo<Fd>,
-    ) -> Result<(u16, Node<K, V>)> {
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<(u16, Node<PB, K, V>)> {
         assert!(self.is_node());
         let pos = self.search_keys_as_node(key);
         let descendent = pager_info.page_node(self.page_id_from_inner_node(pos)?)?;
@@ -509,7 +513,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_info: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_node());
         let (pos, mut child_node) = self.get_descendent_by_key(&key, pager_info)?;
@@ -545,7 +549,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
         &mut self,
         key: K,
         value: V,
-        pager_info: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         if self.is_leaf() {
             self.insert_as_leaf(key, value, pager_info)
@@ -557,7 +561,7 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
     fn get<Fd: AsRawFd + Copy>(
         &self,
         key: &K,
-        pager_info: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<Option<V>> {
         if self.is_leaf() {
             match self.binary_search_keys(key) {
@@ -573,7 +577,37 @@ impl<K: Ord + Debug + Serialize + DeserializeOwned, V: Serialize + DeserializeOw
 }
 
 #[cfg(test)]
-impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
+const TEST_BUFFER_SIZE: u16 = 60;
+#[cfg(test)]
+struct TestPageBuffer {
+    data: [u8; TEST_BUFFER_SIZE as usize],
+}
+#[cfg(test)]
+impl PageBuffer for TestPageBuffer {
+    fn new() -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            data: [0; TEST_BUFFER_SIZE as usize],
+        }
+    }
+
+    fn buffer_size() -> u16 {
+        TEST_BUFFER_SIZE
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+#[cfg(test)]
+impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
     /*
      * An example description looks something like this:
     0: [12, 23] (3)
@@ -593,9 +627,9 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
         */
     pub fn from_description(
         description: &str,
-        pager_ref: Rc<RefCell<Pager>>,
+        pager_ref: Rc<RefCell<Pager<TestPageBuffer>>>,
         backing_fd: Fd,
-    ) -> BTree<Fd, u32, u32> {
+    ) -> BTree<Fd, TestPageBuffer, u32, u32> {
         let mut lines = description
             .trim()
             .split('\n')
@@ -614,7 +648,7 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
             true => PageKind::BTreeLeaf,
             false => PageKind::BTreeNode,
         };
-        let root: Node<u32, u32> = pager_info.new_page_node(root_kind).unwrap();
+        let root: Node<TestPageBuffer, u32, u32> = pager_info.new_page_node(root_kind).unwrap();
         let first_page_id = root.page_id();
         assert_eq!(first_page_id, 0);
         drop(root);
@@ -630,7 +664,10 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
         Self::node_to_description(&mut pager_info, self.root.page_id())
     }
 
-    fn node_to_description(pager_info: &mut PagerInfo<Fd>, page_id: PageId) -> String {
+    fn node_to_description(
+        pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
+        page_id: PageId,
+    ) -> String {
         use std::collections::VecDeque;
 
         let mut description = String::new();
@@ -658,20 +695,20 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, u32, u32> {
         description
     }
 
-    fn display_subtree(pager_info: &mut PagerInfo<Fd>, root_page_id: PageId) {
+    fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, Fd>, root_page_id: PageId) {
         let description = Self::node_to_description(pager_info, root_page_id);
         print!("{description}");
     }
 }
 
 #[cfg(test)]
-impl Node<u32, u32> {
+impl Node<TestPageBuffer, u32, u32> {
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine>>(
-        pager_info: &mut PagerInfo<Fd>,
+        pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
         this_node_line: DescriptionLine,
         lines: &mut Peekable<I>,
         this_page_id: PageId,
-    ) -> Node<u32, u32> {
+    ) -> Self {
         let new_node = pager_info.page_node(this_page_id).unwrap();
         let mut page = new_node.page_ref.borrow_mut();
 
@@ -820,7 +857,7 @@ mod tests {
 
     use crate::pager::Pager;
 
-    use super::BTree;
+    use super::{BTree, TestPageBuffer};
 
     fn trim_lines(s: &str) -> String {
         s.trim().lines().map(|l| l.trim()).join("\n") + "\n"
@@ -839,7 +876,7 @@ mod tests {
     fn init_tree_from_description_in_file(
         filename: &str,
         description: &str,
-    ) -> BTree<i32, u32, u32> {
+    ) -> BTree<i32, TestPageBuffer, u32, u32> {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
@@ -847,7 +884,7 @@ mod tests {
         BTree::from_description(description, pager_ref, backing_fd)
     }
 
-    fn init_tree_in_file(filename: &str) -> BTree<i32, u32, u32> {
+    fn init_tree_in_file(filename: &str) -> BTree<i32, TestPageBuffer, u32, u32> {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
@@ -981,6 +1018,29 @@ mod tests {
         let mut tree = init_tree_in_file(filename);
 
         for i in 1..=5 {
+            tree.insert(i, i).unwrap();
+            println!("inserted {i}");
+        }
+
+        assert_eq!(&tree.to_description(), &expected_tree);
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn leaf_root_split() {
+        let filename = "leaf_root_insertion.test";
+        let expected_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6] (0)
+        ";
+        let expected_tree = trim_lines(expected_tree);
+
+        let mut tree = init_tree_in_file(filename);
+
+        for i in 1..=6 {
             tree.insert(i, i).unwrap();
             println!("inserted {i}");
         }
