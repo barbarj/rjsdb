@@ -443,7 +443,14 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
-        if !self.can_fit_leaf(&key, &value) {
+        if let Ok(pos) = self.binary_search_keys(&key) {
+            // this leaf already has this key, so we can just remove it and insert the new one. No
+            // need to check space requirements because we're using existing space
+            let mut page = self.page_ref.borrow_mut();
+            page.remove_cell(pos);
+            page.insert_cell(pos, &to_bytes(&(key, value))?)?;
+            Ok(InsertResult::Done)
+        } else if !self.can_fit_leaf(&key, &value) {
             let (split_key, mut new_node) = self.split_leaf(pager_info)?;
             assert!(new_node.is_leaf());
             if key > split_key {
@@ -478,6 +485,15 @@ impl<
         }
     }
 
+    fn descendent_node_at_pos<Fd: AsRawFd + Copy>(
+        &self,
+        pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<Node<PB, K, V>> {
+        assert!(self.is_node());
+        pager_info.page_node(self.page_id_from_inner_node(pos)?)
+    }
+
     fn get_descendent_by_key<Fd: AsRawFd + Copy>(
         &self,
         key: &K,
@@ -485,7 +501,7 @@ impl<
     ) -> Result<(u16, Node<PB, K, V>)> {
         assert!(self.is_node());
         let pos = self.search_keys_as_node(key);
-        let descendent = pager_info.page_node(self.page_id_from_inner_node(pos)?)?;
+        let descendent = self.descendent_node_at_pos(pos, pager_info)?;
         Ok((pos, descendent))
     }
 
@@ -622,7 +638,7 @@ impl PageBuffer for TestPageBuffer {
 }
 
 #[cfg(test)]
-impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
+impl BTree<i32, TestPageBuffer, u32, u32> {
     /*
      * An example description looks something like this:
     0: [12, 23] (3)
@@ -643,8 +659,8 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
     pub fn from_description(
         description: &str,
         pager_ref: Rc<RefCell<Pager<TestPageBuffer>>>,
-        backing_fd: Fd,
-    ) -> BTree<Fd, TestPageBuffer, u32, u32> {
+        backing_fd: i32,
+    ) -> BTree<i32, TestPageBuffer, u32, u32> {
         let mut lines = description
             .trim()
             .split('\n')
@@ -671,7 +687,9 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
         let _root =
             Node::from_description_lines(&mut pager_info, first_line, &mut lines, first_page_id);
 
-        BTree::init(pager_ref, backing_fd).unwrap()
+        let tree = BTree::init(pager_ref, backing_fd).unwrap();
+        assert_subtree_valid(&tree.root, &mut pager_info);
+        tree
     }
 
     fn to_description(&self) -> String {
@@ -680,7 +698,7 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
     }
 
     fn node_to_description(
-        pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
+        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
         page_id: PageId,
     ) -> String {
         use std::collections::VecDeque;
@@ -710,7 +728,7 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
         description
     }
 
-    fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, Fd>, root_page_id: PageId) {
+    fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, i32>, root_page_id: PageId) {
         let description = Self::node_to_description(pager_info, root_page_id);
         print!("{description}");
     }
@@ -732,6 +750,20 @@ impl<
                 .map(|i| self.key_from_inner_node(i).unwrap())
                 .collect()
         }
+    }
+
+    #[allow(clippy::reversed_empty_ranges)]
+    fn descendent_iter<'a, Fd: AsRawFd + Copy>(
+        &'a self,
+        pager_info: &'a mut PagerInfo<PB, Fd>,
+    ) -> impl Iterator<Item = Self> + 'a {
+        let range = if self.is_node() {
+            0..=self.key_count()
+        } else {
+            // intentionally create an empty range here because leaves have no descendents
+            1..=0
+        };
+        range.map(|i| self.descendent_node_at_pos(i, pager_info).unwrap())
     }
 
     fn descendent_page_ids(&self) -> Vec<PageId> {
@@ -864,6 +896,132 @@ impl DescriptionLine {
         candidate.traversal_path.len() == tvlen + 1
             && candidate.traversal_path[0..tvlen] == self.traversal_path
     }
+}
+
+#[cfg(test)]
+fn tree_keys_fully_ordered(root: &Node<TestPageBuffer, u32, u32>) -> bool {
+    let keys = root.keys();
+    let mut sorted_keys = keys.clone();
+    sorted_keys.sort();
+    keys == sorted_keys
+}
+
+#[cfg(test)]
+fn all_node_keys_ordered_and_deduped(
+    node: &Node<TestPageBuffer, u32, u32>,
+    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+) -> bool {
+    let mut sorted_keys = node.keys();
+    sorted_keys.sort();
+    sorted_keys.dedup();
+    let nodes: Vec<_> = node.descendent_iter(pager_info).collect();
+    sorted_keys == node.keys()
+        && nodes
+            .into_iter()
+            .all(|node| all_node_keys_ordered_and_deduped(&node, pager_info))
+}
+
+#[cfg(test)]
+fn all_keys_in_range(node: &Node<TestPageBuffer, u32, u32>, min: u32, max: u32) -> bool {
+    node.keys().iter().all(|k| (min..=max).contains(k))
+}
+
+#[cfg(test)]
+fn all_subnode_keys_ordered_relative_to_node_keys(
+    node: &Node<TestPageBuffer, u32, u32>,
+    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+) -> bool {
+    if node.is_leaf() {
+        return true;
+    }
+    let mut min_key = u32::MIN;
+    for (idx, k) in node.keys().iter().enumerate() {
+        let max_key = *k;
+        if !all_keys_in_range(
+            &node.descendent_node_at_pos(idx as u16, pager_info).unwrap(),
+            min_key,
+            max_key,
+        ) {
+            return false;
+        }
+        min_key = k + 1;
+    }
+    all_keys_in_range(
+        &node
+            .descendent_node_at_pos(node.key_count(), pager_info)
+            .unwrap(),
+        min_key,
+        u32::MAX,
+    )
+}
+
+#[cfg(test)]
+fn all_nodes_sized_correctly(
+    root: &Node<TestPageBuffer, u32, u32>,
+    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+) -> bool {
+    fn all_nodes_sized_correctly_not_root(
+        node: &Node<TestPageBuffer, u32, u32>,
+        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+    ) -> bool {
+        let third_size = TestPageBuffer::buffer_size() / 3;
+        let meets_minimum_size = node.page_free_space() >= third_size;
+
+        let children_pass = if node.is_leaf() {
+            true
+        } else {
+            let children: Vec<_> = node.descendent_iter(pager_info).collect();
+            children
+                .iter()
+                .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
+        };
+
+        meets_minimum_size && children_pass
+    }
+
+    let children: Vec<_> = root.descendent_iter(pager_info).collect();
+    children
+        .iter()
+        .all(|node| all_nodes_sized_correctly(node, pager_info))
+}
+
+#[cfg(test)]
+fn all_leaves_same_level(
+    root: &Node<TestPageBuffer, u32, u32>,
+    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+) -> bool {
+    fn leaf_levels(
+        node: &Node<TestPageBuffer, u32, u32>,
+        level: usize,
+        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+    ) -> Vec<usize> {
+        if node.is_leaf() {
+            return vec![level];
+        }
+        let children: Vec<_> = node.descendent_iter(pager_info).collect();
+        children
+            .iter()
+            .flat_map(|c| leaf_levels(c, level + 1, pager_info))
+            .collect()
+    }
+
+    let mut levels = leaf_levels(root, 0, pager_info).into_iter();
+    let first = levels.next().unwrap();
+    levels.all(|x| x == first)
+}
+
+#[cfg(test)]
+fn assert_subtree_valid(
+    node: &Node<TestPageBuffer, u32, u32>,
+    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+) {
+    assert!(tree_keys_fully_ordered(node));
+    assert!(all_node_keys_ordered_and_deduped(node, pager_info));
+    assert!(all_subnode_keys_ordered_relative_to_node_keys(
+        node, pager_info
+    ));
+    assert!(all_nodes_sized_correctly(node, pager_info));
+    assert!(all_leaves_same_level(node, pager_info));
 }
 
 #[cfg(test)]
@@ -1046,6 +1204,19 @@ mod tests {
     }
 
     #[test]
+    fn replace_value_in_full_leaf() {
+        let filename = "replace_value_in_full_leaf.test";
+        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7, 8, 9] (0)");
+        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7, 8, 9] (0)");
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        t.insert(5, 42).unwrap();
+
+        assert_eq!(t.to_description(), expected_tree);
+        assert_eq!(t.get(&5).unwrap(), Some(42));
+    }
+
+    #[test]
     fn single_insertion() {
         let filename = "single_insertion.test";
         let expected_tree = "0: L[1] (0)";
@@ -1138,4 +1309,99 @@ mod tests {
         drop(tree);
         fs::remove_file(filename).unwrap();
     }
+
+    #[test]
+    fn split_as_leaf_insert_right() {
+        let filename = "split_as_leaf_insert_right.test";
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6, 7, 8, 9, 10, 11, 12] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [3, 8] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6, 7, 8] (0)
+            0->2: L[9, 10, 11, 12, 13] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        t.insert(13, 13).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+    }
+
+    #[test]
+    fn split_as_leaf_insert_left() {
+        let filename = "split_as_leaf_insert_left.test";
+        let input_tree = "
+            0: [3] (2)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[5, 6, 7, 8, 9, 10, 11, 12, 13] (0)
+            ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [3, 9] (3)
+            0->0: L[1, 2, 3] (0)
+            0->1: L[4, 5, 6, 7, 8, 9] (0)
+            0->2: L[10, 11, 12, 13] (0)
+            ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        t.insert(4, 4).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+    }
+
+    /*
+    #[test]
+    fn split_as_node_insert_left() {
+        let filename = "split_as_node_insert_left.test";
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 20, 23, 28, 31] (6)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18, 20, 21, 22, 23, 24, 25] (0)
+            0->1->2: L[25, 26, 27] (0)
+            0->1->3: L[28, 29, 30] (0)
+            0->1->4: L[31, 32, 33] (0)
+            0->1->5: L[34, 35, 26] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [12, 23] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 17, 20] (4)
+            0->2: [28] (2)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17] (0)
+            0->1->2: L[18, 19, 20] (0)
+            0->1->3: L[21, 22, 23] (0)
+            0->2->0: L[24, 25, 26, 27] (0)
+            0->2->1: L[29, 30, 31] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = BTree::from_description(&input_tree, 4);
+        t.insert(19, 19);
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root);
+    }
+    */
 }
