@@ -362,40 +362,40 @@ impl<
         assert!(self.page_free_space() < half);
         let mut used_space = 0;
         let mut idx = 0;
-        let mut page = self.page_ref.borrow_mut();
+        let page = self.page_ref.borrow();
 
-        // Find the index of the first cell that begins past the halfway point
-        while used_space < half {
-            let ptr = page.get_cell_pointer(idx);
-            used_space += ptr.size + CELL_POINTER_SIZE;
+        // Find the index of the first "position" at or past the halfway point
+        while used_space <= half {
+            let id_ptr = page.get_cell_pointer(Self::id_pos_to_cell_pos(idx));
+            let key_ptr = page.get_cell_pointer(Self::key_pos_to_cell_pos(idx));
+            used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
             idx += 1;
         }
-        if idx % 2 == 0 {
-            // cell at idx contains a pageId, so we actually want to use the key to the left of it.
-            idx -= 1;
-        }
+        idx -= 1; // undo the last increment
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
-        let split_key = self.key_from_inner_node(Self::cell_pos_to_key_pos(idx).unwrap())?;
+        let split_key = self.key_from_inner_node(idx)?;
+        let split_key_pos = Self::key_pos_to_cell_pos(idx);
 
         // get new page
         let new_node = pager_info.new_page_node(page.kind())?;
         let mut new_page = new_node.page_ref.borrow_mut();
 
         // copy cells to new page, starting with the cell after the split key
-        for (i, bytes) in page.cell_bytes_iter().enumerate().skip((idx + 1).into()) {
+        let cells_skipped = (Self::key_pos_to_cell_pos(idx) + 1).into();
+        for (i, bytes) in page.cell_bytes_iter().skip(cells_skipped).enumerate() {
             new_page.insert_cell(i as u16, bytes)?;
         }
+
+        drop(page);
         // remove moved cells, plus the now hanging right key from this node
-        for i in page.cell_count() - 1..=idx {
+        let mut page = self.page_ref.borrow_mut();
+        for i in (split_key_pos..page.cell_count()).rev() {
             page.remove_cell(i);
         }
         drop(new_page);
-
-        // remove the now hanging right key from this node
-        page.remove_cell(idx);
-
+        drop(page);
         Ok((split_key, new_node))
     }
 
@@ -499,16 +499,26 @@ impl<
         let id_cell_pos = Self::id_pos_to_cell_pos(pos + 1);
         let mut page = self.page_ref.borrow_mut();
         page.insert_cell(id_cell_pos, &to_bytes(&new_page_id)?)?;
-        page.insert_cell(id_cell_pos + 1, &to_bytes(&prior_key)?)?;
+        if let Some(k) = prior_key {
+            page.insert_cell(id_cell_pos + 1, &to_bytes(&k)?)?;
+        }
         Ok(())
     }
 
-    /// replaces the key at key position pos with the new key, and returns the old key
-    fn replace_inner_node_key(&mut self, pos: u16, new_key: &K) -> Result<K> {
-        let old_key = self.key_from_inner_node(pos)?;
-        let cell_idx = Self::key_pos_to_cell_pos(pos);
+    /// replaces the key at key position pos with the new key, and returns the old key if there was
+    /// one at that position
+    fn replace_inner_node_key(&mut self, key_pos: u16, new_key: &K) -> Result<Option<K>> {
+        assert!(key_pos <= self.key_count());
+        let old_key = if key_pos < self.key_count() {
+            Some(self.key_from_inner_node(key_pos)?)
+        } else {
+            None
+        };
+        let cell_idx = Self::key_pos_to_cell_pos(key_pos);
         let mut page = self.page_ref.borrow_mut();
-        page.remove_cell(cell_idx);
+        if old_key.is_some() {
+            page.remove_cell(cell_idx);
+        }
         page.insert_cell(cell_idx, &to_bytes(new_key)?)?;
         Ok(old_key)
     }
@@ -679,7 +689,7 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
         let mut queue = VecDeque::new();
         queue.push_back((vec![0], page_id));
         while let Some((ancestry, page_id)) = queue.pop_front() {
-            let node = pager_info.page_node(page_id).unwrap();
+            let node: Node<TestPageBuffer, u32, u32> = pager_info.page_node(page_id).unwrap();
             let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
             let path = path_parts.join("->");
             if node.is_leaf() {
@@ -703,6 +713,40 @@ impl<Fd: AsRawFd + Copy> BTree<Fd, TestPageBuffer, u32, u32> {
     fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, Fd>, root_page_id: PageId) {
         let description = Self::node_to_description(pager_info, root_page_id);
         print!("{description}");
+    }
+}
+
+impl<
+        PB: PageBuffer,
+        K: Ord + Debug + Serialize + DeserializeOwned,
+        V: Serialize + DeserializeOwned,
+    > Node<PB, K, V>
+{
+    fn keys(&self) -> Vec<K> {
+        if self.is_leaf() {
+            (0..self.key_count())
+                .map(|i| self.key_from_leaf(i).unwrap())
+                .collect()
+        } else {
+            (0..self.key_count())
+                .map(|i| self.key_from_inner_node(i).unwrap())
+                .collect()
+        }
+    }
+
+    fn descendent_page_ids(&self) -> Vec<PageId> {
+        if self.is_leaf() {
+            Vec::new()
+        } else {
+            (0..=self.key_count())
+                .map(|i| self.page_id_from_inner_node(i).unwrap())
+                .collect()
+        }
+    }
+
+    fn descendent_count(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        page.cell_count() - self.key_count()
     }
 }
 
@@ -763,33 +807,6 @@ impl Node<TestPageBuffer, u32, u32> {
 
         drop(page);
         new_node
-    }
-
-    fn keys(&self) -> Vec<u32> {
-        if self.is_leaf() {
-            (0..self.key_count())
-                .map(|i| self.key_from_leaf(i).unwrap())
-                .collect()
-        } else {
-            (0..self.key_count())
-                .map(|i| self.key_from_inner_node(i).unwrap())
-                .collect()
-        }
-    }
-
-    fn descendent_page_ids(&self) -> Vec<PageId> {
-        if self.is_leaf() {
-            Vec::new()
-        } else {
-            (0..=self.key_count())
-                .map(|i| self.page_id_from_inner_node(i).unwrap())
-                .collect()
-        }
-    }
-
-    fn descendent_count(&self) -> u16 {
-        let page = self.page_ref.borrow();
-        page.cell_count() - self.key_count()
     }
 }
 
@@ -1080,6 +1097,43 @@ mod tests {
         }
 
         assert_eq!(&tree.to_description(), &expected_tree);
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn node_root_split() {
+        let filename = "node_root_split.test";
+        let init_tree = "
+            0: [5, 10, 15, 20, 25] (6)
+            0->0: L[1, 2, 3, 4, 5] (0)
+            0->1: L[6, 7, 8, 9, 10] (0)
+            0->2: L[11, 12, 13, 14, 15] (0)
+            0->3: L[16, 17, 18, 19, 20] (0)
+            0->4: L[21, 22, 23, 24, 25] (0)
+            0->5: L[26, 27, 28, 29, 30, 31, 32, 33, 34] (0)
+        ";
+        let init_tree = trim_lines(init_tree);
+
+        let expected_tree = "
+            0: [15] (2)
+            0->0: [5, 10] (3)
+            0->1: [20, 25, 30] (4)
+            0->0->0: L[1, 2, 3, 4, 5] (0)
+            0->0->1: L[6, 7, 8, 9, 10] (0)
+            0->0->2: L[11, 12, 13, 14, 15] (0)
+            0->1->0: L[16, 17, 18, 19, 20] (0)
+            0->1->1: L[21, 22, 23, 24, 25] (0)
+            0->1->2: L[26, 27, 28, 29, 30] (0)
+            0->1->3: L[31, 32, 33, 34, 35] (0)
+        ";
+        let expected_tree = trim_lines(expected_tree);
+
+        let mut tree = init_tree_from_description_in_file(filename, &init_tree);
+        tree.insert(35, 35).unwrap();
+
+        assert_eq!(tree.to_description(), expected_tree);
 
         drop(tree);
         fs::remove_file(filename).unwrap();
