@@ -24,7 +24,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
 /// # Notes on Page Structure
-/// - Leaf node cells are (K, V)
+/// - Leaf node cells are (K, V). Cells at index 0 and 1 are left and right page ids to siblings.
+///   page_id 0 is the default, and effectively means None
 /// - Internal nodes alternate PageIds and keys, so the cell order looks like:
 ///    PageId | Key | PageId | Key | PageId... etc.
 ///    The sequence always starts and end with PageIds. The Keys split the search space that the
@@ -85,14 +86,15 @@ impl<
 {
     pub fn init(pager_ref: Rc<RefCell<Pager<PB>>>, backing_fd: Fd) -> Result<Self> {
         let mut pager = pager_ref.borrow_mut();
-        let root_page_ref = if pager.file_has_page(&backing_fd, 0) {
-            pager.get_page(backing_fd, 0)?
+        let root = if pager.file_has_page(&backing_fd, 0) {
+            let node = Node::new(pager.get_page(backing_fd, 0)?);
+            drop(pager);
+            node
         } else {
-            pager.new_page(backing_fd, PageKind::BTreeLeaf)?
+            drop(pager);
+            Node::init_leaf(&mut PagerInfo::new(pager_ref.clone(), backing_fd))?
         };
-        drop(pager);
 
-        let root = Node::new(root_page_ref);
         assert_eq!(root.page_id(), 0);
         Ok(BTree {
             pager_ref,
@@ -186,6 +188,12 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
     fn buffer_size(&self) -> PageBufferOffset {
         PB::buffer_size()
     }
+
+    fn leaf_effective_buffer_size(&self) -> PageBufferOffset {
+        let dummy_id: PageId = 0;
+        let siblings_space_used = (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2;
+        PB::buffer_size() - siblings_space_used
+    }
 }
 
 enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug> {
@@ -218,10 +226,26 @@ impl<
         }
     }
 
+    fn init_leaf<Fd: AsRawFd + Copy>(pager_info: &mut PagerInfo<PB, Fd>) -> Result<Node<PB, K, V>> {
+        let page_ref = pager_info.new_page(PageKind::BTreeLeaf)?;
+        let mut page = page_ref.borrow_mut();
+        let zero_page_id: PageId = 0;
+        page.insert_cell(0, &to_bytes(&zero_page_id)?)?;
+        page.insert_cell(1, &to_bytes(&zero_page_id)?)?;
+        drop(page);
+        Ok(Node::new(page_ref))
+    }
+
+    fn init_node<Fd: AsRawFd + Copy>(pager_info: &mut PagerInfo<PB, Fd>) -> Result<Node<PB, K, V>> {
+        let page_ref = pager_info.new_page(PageKind::BTreeNode)?;
+        Ok(Node::new(page_ref))
+    }
+
     fn key_count(&self) -> u16 {
         let page = self.page_ref.borrow();
         if self.is_leaf() {
-            page.cell_count()
+            // -2 to account for sibling pointers
+            page.cell_count() - 2
         } else {
             (page.cell_count() - 1) / 2
         }
@@ -273,15 +297,53 @@ impl<
     fn key_from_leaf(&self, pos: u16) -> Result<K> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let (key, _): (K, V) = from_reader(page.cell_bytes(pos))?;
+        // +2 to account for sibling pointers
+        let (key, _): (K, V) = from_reader(page.cell_bytes(pos + 2))?;
         Ok(key)
     }
 
     fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
+        // +2 to account for sibling pointers
+        let (_, val): (K, T) = from_reader(page.cell_bytes(pos + 2))?;
         Ok(val)
+    }
+
+    fn leaf_left_sibling(&self) -> Result<PageId> {
+        assert!(self.is_leaf());
+        let page = self.page_ref.borrow();
+        assert!(page.cell_count() > 2);
+        Ok(from_reader(page.cell_bytes(0))?)
+    }
+
+    /// Returns the prior sibling
+    fn leaf_replace_left_sibling(&mut self, new_left: &PageId) -> Result<PageId> {
+        assert!(self.is_leaf());
+        let mut page = self.page_ref.borrow_mut();
+        assert!(page.cell_count() >= 2);
+        let prior_left = from_reader(page.cell_bytes(0))?;
+        page.remove_cell(0);
+        page.insert_cell(0, &to_bytes(new_left)?)?;
+        Ok(prior_left)
+    }
+
+    /// Returns the prior sibling
+    fn leaf_replace_right_sibling(&mut self, new_right: &PageId) -> Result<PageId> {
+        assert!(self.is_leaf());
+        let mut page = self.page_ref.borrow_mut();
+        assert!(page.cell_count() >= 2);
+        let prior_right = from_reader(page.cell_bytes(1))?;
+        page.remove_cell(1);
+        page.insert_cell(1, &to_bytes(new_right)?)?;
+        Ok(prior_right)
+    }
+
+    fn leaf_right_sibling(&self) -> Result<PageId> {
+        assert!(self.is_leaf());
+        let page = self.page_ref.borrow();
+        assert!(page.cell_count() > 2);
+        Ok(from_reader(page.cell_bytes(1))?)
     }
 
     fn key_pos_to_cell_pos(key_pos: u16) -> u16 {
@@ -327,7 +389,6 @@ impl<
         }
     }
 
-    // TODO: Test
     // TODO: Figure out if I should remove unwraps
     fn binary_search_keys(&self, key: &K) -> std::result::Result<u16, u16> {
         if self.key_count() == 0 {
@@ -379,7 +440,7 @@ impl<
         let split_key_pos = Self::key_pos_to_cell_pos(idx);
 
         // get new page
-        let new_node = pager_info.new_page_node(page.kind())?;
+        let new_node = Self::init_node(pager_info)?;
         let mut new_page = new_node.page_ref.borrow_mut();
 
         // copy cells to new page, starting with the cell after the split key
@@ -403,9 +464,9 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let half = pager_info.buffer_size() / 2;
+        let half = pager_info.leaf_effective_buffer_size() / 2;
         let mut used_space = 0;
-        let mut idx = 0;
+        let mut idx = 2; // start at 2 to skip the sibling pointers
         let page = self.page_ref.borrow();
 
         // Find the index of the first cell that begins past the halfway point
@@ -415,24 +476,32 @@ impl<
             idx += 1;
         }
         // keys point left, and cell number idx is going to be the first cell in the new page,
-        // so the split key should be one to the left.
-        assert!(idx > 0);
-        let split_key = self.key_from_leaf(idx - 1)?;
-
-        // get new page
-        let new_page_ref = pager_info.new_page(self.page_kind())?;
-        let mut new_page = new_page_ref.borrow_mut();
+        // so the split key should be one to the left. (minus another 2 to account for our sibling
+        // pointer offset
+        assert!(idx > 2);
+        let split_key = self.key_from_leaf(idx - 3)?;
+        println!("split key: {split_key:?}");
 
         drop(page);
-        let mut page = self.page_ref.borrow_mut();
+
+        // get new page
+        let mut new_node = Self::init_leaf(pager_info)?;
+
+        // update sibling pointers
+        let old_right = self.leaf_replace_right_sibling(&new_node.page_id())?;
+        new_node.leaf_replace_left_sibling(&self.page_id())?;
+        new_node.leaf_replace_right_sibling(&old_right)?;
+
         // copy cells to new page and remove cells from old page
+        let mut new_page = new_node.page_ref.borrow_mut();
+        let mut page = self.page_ref.borrow_mut();
         for (i, _) in (idx..page.cell_count()).enumerate() {
-            new_page.insert_cell(i as u16, page.cell_bytes(idx))?;
+            let insert_at = (i as u16) + 2; // skip sibling pointers
+            new_page.insert_cell(insert_at, page.cell_bytes(idx))?;
             page.remove_cell(idx);
         }
         drop(new_page);
 
-        let new_node = Node::new(new_page_ref);
         Ok((split_key, new_node))
     }
 
@@ -446,6 +515,7 @@ impl<
         if let Ok(pos) = self.binary_search_keys(&key) {
             // this leaf already has this key, so we can just remove it and insert the new one. No
             // need to check space requirements because we're using existing space
+            let pos = pos + 2; // to account for sibling pointers
             let mut page = self.page_ref.borrow_mut();
             page.remove_cell(pos);
             page.insert_cell(pos, &to_bytes(&(key, value))?)?;
@@ -461,13 +531,11 @@ impl<
             Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
             match self.binary_search_keys(&key) {
-                Ok(pos) => {
-                    let mut page = self.page_ref.borrow_mut();
-                    // TODO: Add some replace cell function to page
-                    page.remove_cell(pos);
-                    page.insert_cell(pos, &to_bytes(&(key, value))?)?;
+                Ok(_) => {
+                    unreachable!();
                 }
                 Err(pos) => {
+                    let pos = pos + 2; // to account for sibling pointers
                     let mut page = self.page_ref.borrow_mut();
                     page.insert_cell(pos, &to_bytes(&(key, value))?)?;
                 }
@@ -607,7 +675,7 @@ impl<
 }
 
 #[cfg(test)]
-/// This size allows for nodes with 5 keys and leaves with 8
+/// This size allows for nodes with 5 keys and leaves with 7
 const TEST_BUFFER_SIZE: u16 = 112;
 #[cfg(test)]
 struct TestPageBuffer {
@@ -675,17 +743,21 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
 
         // init root page
         let first_line = lines.next().unwrap();
-        let root_kind = match first_line.is_leaf {
-            true => PageKind::BTreeLeaf,
-            false => PageKind::BTreeNode,
+        let root: Node<TestPageBuffer, u32, u32> = match first_line.is_leaf {
+            true => Node::init_leaf(&mut pager_info).unwrap(),
+            false => Node::init_node(&mut pager_info).unwrap(),
         };
-        let root: Node<TestPageBuffer, u32, u32> = pager_info.new_page_node(root_kind).unwrap();
         let first_page_id = root.page_id();
         assert_eq!(first_page_id, 0);
         drop(root);
 
-        let _root =
-            Node::from_description_lines(&mut pager_info, first_line, &mut lines, first_page_id);
+        let _root = Node::from_description_lines(
+            &mut pager_info,
+            first_line,
+            &mut lines,
+            first_page_id,
+            (0, 0),
+        );
 
         let tree = BTree::init(pager_ref, backing_fd).unwrap();
         assert_subtree_valid(&tree.root, &mut pager_info);
@@ -777,8 +849,12 @@ impl<
     }
 
     fn descendent_count(&self) -> u16 {
-        let page = self.page_ref.borrow();
-        page.cell_count() - self.key_count()
+        if self.is_leaf() {
+            0
+        } else {
+            let page = self.page_ref.borrow();
+            page.cell_count() - self.key_count()
+        }
     }
 }
 
@@ -789,15 +865,23 @@ impl Node<TestPageBuffer, u32, u32> {
         this_node_line: DescriptionLine,
         lines: &mut Peekable<I>,
         this_page_id: PageId,
+        sibling_page_ids: (PageId, PageId),
     ) -> Self {
-        let new_node = pager_info.page_node(this_page_id).unwrap();
+        let mut new_node = pager_info.page_node(this_page_id).unwrap();
         let mut page = new_node.page_ref.borrow_mut();
 
         if this_node_line.is_leaf {
+            // update sibling pointers
             for (i, key) in this_node_line.keys.iter().enumerate() {
                 let bytes = to_bytes(&(key, key)).unwrap();
-                page.insert_cell(i as u16, &bytes).unwrap();
+                // +2 to account for sibling pointers
+                let insertion_pos = (i as u16) + 2;
+                page.insert_cell(insertion_pos, &bytes).unwrap();
             }
+            drop(page);
+            let (left_sibling, right_sibling) = sibling_page_ids;
+            new_node.leaf_replace_left_sibling(&left_sibling).unwrap();
+            new_node.leaf_replace_right_sibling(&right_sibling).unwrap();
         } else {
             let child_lines: Vec<_> = lines
                 .peeking_take_while(|l| this_node_line.is_child_line(l))
@@ -806,15 +890,19 @@ impl Node<TestPageBuffer, u32, u32> {
             assert_eq!(this_node_line.keys.len() + 1, this_node_line.child_count);
             let mut children = Vec::new();
 
+            //this  fills up with page ids, bookended with 0s, so that to know the siblings of
+            //position i in children, you just need position i and i + 2 from siblings
+            let mut siblings = vec![0];
+
             for (idx, child_line) in child_lines.into_iter().enumerate() {
                 // init child page so we can get the page id
-                let kind = match child_line.is_leaf {
-                    true => PageKind::BTreeLeaf,
-                    false => PageKind::BTreeNode,
+                let child_node: Self = match child_line.is_leaf {
+                    true => Self::init_leaf(pager_info).unwrap(),
+                    false => Self::init_node(pager_info).unwrap(),
                 };
-                let child_node: Self = pager_info.new_page_node(kind).unwrap();
                 let page_id = child_node.page_id();
                 children.push((child_line, page_id)); // store for later
+                siblings.push(page_id);
                 drop(child_node);
 
                 let page_id_bytes = to_bytes(&page_id).unwrap();
@@ -830,14 +918,21 @@ impl Node<TestPageBuffer, u32, u32> {
                         .unwrap();
                 }
             }
+            siblings.push(0);
+            drop(page);
 
             // Process the children we set aside earlier
-            for (child_line, page_id) in children.into_iter() {
-                Self::from_description_lines(pager_info, child_line, lines, page_id);
+            for (i, (child_line, page_id)) in children.into_iter().enumerate() {
+                Self::from_description_lines(
+                    pager_info,
+                    child_line,
+                    lines,
+                    page_id,
+                    (siblings[i], siblings[i + 2]),
+                );
             }
         }
 
-        drop(page);
         new_node
     }
 }
@@ -1089,9 +1184,13 @@ mod tests {
         let node_page_id_size = serialized_size(&page_id);
         assert_eq!(node_page_id_size, 8);
 
+        let sibling_pointers_size = (serialized_size(&page_id) as u16 + CELL_POINTER_SIZE) * 2;
+        assert_eq!(sibling_pointers_size, 24);
+
         let leaf_entry_size = CELL_POINTER_SIZE as usize + leaf_key_size;
+        let buffer_minus_siblings = TEST_BUFFER_SIZE - sibling_pointers_size;
         assert_eq!(leaf_entry_size, 12);
-        assert_eq!(TEST_BUFFER_SIZE as usize / leaf_entry_size, 9);
+        assert_eq!(buffer_minus_siblings as usize / leaf_entry_size, 7);
 
         let node_key_entry_size = CELL_POINTER_SIZE as usize + node_key_size;
         let node_page_id_entry_size = CELL_POINTER_SIZE as usize + node_page_id_size;
@@ -1206,8 +1305,8 @@ mod tests {
     #[test]
     fn replace_value_in_full_leaf() {
         let filename = "replace_value_in_full_leaf.test";
-        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7, 8, 9] (0)");
-        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7, 8, 9] (0)");
+        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7] (0)");
+        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7] (0)");
 
         let mut t = init_tree_from_description_in_file(filename, &input_tree);
         t.insert(5, 42).unwrap();
@@ -1258,15 +1357,16 @@ mod tests {
     fn leaf_root_split() {
         let filename = "leaf_root_split.test";
         let expected_tree = "
-            0: [5] (2)
-            0->0: L[1, 2, 3, 4, 5] (0)
-            0->1: L[6, 7, 8, 9, 10] (0)
+            0: [4] (2)
+            0->0: L[1, 2, 3, 4] (0)
+            0->1: L[5, 6, 7, 8] (0)
         ";
         let expected_tree = trim_lines(expected_tree);
 
         let mut tree = init_tree_in_file(filename);
 
-        for i in 1..=10 {
+        for i in 1..=8 {
+            println!("inserting {i}");
             tree.insert(i, i).unwrap();
         }
 
