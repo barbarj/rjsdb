@@ -1037,7 +1037,7 @@ mod tests {
     use serialize::serialized_size;
 
     use crate::{
-        btree_disk::TEST_BUFFER_SIZE,
+        btree_disk::{assert_subtree_valid, TEST_BUFFER_SIZE},
         pager::{PageId, Pager, CELL_POINTER_SIZE},
     };
 
@@ -1214,6 +1214,7 @@ mod tests {
 
         assert_eq!(t.to_description(), expected_tree);
         assert_eq!(t.get(&5).unwrap(), Some(42));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
     }
 
     #[test]
@@ -1226,6 +1227,7 @@ mod tests {
         tree.insert(1, 1).unwrap();
 
         assert_eq!(&tree.to_description(), &expected_tree);
+        assert_subtree_valid(&tree.root, &mut tree.pager_info());
 
         drop(tree);
         fs::remove_file(filename).unwrap();
@@ -1246,6 +1248,7 @@ mod tests {
         }
 
         assert_eq!(&tree.to_description(), &expected_tree);
+        assert_subtree_valid(&tree.root, &mut tree.pager_info());
 
         drop(tree);
         fs::remove_file(filename).unwrap();
@@ -1268,6 +1271,7 @@ mod tests {
         }
 
         assert_eq!(&tree.to_description(), &expected_tree);
+        assert_subtree_valid(&tree.root, &mut tree.pager_info());
 
         drop(tree);
         fs::remove_file(filename).unwrap();
@@ -1305,6 +1309,7 @@ mod tests {
         tree.insert(35, 35).unwrap();
 
         assert_eq!(tree.to_description(), expected_tree);
+        assert_subtree_valid(&tree.root, &mut tree.pager_info());
 
         drop(tree);
         fs::remove_file(filename).unwrap();
@@ -1332,6 +1337,8 @@ mod tests {
         t.insert(13, 13).unwrap();
 
         assert_eq!(&t.to_description(), &output_tree);
+        drop(t);
+        fs::remove_file(filename).unwrap();
     }
 
     #[test]
@@ -1356,52 +1363,105 @@ mod tests {
         t.insert(4, 4).unwrap();
 
         assert_eq!(&t.to_description(), &output_tree);
+        drop(t);
+        fs::remove_file(filename).unwrap();
     }
 
-    /*
     #[test]
     fn split_as_node_insert_left() {
         let filename = "split_as_node_insert_left.test";
         let input_tree = "
             0: [12] (2)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 20, 23, 28, 31] (6)
+            0->1: [15, 25, 28, 31, 34] (6)
             0->0->0: L[1, 2, 3] (0)
             0->0->1: L[4, 5, 6] (0)
             0->0->2: L[7, 8, 9] (0)
             0->0->3: L[10, 11, 12] (0)
             0->1->0: L[13, 14, 15] (0)
             0->1->1: L[16, 17, 18, 20, 21, 22, 23, 24, 25] (0)
-            0->1->2: L[25, 26, 27] (0)
-            0->1->3: L[28, 29, 30] (0)
-            0->1->4: L[31, 32, 33] (0)
-            0->1->5: L[34, 35, 26] (0)
+            0->1->2: L[26, 27, 28] (0)
+            0->1->3: L[29, 30, 31] (0)
+            0->1->4: L[32, 33, 34] (0)
+            0->1->5: L[35, 36, 37] (0)
         ";
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [12, 23] (3)
+            0: [12, 28] (3)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 17, 20] (4)
-            0->2: [28] (2)
+            0->1: [15, 21, 25] (4)
+            0->2: [31, 34] (3)
             0->0->0: L[1, 2, 3] (0)
             0->0->1: L[4, 5, 6] (0)
             0->0->2: L[7, 8, 9] (0)
             0->0->3: L[10, 11, 12] (0)
             0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17] (0)
-            0->1->2: L[18, 19, 20] (0)
-            0->1->3: L[21, 22, 23] (0)
-            0->2->0: L[24, 25, 26, 27] (0)
-            0->2->1: L[29, 30, 31] (0)
+            0->1->1: L[16, 17, 18, 19, 20, 21] (0)
+            0->1->2: L[22, 23, 24, 25] (0)
+            0->1->3: L[26, 27, 28] (0)
+            0->2->0: L[29, 30, 31] (0)
+            0->2->1: L[32, 33, 34] (0)
+            0->2->2: L[35, 36, 37] (0)
         ";
         let output_tree = trim_lines(output_tree);
 
-        let mut t = BTree::from_description(&input_tree, 4);
-        t.insert(19, 19);
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        t.insert(19, 19).unwrap();
 
         assert_eq!(&t.to_description(), &output_tree);
-        assert_subtree_valid(&t.root);
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
     }
-    */
+
+    #[test]
+    fn split_as_node_insert_right() {
+        let filename = "split_as_node_insert_right.test";
+        let input_tree = "
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 18, 21, 24, 34] (6)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18] (0)
+            0->1->2: L[19, 20, 21] (0)
+            0->1->3: L[22, 23, 24] (0)
+            0->1->4: L[25, 26, 27, 28, 29, 30, 32, 33, 34] (0)
+            0->1->5: L[35, 36, 37] (0)
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [12, 21] (3)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 18] (3)
+            0->2: [24, 29, 34] (4)
+            0->0->0: L[1, 2, 3] (0)
+            0->0->1: L[4, 5, 6] (0)
+            0->0->2: L[7, 8, 9] (0)
+            0->0->3: L[10, 11, 12] (0)
+            0->1->0: L[13, 14, 15] (0)
+            0->1->1: L[16, 17, 18] (0)
+            0->1->2: L[19, 20, 21] (0)
+            0->2->0: L[22, 23, 24] (0)
+            0->2->1: L[25, 26, 27, 28, 29] (0)
+            0->2->2: L[30, 31, 32, 33, 34] (0)
+            0->2->3: L[35, 36, 37] (0)
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        t.insert(31, 31).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
 }
