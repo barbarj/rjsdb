@@ -297,16 +297,16 @@ impl<
     fn key_from_leaf(&self, pos: u16) -> Result<K> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        // +2 to account for sibling pointers
-        let (key, _): (K, V) = from_reader(page.cell_bytes(pos + 2))?;
+        let pos = Self::leaf_key_pos_to_cell_pos(pos);
+        let (key, _): (K, V) = from_reader(page.cell_bytes(pos))?;
         Ok(key)
     }
 
     fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        // +2 to account for sibling pointers
-        let (_, val): (K, T) = from_reader(page.cell_bytes(pos + 2))?;
+        let pos = Self::leaf_key_pos_to_cell_pos(pos);
+        let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
         Ok(val)
     }
 
@@ -346,8 +346,12 @@ impl<
         Ok(from_reader(page.cell_bytes(1))?)
     }
 
-    fn key_pos_to_cell_pos(key_pos: u16) -> u16 {
+    fn node_key_pos_to_cell_pos(key_pos: u16) -> u16 {
         (key_pos * 2) + 1
+    }
+
+    fn leaf_key_pos_to_cell_pos(key_pos: u16) -> u16 {
+        key_pos + 2
     }
 
     fn id_pos_to_cell_pos(id_pos: u16) -> u16 {
@@ -367,7 +371,7 @@ impl<
 
     fn key_from_inner_node(&self, key_pos: u16) -> Result<K> {
         assert!(self.is_node());
-        let pos = Self::key_pos_to_cell_pos(key_pos);
+        let pos = Self::node_key_pos_to_cell_pos(key_pos);
         let page = self.page_ref.borrow();
         let key = from_reader(page.cell_bytes(pos))?;
         Ok(key)
@@ -428,7 +432,7 @@ impl<
         // Find the index of the first "position" at or past the halfway point
         while used_space <= half {
             let id_ptr = page.get_cell_pointer(Self::id_pos_to_cell_pos(idx));
-            let key_ptr = page.get_cell_pointer(Self::key_pos_to_cell_pos(idx));
+            let key_ptr = page.get_cell_pointer(Self::node_key_pos_to_cell_pos(idx));
             used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
             idx += 1;
         }
@@ -437,14 +441,14 @@ impl<
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
         let split_key = self.key_from_inner_node(idx)?;
-        let split_key_pos = Self::key_pos_to_cell_pos(idx);
+        let split_key_pos = Self::node_key_pos_to_cell_pos(idx);
 
         // get new page
         let new_node = Self::init_node(pager_info)?;
         let mut new_page = new_node.page_ref.borrow_mut();
 
         // copy cells to new page, starting with the cell after the split key
-        let cells_skipped = (Self::key_pos_to_cell_pos(idx) + 1).into();
+        let cells_skipped = (Self::node_key_pos_to_cell_pos(idx) + 1).into();
         for (i, bytes) in page.cell_bytes_iter().skip(cells_skipped).enumerate() {
             new_page.insert_cell(i as u16, bytes)?;
         }
@@ -496,7 +500,7 @@ impl<
         let mut new_page = new_node.page_ref.borrow_mut();
         let mut page = self.page_ref.borrow_mut();
         for (i, _) in (idx..page.cell_count()).enumerate() {
-            let insert_at = (i as u16) + 2; // skip sibling pointers
+            let insert_at = Self::leaf_key_pos_to_cell_pos(i as u16); // skip sibling pointers
             new_page.insert_cell(insert_at, page.cell_bytes(idx))?;
             page.remove_cell(idx);
         }
@@ -515,7 +519,7 @@ impl<
         if let Ok(pos) = self.binary_search_keys(&key) {
             // this leaf already has this key, so we can just remove it and insert the new one. No
             // need to check space requirements because we're using existing space
-            let pos = pos + 2; // to account for sibling pointers
+            let pos = Self::leaf_key_pos_to_cell_pos(pos);
             let mut page = self.page_ref.borrow_mut();
             page.remove_cell(pos);
             page.insert_cell(pos, &to_bytes(&(key, value))?)?;
@@ -535,7 +539,7 @@ impl<
                     unreachable!();
                 }
                 Err(pos) => {
-                    let pos = pos + 2; // to account for sibling pointers
+                    let pos = Self::leaf_key_pos_to_cell_pos(pos);
                     let mut page = self.page_ref.borrow_mut();
                     page.insert_cell(pos, &to_bytes(&(key, value))?)?;
                 }
@@ -598,7 +602,7 @@ impl<
         } else {
             None
         };
-        let cell_idx = Self::key_pos_to_cell_pos(key_pos);
+        let cell_idx = Self::node_key_pos_to_cell_pos(key_pos);
         let mut page = self.page_ref.borrow_mut();
         if old_key.is_some() {
             page.remove_cell(cell_idx);
@@ -875,8 +879,8 @@ impl Node<TestPageBuffer, u32, u32> {
             for (i, key) in this_node_line.keys.iter().enumerate() {
                 let bytes = to_bytes(&(key, key)).unwrap();
                 // +2 to account for sibling pointers
-                let insertion_pos = (i as u16) + 2;
-                page.insert_cell(insertion_pos, &bytes).unwrap();
+                page.insert_cell(Self::leaf_key_pos_to_cell_pos(i as u16), &bytes)
+                    .unwrap();
             }
             drop(page);
             let (left_sibling, right_sibling) = sibling_page_ids;
@@ -914,7 +918,7 @@ impl Node<TestPageBuffer, u32, u32> {
                 if idx < this_node_line.keys.len() {
                     let key = &this_node_line.keys[idx];
                     let key_bytes = to_bytes(key).unwrap();
-                    page.insert_cell(Self::key_pos_to_cell_pos(idx as u16), &key_bytes)
+                    page.insert_cell(Self::node_key_pos_to_cell_pos(idx as u16), &key_bytes)
                         .unwrap();
                 }
             }
