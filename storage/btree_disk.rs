@@ -787,7 +787,7 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
             let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
             let path = path_parts.join("->");
             if node.is_leaf() {
-                let s = format!("{path}: L{:?} ({})\n", node.keys(), node.descendent_count());
+                let s = format!("{path}: L{:?}\n", node.keys());
                 description.push_str(&s);
             } else {
                 let s = format!("{path}: {:?} ({})\n", node.keys(), node.descendent_count());
@@ -969,16 +969,18 @@ impl DescriptionLine {
         let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
         let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
 
-        let child_count = second_half[closing_bracket_pos + 3..]
-            .split(")")
-            .next()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-
-        if is_leaf {
-            assert_eq!(child_count, 0);
+        let child_count = if is_leaf {
+            0
         } else {
+            second_half[closing_bracket_pos + 3..]
+                .split(")")
+                .next()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        };
+
+        if !is_leaf {
             assert_eq!(keys.len() + 1, child_count);
         }
 
@@ -1213,16 +1215,16 @@ mod tests {
             0->0: [3, 6, 9] (4)
             0->1: [15, 17, 20] (4)
             0->2: [28] (2)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->0->3: L[10, 11, 12] (0)
-            0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17] (0)
-            0->1->2: L[18, 19, 20] (0)
-            0->1->3: L[21, 22, 23] (0)
-            0->2->0: L[24, 25, 26, 27] (0)
-            0->2->1: L[29, 30, 31] (0)";
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6]
+            0->0->2: L[7, 8, 9] 
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15]
+            0->1->1: L[16, 17] 
+            0->1->2: L[18, 19, 20] 
+            0->1->3: L[21, 22, 23]
+            0->2->0: L[24, 25, 26, 27] 
+            0->2->1: L[29, 30, 31]";
         let input_description = trim_lines(input_description);
 
         let filename = "end_to_end_description.test";
@@ -1269,7 +1271,7 @@ mod tests {
     fn binary_search_keys_multiple() {
         // smaller
         let filename = "binary_search_keys_multiple.test";
-        let description = "0: L[2, 4, 6] (0)";
+        let description = "0: L[2, 4, 6]";
 
         let tree = init_tree_from_description_in_file(filename, description);
 
@@ -1286,7 +1288,7 @@ mod tests {
 
         // bigger
         let filename = "binary_search_keys_multiple.test";
-        let description = "0: L[2, 4, 6, 8, 10] (0)";
+        let description = "0: L[2, 4, 6, 8, 10]";
 
         let tree = init_tree_from_description_in_file(filename, description);
 
@@ -1309,8 +1311,8 @@ mod tests {
     #[test]
     fn replace_value_in_full_leaf() {
         let filename = "replace_value_in_full_leaf.test";
-        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7] (0)");
-        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7] (0)");
+        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7]");
+        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7]");
 
         let mut t = init_tree_from_description_in_file(filename, &input_tree);
         t.insert(5, 42).unwrap();
@@ -1323,7 +1325,7 @@ mod tests {
     #[test]
     fn single_insertion() {
         let filename = "single_insertion.test";
-        let expected_tree = "0: L[1] (0)";
+        let expected_tree = "0: L[1]";
         let expected_tree = trim_lines(expected_tree);
 
         let mut tree = init_tree_in_file(filename);
@@ -1340,7 +1342,7 @@ mod tests {
     fn leaf_root_insertion() {
         let filename = "leaf_root_insertion.test";
         let expected_tree = "
-            0: L[1, 2, 3, 4, 5] (0)
+            0: L[1, 2, 3, 4, 5]
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -1362,15 +1364,14 @@ mod tests {
         let filename = "leaf_root_split.test";
         let expected_tree = "
             0: [4] (2)
-            0->0: L[1, 2, 3, 4] (0)
-            0->1: L[5, 6, 7, 8] (0)
+            0->0: L[1, 2, 3, 4]
+            0->1: L[5, 6, 7, 8] 
         ";
         let expected_tree = trim_lines(expected_tree);
 
         let mut tree = init_tree_in_file(filename);
 
         for i in 1..=8 {
-            println!("inserting {i}");
             tree.insert(i, i).unwrap();
         }
 
@@ -1386,12 +1387,12 @@ mod tests {
         let filename = "node_root_split.test";
         let init_tree = "
             0: [3, 6, 9, 12, 15] (6)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[4, 5, 6] (0)
-            0->2: L[7, 8, 9] (0)
-            0->3: L[10, 11, 12] (0)
-            0->4: L[13, 14, 15] (0)
-            0->5: L[16, 17, 18, 19, 20, 21, 22] (0)
+            0->0: L[1, 2, 3]
+            0->1: L[4, 5, 6] 
+            0->2: L[7, 8, 9]
+            0->3: L[10, 11, 12] 
+            0->4: L[13, 14, 15] 
+            0->5: L[16, 17, 18, 19, 20, 21, 22] 
         ";
         let init_tree = trim_lines(init_tree);
 
@@ -1399,13 +1400,13 @@ mod tests {
             0: [9] (2)
             0->0: [3, 6] (3)
             0->1: [12, 15, 19] (4)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->1->0: L[10, 11, 12] (0)
-            0->1->1: L[13, 14, 15] (0)
-            0->1->2: L[16, 17, 18, 19] (0)
-            0->1->3: L[20, 21, 22, 23] (0)
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6] 
+            0->0->2: L[7, 8, 9]
+            0->1->0: L[10, 11, 12] 
+            0->1->1: L[13, 14, 15] 
+            0->1->2: L[16, 17, 18, 19] 
+            0->1->3: L[20, 21, 22, 23]
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -1424,16 +1425,16 @@ mod tests {
         let filename = "split_as_leaf_insert_right.test";
         let input_tree = "
             0: [3] (2)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[4, 5, 6, 7, 8, 9, 10] (0)
+            0->0: L[1, 2, 3] 
+            0->1: L[4, 5, 6, 7, 8, 9, 10] 
             ";
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
             0: [3, 7] (3)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[4, 5, 6, 7] (0)
-            0->2: L[8, 9, 10, 11] (0)
+            0->0: L[1, 2, 3] 
+            0->1: L[4, 5, 6, 7] 
+            0->2: L[8, 9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -1450,16 +1451,16 @@ mod tests {
         let filename = "split_as_leaf_insert_left.test";
         let input_tree = "
             0: [3] (2)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[5, 6, 7, 8, 9, 10, 11] (0)
+            0->0: L[1, 2, 3] 
+            0->1: L[5, 6, 7, 8, 9, 10, 11] 
             ";
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
             0: [3, 8] (3)
-            0->0: L[1, 2, 3] (0)
-            0->1: L[4, 5, 6, 7, 8] (0)
-            0->2: L[9, 10, 11] (0)
+            0->0: L[1, 2, 3] 
+            0->1: L[4, 5, 6, 7, 8] 
+            0->2: L[9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -1478,16 +1479,16 @@ mod tests {
             0: [12] (2)
             0->0: [3, 6, 9] (4)
             0->1: [15, 23, 26, 29, 32] (6)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->0->3: L[10, 11, 12] (0)
-            0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17, 18, 20, 21, 22, 23] (0)
-            0->1->2: L[24, 25, 26] (0)
-            0->1->3: L[17, 28, 29] (0)
-            0->1->4: L[30, 31, 32] (0)
-            0->1->5: L[33, 34, 35] (0)
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6] 
+            0->0->2: L[7, 8, 9] 
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15] 
+            0->1->1: L[16, 17, 18, 20, 21, 22, 23] 
+            0->1->2: L[24, 25, 26] 
+            0->1->3: L[17, 28, 29] 
+            0->1->4: L[30, 31, 32] 
+            0->1->5: L[33, 34, 35] 
         ";
         let input_tree = trim_lines(input_tree);
 
@@ -1496,17 +1497,17 @@ mod tests {
             0->0: [3, 6, 9] (4)
             0->1: [15, 20, 23] (4)
             0->2: [29, 32] (3)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->0->3: L[10, 11, 12] (0)
-            0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17, 18, 19, 20] (0)
-            0->1->2: L[21, 22, 23] (0)
-            0->1->3: L[24, 25, 26] (0)
-            0->2->0: L[17, 28, 29] (0)
-            0->2->1: L[30, 31, 32] (0)
-            0->2->2: L[33, 34, 35] (0)
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6] 
+            0->0->2: L[7, 8, 9] 
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15] 
+            0->1->1: L[16, 17, 18, 19, 20] 
+            0->1->2: L[21, 22, 23] 
+            0->1->3: L[24, 25, 26] 
+            0->2->0: L[17, 28, 29] 
+            0->2->1: L[30, 31, 32] 
+            0->2->2: L[33, 34, 35] 
         ";
         let output_tree = trim_lines(output_tree);
 
@@ -1527,16 +1528,16 @@ mod tests {
             0: [12] (2)
             0->0: [3, 6, 9] (4)
             0->1: [15, 18, 21, 24, 32] (6)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->0->3: L[10, 11, 12] (0)
-            0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17, 18] (0)
-            0->1->2: L[19, 20, 21] (0)
-            0->1->3: L[22, 23, 24] (0)
-            0->1->4: L[25, 26, 27, 28, 29, 30, 32] (0)
-            0->1->5: L[33, 34, 35] (0)
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6] 
+            0->0->2: L[7, 8, 9] 
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15] 
+            0->1->1: L[16, 17, 18] 
+            0->1->2: L[19, 20, 21] 
+            0->1->3: L[22, 23, 24] 
+            0->1->4: L[25, 26, 27, 28, 29, 30, 32] 
+            0->1->5: L[33, 34, 35] 
         ";
         let input_tree = trim_lines(input_tree);
 
@@ -1545,17 +1546,17 @@ mod tests {
             0->0: [3, 6, 9] (4)
             0->1: [15, 18] (3)
             0->2: [24, 28, 32] (4)
-            0->0->0: L[1, 2, 3] (0)
-            0->0->1: L[4, 5, 6] (0)
-            0->0->2: L[7, 8, 9] (0)
-            0->0->3: L[10, 11, 12] (0)
-            0->1->0: L[13, 14, 15] (0)
-            0->1->1: L[16, 17, 18] (0)
-            0->1->2: L[19, 20, 21] (0)
-            0->2->0: L[22, 23, 24] (0)
-            0->2->1: L[25, 26, 27, 28] (0)
-            0->2->2: L[29, 30, 31, 32] (0)
-            0->2->3: L[33, 34, 35] (0)
+            0->0->0: L[1, 2, 3] 
+            0->0->1: L[4, 5, 6] 
+            0->0->2: L[7, 8, 9] 
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15] 
+            0->1->1: L[16, 17, 18] 
+            0->1->2: L[19, 20, 21] 
+            0->2->0: L[22, 23, 24] 
+            0->2->1: L[25, 26, 27, 28] 
+            0->2->2: L[29, 30, 31, 32] 
+            0->2->3: L[33, 34, 35] 
         ";
         let output_tree = trim_lines(output_tree);
 
