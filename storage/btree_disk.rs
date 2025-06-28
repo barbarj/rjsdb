@@ -516,15 +516,7 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
-        if let Ok(pos) = self.binary_search_keys(&key) {
-            // this leaf already has this key, so we can just remove it and insert the new one. No
-            // need to check space requirements because we're using existing space
-            let pos = Self::leaf_key_pos_to_cell_pos(pos);
-            let mut page = self.page_ref.borrow_mut();
-            page.remove_cell(pos);
-            page.insert_cell(pos, &to_bytes(&(key, value))?)?;
-            Ok(InsertResult::Done)
-        } else if !self.can_fit_leaf(&key, &value) {
+        if !self.can_fit_leaf(&key, &value) {
             let (split_key, mut new_node) = self.split_leaf(pager_info)?;
             assert!(new_node.is_leaf());
             if key > split_key {
@@ -535,8 +527,11 @@ impl<
             Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
             match self.binary_search_keys(&key) {
-                Ok(_) => {
-                    unreachable!();
+                Ok(pos) => {
+                    let pos = Self::leaf_key_pos_to_cell_pos(pos);
+                    let mut page = self.page_ref.borrow_mut();
+                    page.remove_cell(pos);
+                    page.insert_cell(pos, &to_bytes(&(key, value))?)?;
                 }
                 Err(pos) => {
                     let pos = Self::leaf_key_pos_to_cell_pos(pos);
@@ -1309,16 +1304,16 @@ mod tests {
     }
 
     #[test]
-    fn replace_value_in_full_leaf() {
-        let filename = "replace_value_in_full_leaf.test";
-        let input_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7]");
-        let expected_tree = trim_lines("0: L[1, 2, 3, 4, 5, 6, 7]");
+    fn replace_value_in_leaf() {
+        let filename = "replace_value_in_leaf.test";
+        let input_tree = trim_lines("0: L[1, 2, 3, 4]");
+        let expected_tree = trim_lines("0: L[1, 2, 3, 4]");
 
         let mut t = init_tree_from_description_in_file(filename, &input_tree);
-        t.insert(5, 42).unwrap();
+        t.insert(2, 42).unwrap();
 
         assert_eq!(t.to_description(), expected_tree);
-        assert_eq!(t.get(&5).unwrap(), Some(42));
+        assert_eq!(t.get(&2).unwrap(), Some(42));
         assert_subtree_valid(&t.root, &mut t.pager_info());
     }
 
