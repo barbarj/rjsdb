@@ -168,7 +168,7 @@ impl<
             drop(root_page);
             drop(child_page);
             drop(child);
-            pager_info.drop_page(child_page_id)?;
+            &pager_info.drop_page(child_page_id)?;
         }
 
         Ok(res)
@@ -478,6 +478,7 @@ impl<
                 used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
                 idx += 1;
             }
+            idx -= 1;
             Self::node_key_pos_to_cell_pos(idx)
         } else {
             while used_space < half {
@@ -485,6 +486,7 @@ impl<
                 used_space += ptr.size + CELL_POINTER_SIZE;
                 idx += 1;
             }
+            idx -= 1;
             Self::leaf_key_pos_to_cell_pos(idx)
         }
     }
