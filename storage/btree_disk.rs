@@ -5,6 +5,7 @@ use std::{
     cmp::Ordering,
     fmt::{Debug, Display},
     marker::PhantomData,
+    ops::RangeInclusive,
     os::fd::AsRawFd,
     rc::Rc,
 };
@@ -156,7 +157,9 @@ impl<
             // "replace" root with child by moving all data on child to root and dropping child
             let mut root_page = self.root.page_ref.borrow_mut();
             assert_eq!(root_page.cell_count(), 1);
-            let child = self.root.descendent_node_at_pos(0, &mut pager_info)?;
+            let child = self
+                .root
+                .descendent_node_at_logical_pos(0, &mut pager_info)?;
             let child_page = child.page_ref.borrow();
 
             root_page.remove_cell(0); // remove the one cell that should be here
@@ -168,7 +171,7 @@ impl<
             drop(root_page);
             drop(child_page);
             drop(child);
-            &pager_info.drop_page(child_page_id)?;
+            pager_info.drop_page(child_page_id)?;
         }
 
         Ok(res)
@@ -337,18 +340,18 @@ impl<
         PB::buffer_size() - page.total_free_space()
     }
 
-    fn key_from_leaf(&self, pos: u16) -> Result<K> {
+    fn key_from_leaf(&self, logical_pos: u16) -> Result<K> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let pos = Self::leaf_key_pos_to_cell_pos(pos);
+        let pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
         let (key, _): (K, V) = from_reader(page.cell_bytes(pos))?;
         Ok(key)
     }
 
-    fn value_from_leaf<T: DeserializeOwned>(&self, pos: u16) -> Result<T> {
+    fn value_from_leaf<T: DeserializeOwned>(&self, logical: u16) -> Result<T> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        let pos = Self::leaf_key_pos_to_cell_pos(pos);
+        let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
         let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
         Ok(val)
     }
@@ -389,32 +392,32 @@ impl<
         Ok(from_reader(page.cell_bytes(1))?)
     }
 
-    fn node_key_pos_to_cell_pos(key_pos: u16) -> u16 {
+    fn logical_node_key_pos_to_physical_pos(key_pos: u16) -> u16 {
         (key_pos * 2) + 1
     }
 
-    fn leaf_key_pos_to_cell_pos(key_pos: u16) -> u16 {
+    fn logical_leaf_key_pos_to_physical_pos(key_pos: u16) -> u16 {
         key_pos + 2
     }
 
-    fn id_pos_to_cell_pos(id_pos: u16) -> u16 {
+    fn logical_id_pos_to_physical_pos(id_pos: u16) -> u16 {
         id_pos * 2
     }
 
     /// Returns None if this cell position will not contain a key
-    fn cell_pos_to_key_pos(cell_pos: u16) -> Option<u16> {
-        if cell_pos % 2 == 0 {
+    fn node_physical_pos_to_logical_key_pos(physical_pos: u16) -> Option<u16> {
+        if physical_pos % 2 == 0 {
             None
         } else {
-            Some(cell_pos / 2) // integer division makes the division of an odd number (2n + 1) by
-                               // 2 result in the same number as if the input were the odd number's
-                               // even counterpart (2n)
+            Some(physical_pos / 2) // integer division makes the division of an odd number (2n + 1) by
+                                   // 2 result in the same number as if the input were the odd number's
+                                   // even counterpart (2n)
         }
     }
 
     fn key_from_inner_node(&self, key_pos: u16) -> Result<K> {
         assert!(self.is_node());
-        let pos = Self::node_key_pos_to_cell_pos(key_pos);
+        let pos = Self::logical_node_key_pos_to_physical_pos(key_pos);
         let page = self.page_ref.borrow();
         let key = from_reader(page.cell_bytes(pos))?;
         Ok(key)
@@ -422,21 +425,20 @@ impl<
 
     fn page_id_from_inner_node(&self, id_pos: u16) -> Result<PageId> {
         assert!(self.is_node());
-        let pos = Self::id_pos_to_cell_pos(id_pos);
+        let pos = Self::logical_id_pos_to_physical_pos(id_pos);
         let page = self.page_ref.borrow();
         let page_id = from_reader(page.cell_bytes(pos))?;
         Ok(page_id)
     }
 
-    fn key_at_pos(&self, pos: u16) -> Result<K> {
+    fn key_at_pos(&self, logical_pos: u16) -> Result<K> {
         if self.is_node() {
-            self.key_from_inner_node(pos)
+            self.key_from_inner_node(logical_pos)
         } else {
-            self.key_from_leaf(pos)
+            self.key_from_leaf(logical_pos)
         }
     }
 
-    // TODO: Figure out if I should remove unwraps
     fn binary_search_keys(&self, key: &K) -> std::result::Result<u16, u16> {
         if self.key_count() == 0 {
             return Err(0);
@@ -462,7 +464,7 @@ impl<
         }
     }
 
-    /// Returns the _cell_ index of the first cell at or past the halfway point. In node's this
+    /// Returns the logical position of the first cell at or past the halfway point. In node's this
     /// will always be the first key at or past the halfway point
     fn first_idx_at_or_past_halfway(&self) -> u16 {
         let half = PB::buffer_size() / 2;
@@ -473,22 +475,79 @@ impl<
         if self.is_node() {
             // Find the index of the first "position" at or past the halfway point
             while used_space <= half {
-                let id_ptr = page.get_cell_pointer(Self::id_pos_to_cell_pos(idx));
-                let key_ptr = page.get_cell_pointer(Self::node_key_pos_to_cell_pos(idx));
+                let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
+                let key_ptr =
+                    page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
                 used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
                 idx += 1;
             }
-            idx -= 1;
-            Self::node_key_pos_to_cell_pos(idx)
+            idx - 1
         } else {
             while used_space < half {
-                let ptr = page.get_cell_pointer(Self::leaf_key_pos_to_cell_pos(idx));
+                let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 used_space += ptr.size + CELL_POINTER_SIZE;
                 idx += 1;
             }
-            idx -= 1;
-            Self::leaf_key_pos_to_cell_pos(idx)
+            idx - 1
         }
+    }
+
+    fn move_cells(
+        from_node: &mut Self,
+        to_node: &mut Self,
+        from_logical_range: RangeInclusive<u16>,
+        to_logical_start: u16,
+    ) -> Result<()> {
+        let from_page = from_node.page_ref.borrow();
+        let mut to_page = to_node.page_ref.borrow_mut();
+
+        let physical_range = if from_node.is_leaf() {
+            Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.start())
+                ..=Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.end())
+        } else {
+            Self::logical_id_pos_to_physical_pos(*from_logical_range.start())
+                ..=Self::logical_id_pos_to_physical_pos(*from_logical_range.end())
+        };
+        let physical_start = if from_node.is_leaf() {
+            Self::logical_leaf_key_pos_to_physical_pos(to_logical_start)
+        } else {
+            Self::logical_id_pos_to_physical_pos(to_logical_start)
+        };
+
+        println!("logical: {from_logical_range:?}");
+        println!("physical: {physical_range:?}");
+
+        println!("physical start: {physical_start}");
+
+        // copy cells to to_page
+        let skipped = (*physical_range.start()).into();
+        let taken = physical_range.len();
+        for (i, bytes) in from_page
+            .cell_bytes_iter()
+            .skip(skipped)
+            .take(taken)
+            .enumerate()
+        {
+            to_page.insert_cell(physical_start + i as u16, bytes)?;
+        }
+
+        drop(to_page);
+        drop(from_page);
+        // remove cells from from_page
+        let mut from_page = from_node.page_ref.borrow_mut();
+        for i in physical_range.rev() {
+            from_page.remove_cell(i);
+        }
+
+        Ok(())
+    }
+
+    fn remove_trailing_key(&mut self, logical_key_pos: u16) {
+        assert!(self.is_node());
+        let physical_pos = Self::logical_node_key_pos_to_physical_pos(logical_key_pos);
+        let mut page = self.page_ref.borrow_mut();
+        assert_eq!(physical_pos, page.cell_count() - 1); // should always be the last cell
+        page.remove_cell(physical_pos);
     }
 
     fn split_node<Fd: AsRawFd + Copy>(
@@ -496,32 +555,25 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
         assert!(self.page_free_space() < pager_info.buffer_size() / 2);
-        let split_key_pos = self.first_idx_at_or_past_halfway();
+        let split_key_logical_pos = self.first_idx_at_or_past_halfway();
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
-        let split_key =
-            self.key_from_inner_node(Self::cell_pos_to_key_pos(split_key_pos).unwrap())?;
+        let split_key = self.key_from_inner_node(split_key_logical_pos)?;
 
         // get new page
-        let new_node = Self::init_node(pager_info)?;
-        let mut new_page = new_node.page_ref.borrow_mut();
+        let mut new_node = Self::init_node(pager_info)?;
 
-        // copy cells to new page, starting with the cell after the split key
-        let page = self.page_ref.borrow();
-        let cells_skipped = (split_key_pos + 1).into();
-        for (i, bytes) in page.cell_bytes_iter().skip(cells_skipped).enumerate() {
-            new_page.insert_cell(i as u16, bytes)?;
-        }
+        let key_count = self.key_count();
+        Self::move_cells(
+            self,
+            &mut new_node,
+            split_key_logical_pos + 1..=key_count,
+            0,
+        )?;
 
-        drop(page);
-        // remove moved cells, plus the now hanging right key from this node
-        let mut page = self.page_ref.borrow_mut();
-        for i in (split_key_pos..page.cell_count()).rev() {
-            page.remove_cell(i);
-        }
-        drop(new_page);
-        drop(page);
+        self.remove_trailing_key(split_key_logical_pos);
+
         Ok((split_key, new_node))
     }
 
@@ -529,13 +581,9 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let idx = self.first_idx_at_or_past_halfway();
-        // keys point left, and cell number idx is going to be the first cell in the new page,
-        // so the split key should be one to the left. (minus another 2 to account for our sibling
-        // pointer offset
-        assert!(idx > 2);
-        let split_key = self.key_from_leaf(idx - 3)?;
-        println!("split key: {split_key:?}");
+        let logical_idx = self.first_idx_at_or_past_halfway();
+        assert!(logical_idx > 0);
+        let split_key = self.key_from_leaf(logical_idx - 1)?;
 
         // get new page
         let mut new_node = Self::init_leaf(pager_info)?;
@@ -546,14 +594,8 @@ impl<
         new_node.leaf_replace_right_sibling(&old_right)?;
 
         // copy cells to new page and remove cells from old page
-        let mut new_page = new_node.page_ref.borrow_mut();
-        let mut page = self.page_ref.borrow_mut();
-        for (i, _) in (idx..page.cell_count()).enumerate() {
-            let insert_at = Self::leaf_key_pos_to_cell_pos(i as u16); // skip sibling pointers
-            new_page.insert_cell(insert_at, page.cell_bytes(idx))?;
-            page.remove_cell(idx);
-        }
-        drop(new_page);
+        let key_count = self.key_count();
+        Self::move_cells(self, &mut new_node, logical_idx..=key_count - 1, 0)?;
 
         Ok((split_key, new_node))
     }
@@ -577,13 +619,13 @@ impl<
         } else {
             match self.binary_search_keys(&key) {
                 Ok(pos) => {
-                    let pos = Self::leaf_key_pos_to_cell_pos(pos);
+                    let pos = Self::logical_leaf_key_pos_to_physical_pos(pos);
                     let mut page = self.page_ref.borrow_mut();
                     page.remove_cell(pos);
                     page.insert_cell(pos, &to_bytes(&(key, value))?)?;
                 }
                 Err(pos) => {
-                    let pos = Self::leaf_key_pos_to_cell_pos(pos);
+                    let pos = Self::logical_leaf_key_pos_to_physical_pos(pos);
                     let mut page = self.page_ref.borrow_mut();
                     page.insert_cell(pos, &to_bytes(&(key, value))?)?;
                 }
@@ -601,7 +643,7 @@ impl<
         }
     }
 
-    fn descendent_node_at_pos<Fd: AsRawFd + Copy>(
+    fn descendent_node_at_logical_pos<Fd: AsRawFd + Copy>(
         &self,
         pos: u16,
         pager_info: &mut PagerInfo<PB, Fd>,
@@ -617,7 +659,7 @@ impl<
     ) -> Result<(u16, Node<PB, K, V>)> {
         assert!(self.is_node());
         let pos = self.search_keys_as_node(key);
-        let descendent = self.descendent_node_at_pos(pos, pager_info)?;
+        let descendent = self.descendent_node_at_logical_pos(pos, pager_info)?;
         Ok((pos, descendent))
     }
 
@@ -628,7 +670,7 @@ impl<
         new_page_id: PageId,
     ) -> Result<()> {
         let prior_key = self.replace_inner_node_key(pos, split_key)?;
-        let id_cell_pos = Self::id_pos_to_cell_pos(pos + 1);
+        let id_cell_pos = Self::logical_id_pos_to_physical_pos(pos + 1);
         let mut page = self.page_ref.borrow_mut();
         page.insert_cell(id_cell_pos, &to_bytes(&new_page_id)?)?;
         if let Some(k) = prior_key {
@@ -646,7 +688,7 @@ impl<
         } else {
             None
         };
-        let cell_idx = Self::node_key_pos_to_cell_pos(key_pos);
+        let cell_idx = Self::logical_node_key_pos_to_physical_pos(key_pos);
         let mut page = self.page_ref.borrow_mut();
         if old_key.is_some() {
             page.remove_cell(cell_idx);
@@ -727,8 +769,8 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<bool> {
         assert!(left_idx < self.descendent_count() - 1);
-        let left_child = self.descendent_node_at_pos(left_idx, pager_info)?;
-        let right_child = self.descendent_node_at_pos(left_idx + 1, pager_info)?;
+        let left_child = self.descendent_node_at_logical_pos(left_idx, pager_info)?;
+        let right_child = self.descendent_node_at_logical_pos(left_idx + 1, pager_info)?;
 
         let fits = if left_child.is_node() {
             let merge_key = self.key_at_pos(left_idx)?;
@@ -749,15 +791,16 @@ impl<
         assert!(left_idx < self.descendent_count() - 1);
         assert!(self.can_fit_via_merge(left_idx, pager_info)?);
 
-        let mut left_child = self.descendent_node_at_pos(left_idx, pager_info)?;
+        let mut left_child = self.descendent_node_at_logical_pos(left_idx, pager_info)?;
         let mut left_page = left_child.page_ref.borrow_mut();
-        let right_child = self.descendent_node_at_pos(left_idx + 1, pager_info)?;
+        let right_child = self.descendent_node_at_logical_pos(left_idx + 1, pager_info)?;
         let right_page = right_child.page_ref.borrow_mut();
         let mut this_page = self.page_ref.borrow_mut();
 
         // add split key if this is a node
         if left_child.is_node() {
-            let key_bytes = this_page.cell_bytes(Self::node_key_pos_to_cell_pos(left_idx));
+            let key_bytes =
+                this_page.cell_bytes(Self::logical_node_key_pos_to_physical_pos(left_idx));
             let key_pos = left_page.cell_count();
             left_page.insert_cell(key_pos, key_bytes)?;
         }
@@ -785,7 +828,7 @@ impl<
         pager_info.drop_page(right_page_id)?;
 
         // remove key and right page id
-        let key_cell_idx = Self::node_key_pos_to_cell_pos(left_idx);
+        let key_cell_idx = Self::logical_node_key_pos_to_physical_pos(left_idx);
         this_page.remove_cell(key_cell_idx + 1); // remove page_id pointer
         this_page.remove_cell(key_cell_idx); // remove key
 
@@ -805,13 +848,13 @@ impl<
         // replace key at pos with split key
         assert!(pos > 0);
 
-        let left_child = self.descendent_node_at_pos(pos - 1, pager_info)?;
-        let right_child = self.descendent_node_at_pos(pos, pager_info)?;
+        let left_child = self.descendent_node_at_logical_pos(pos - 1, pager_info)?;
+        let right_child = self.descendent_node_at_logical_pos(pos, pager_info)?;
         let first_steal_idx = left_child.first_idx_at_or_past_halfway();
 
         // get split key
-        let new_split_key =
-            left_child.key_at_pos(Self::cell_pos_to_key_pos(first_steal_idx).unwrap())?;
+        let new_split_key = left_child
+            .key_at_pos(Self::node_physical_pos_to_logical_key_pos(first_steal_idx).unwrap())?;
 
         let left_page = left_child.page_ref.borrow();
         let mut right_page = right_child.page_ref.borrow_mut();
@@ -845,13 +888,13 @@ impl<
         // replace key at pos with split key
         assert!(pos < self.descendent_count() - 1);
 
-        let left_child = self.descendent_node_at_pos(pos, pager_info)?;
-        let right_child = self.descendent_node_at_pos(pos + 1, pager_info)?;
+        let left_child = self.descendent_node_at_logical_pos(pos, pager_info)?;
+        let right_child = self.descendent_node_at_logical_pos(pos + 1, pager_info)?;
         let first_keep_idx = right_child.first_idx_at_or_past_halfway();
 
         // get split key
-        let new_split_key =
-            right_child.key_at_pos(Self::cell_pos_to_key_pos(first_keep_idx).unwrap())?;
+        let new_split_key = right_child
+            .key_at_pos(Self::node_physical_pos_to_logical_key_pos(first_keep_idx).unwrap())?;
 
         let mut left_page = left_child.page_ref.borrow_mut();
         let right_page = right_child.page_ref.borrow();
@@ -923,10 +966,10 @@ impl<
                 } else {
                     // steal from the smaller of siblings to, in theory, move less data around
                     let left_size = self
-                        .descendent_node_at_pos(pos - 1, pager_info)?
+                        .descendent_node_at_logical_pos(pos - 1, pager_info)?
                         .page_used_space();
                     let right_size = self
-                        .descendent_node_at_pos(pos + 1, pager_info)?
+                        .descendent_node_at_logical_pos(pos + 1, pager_info)?
                         .page_used_space();
                     if left_size < right_size {
                         self.child_steal_from_left_sibling(pos, pager_info)?;
@@ -1102,7 +1145,7 @@ impl<
             // intentionally create an empty range here because leaves have no descendents
             1..=0
         };
-        range.map(|i| self.descendent_node_at_pos(i, pager_info).unwrap())
+        range.map(|i| self.descendent_node_at_logical_pos(i, pager_info).unwrap())
     }
 
     fn descendent_page_ids(&self) -> Vec<PageId> {
@@ -1120,7 +1163,9 @@ impl<
             0
         } else {
             let page = self.page_ref.borrow();
-            page.cell_count() - self.key_count()
+            let count = page.cell_count() - self.key_count();
+            assert_eq!(count - 1, self.key_count());
+            count
         }
     }
 }
@@ -1142,7 +1187,7 @@ impl Node<TestPageBuffer, u32, u32> {
             for (i, key) in this_node_line.keys.iter().enumerate() {
                 let bytes = to_bytes(&(key, key)).unwrap();
                 // +2 to account for sibling pointers
-                page.insert_cell(Self::leaf_key_pos_to_cell_pos(i as u16), &bytes)
+                page.insert_cell(Self::logical_leaf_key_pos_to_physical_pos(i as u16), &bytes)
                     .unwrap();
             }
             drop(page);
@@ -1173,16 +1218,22 @@ impl Node<TestPageBuffer, u32, u32> {
                 drop(child_node);
 
                 let page_id_bytes = to_bytes(&page_id).unwrap();
-                page.insert_cell(Self::id_pos_to_cell_pos(idx as u16), &page_id_bytes)
-                    .unwrap();
+                page.insert_cell(
+                    Self::logical_id_pos_to_physical_pos(idx as u16),
+                    &page_id_bytes,
+                )
+                .unwrap();
 
                 // Because we know that there is always 1 more child line that there is keys,
                 // this will only be None on the last child line
                 if idx < this_node_line.keys.len() {
                     let key = &this_node_line.keys[idx];
                     let key_bytes = to_bytes(key).unwrap();
-                    page.insert_cell(Self::node_key_pos_to_cell_pos(idx as u16), &key_bytes)
-                        .unwrap();
+                    page.insert_cell(
+                        Self::logical_node_key_pos_to_physical_pos(idx as u16),
+                        &key_bytes,
+                    )
+                    .unwrap();
                 }
             }
             siblings.push(0);
@@ -1302,7 +1353,9 @@ fn all_subnode_keys_ordered_relative_to_node_keys(
     for (idx, k) in node.keys().iter().enumerate() {
         let max_key = *k;
         if !all_keys_in_range(
-            &node.descendent_node_at_pos(idx as u16, pager_info).unwrap(),
+            &node
+                .descendent_node_at_logical_pos(idx as u16, pager_info)
+                .unwrap(),
             min_key,
             max_key,
         ) {
@@ -1312,7 +1365,7 @@ fn all_subnode_keys_ordered_relative_to_node_keys(
     }
     all_keys_in_range(
         &node
-            .descendent_node_at_pos(node.key_count(), pager_info)
+            .descendent_node_at_logical_pos(node.key_count(), pager_info)
             .unwrap(),
         min_key,
         u32::MAX,
