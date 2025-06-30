@@ -31,6 +31,12 @@ use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 ///    The sequence always starts and end with PageIds. The Keys split the search space that the
 ///    PageIds represent.
 
+/*
+ * TODO:
+ * - I still have lots of operations that mix logical and physical position. I need to make it so
+ * that they all operate only in one domain or the other
+ */
+
 #[derive(Debug)]
 pub enum Error {
     Page(PageError),
@@ -141,6 +147,32 @@ impl<
         let mut pager_info = self.pager_info();
         self.root.get(key, &mut pager_info)
     }
+
+    pub fn remove(&mut self, key: &K) -> Result<Option<V>> {
+        let mut pager_info = self.pager_info();
+        let res = self.root.remove(key, &mut pager_info)?;
+
+        if self.root.key_count() == 0 {
+            // "replace" root with child by moving all data on child to root and dropping child
+            let mut root_page = self.root.page_ref.borrow_mut();
+            assert_eq!(root_page.cell_count(), 1);
+            let child = self.root.descendent_node_at_pos(0, &mut pager_info)?;
+            let child_page = child.page_ref.borrow();
+
+            root_page.remove_cell(0); // remove the one cell that should be here
+            for (i, bytes) in child_page.cell_bytes_iter().enumerate() {
+                root_page.insert_cell(i as u16, bytes)?;
+            }
+
+            let child_page_id = child_page.id();
+            drop(root_page);
+            drop(child_page);
+            drop(child);
+            pager_info.drop_page(child_page_id)?;
+        }
+
+        Ok(res)
+    }
 }
 
 struct PagerInfo<PB: PageBuffer, Fd: AsRawFd + Copy> {
@@ -193,6 +225,12 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
         let dummy_id: PageId = 0;
         let siblings_space_used = (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2;
         PB::buffer_size() - siblings_space_used
+    }
+
+    fn drop_page(&mut self, page_id: PageId) -> Result<()> {
+        let mut pager = self.pager_ref.borrow_mut();
+        pager.delete_page(self.backing_fd, page_id)?;
+        Ok(())
     }
 }
 
@@ -292,6 +330,11 @@ impl<
     fn page_free_space(&self) -> u16 {
         let page = self.page_ref.borrow();
         page.total_free_space()
+    }
+
+    fn page_used_space(&self) -> u16 {
+        let page = self.page_ref.borrow();
+        PB::buffer_size() - page.total_free_space()
     }
 
     fn key_from_leaf(&self, pos: u16) -> Result<K> {
@@ -419,36 +462,52 @@ impl<
         }
     }
 
-    fn split_node<Fd: AsRawFd + Copy>(
-        &mut self,
-        pager_info: &mut PagerInfo<PB, Fd>,
-    ) -> Result<(K, Node<PB, K, V>)> {
-        let half = pager_info.buffer_size() / 2;
-        assert!(self.page_free_space() < half);
+    /// Returns the _cell_ index of the first cell at or past the halfway point. In node's this
+    /// will always be the first key at or past the halfway point
+    fn first_idx_at_or_past_halfway(&self) -> u16 {
+        let half = PB::buffer_size() / 2;
         let mut used_space = 0;
         let mut idx = 0;
         let page = self.page_ref.borrow();
 
-        // Find the index of the first "position" at or past the halfway point
-        while used_space <= half {
-            let id_ptr = page.get_cell_pointer(Self::id_pos_to_cell_pos(idx));
-            let key_ptr = page.get_cell_pointer(Self::node_key_pos_to_cell_pos(idx));
-            used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
-            idx += 1;
+        if self.is_node() {
+            // Find the index of the first "position" at or past the halfway point
+            while used_space <= half {
+                let id_ptr = page.get_cell_pointer(Self::id_pos_to_cell_pos(idx));
+                let key_ptr = page.get_cell_pointer(Self::node_key_pos_to_cell_pos(idx));
+                used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
+                idx += 1;
+            }
+            Self::node_key_pos_to_cell_pos(idx)
+        } else {
+            while used_space < half {
+                let ptr = page.get_cell_pointer(Self::leaf_key_pos_to_cell_pos(idx));
+                used_space += ptr.size + CELL_POINTER_SIZE;
+                idx += 1;
+            }
+            Self::leaf_key_pos_to_cell_pos(idx)
         }
-        idx -= 1; // undo the last increment
+    }
+
+    fn split_node<Fd: AsRawFd + Copy>(
+        &mut self,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<(K, Node<PB, K, V>)> {
+        assert!(self.page_free_space() < pager_info.buffer_size() / 2);
+        let split_key_pos = self.first_idx_at_or_past_halfway();
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
-        let split_key = self.key_from_inner_node(idx)?;
-        let split_key_pos = Self::node_key_pos_to_cell_pos(idx);
+        let split_key =
+            self.key_from_inner_node(Self::cell_pos_to_key_pos(split_key_pos).unwrap())?;
 
         // get new page
         let new_node = Self::init_node(pager_info)?;
         let mut new_page = new_node.page_ref.borrow_mut();
 
         // copy cells to new page, starting with the cell after the split key
-        let cells_skipped = (Self::node_key_pos_to_cell_pos(idx) + 1).into();
+        let page = self.page_ref.borrow();
+        let cells_skipped = (split_key_pos + 1).into();
         for (i, bytes) in page.cell_bytes_iter().skip(cells_skipped).enumerate() {
             new_page.insert_cell(i as u16, bytes)?;
         }
@@ -468,25 +527,13 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let half = pager_info.leaf_effective_buffer_size() / 2;
-        let mut used_space = 0;
-        let mut idx = 2; // start at 2 to skip the sibling pointers
-        let page = self.page_ref.borrow();
-
-        // Find the index of the first cell that begins past the halfway point
-        while used_space < half {
-            let ptr = page.get_cell_pointer(idx);
-            used_space += ptr.size + CELL_POINTER_SIZE;
-            idx += 1;
-        }
+        let idx = self.first_idx_at_or_past_halfway();
         // keys point left, and cell number idx is going to be the first cell in the new page,
         // so the split key should be one to the left. (minus another 2 to account for our sibling
         // pointer offset
         assert!(idx > 2);
         let split_key = self.key_from_leaf(idx - 3)?;
         println!("split key: {split_key:?}");
-
-        drop(page);
 
         // get new page
         let mut new_node = Self::init_leaf(pager_info)?;
@@ -669,6 +716,225 @@ impl<
             assert!(self.is_node());
             let (_, child_node) = self.get_descendent_by_key(key, pager_info)?;
             child_node.get(key, pager_info)
+        }
+    }
+
+    fn can_fit_via_merge<Fd: AsRawFd + Copy>(
+        &self,
+        left_idx: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<bool> {
+        assert!(left_idx < self.descendent_count() - 1);
+        let left_child = self.descendent_node_at_pos(left_idx, pager_info)?;
+        let right_child = self.descendent_node_at_pos(left_idx + 1, pager_info)?;
+
+        let fits = if left_child.is_node() {
+            let merge_key = self.key_at_pos(left_idx)?;
+            let key_size = serialized_size(&merge_key) as u16 + CELL_POINTER_SIZE;
+            left_child.page_free_space() > right_child.page_used_space() + key_size
+        } else {
+            left_child.page_free_space() >= right_child.page_used_space()
+        };
+
+        Ok(fits)
+    }
+
+    fn merge_children<Fd: AsRawFd + Copy>(
+        &mut self,
+        left_idx: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        assert!(left_idx < self.descendent_count() - 1);
+        assert!(self.can_fit_via_merge(left_idx, pager_info)?);
+
+        let mut left_child = self.descendent_node_at_pos(left_idx, pager_info)?;
+        let mut left_page = left_child.page_ref.borrow_mut();
+        let right_child = self.descendent_node_at_pos(left_idx + 1, pager_info)?;
+        let right_page = right_child.page_ref.borrow_mut();
+        let mut this_page = self.page_ref.borrow_mut();
+
+        // add split key if this is a node
+        if left_child.is_node() {
+            let key_bytes = this_page.cell_bytes(Self::node_key_pos_to_cell_pos(left_idx));
+            let key_pos = left_page.cell_count();
+            left_page.insert_cell(key_pos, key_bytes)?;
+        }
+
+        // for leaves we need to skip the sibling pointers
+        let skip_amount = if left_child.is_leaf() { 2 } else { 0 };
+
+        // copy contents of right page to left
+        let start = left_page.cell_count();
+        for (i, bytes) in right_page.cell_bytes_iter().skip(skip_amount).enumerate() {
+            left_page.insert_cell(start + i as u16, bytes)?
+        }
+
+        drop(left_page);
+        if left_child.is_leaf() {
+            // update right sibling pointer
+            left_child.leaf_replace_right_sibling(&right_child.leaf_right_sibling()?)?;
+        }
+
+        // remove right page
+        let right_page_id = right_page.id();
+        // drop all references to right page so that the pager can safely mark it for deletion
+        drop(right_page);
+        drop(right_child);
+        pager_info.drop_page(right_page_id)?;
+
+        // remove key and right page id
+        let key_cell_idx = Self::node_key_pos_to_cell_pos(left_idx);
+        this_page.remove_cell(key_cell_idx + 1); // remove page_id pointer
+        this_page.remove_cell(key_cell_idx); // remove key
+
+        Ok(())
+    }
+
+    // TODO: far into the future, figure out how to handle cases where due to large cells, stealing
+    // from a sibling doesn't bring the node being filled to the minimum size
+    fn child_steal_from_left_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        // find "halfway marker" on left
+        // snag "split key"
+        // move remaining cells into right (while removing from left)
+        // replace key at pos with split key
+        assert!(pos > 0);
+
+        let left_child = self.descendent_node_at_pos(pos - 1, pager_info)?;
+        let right_child = self.descendent_node_at_pos(pos, pager_info)?;
+        let first_steal_idx = left_child.first_idx_at_or_past_halfway();
+
+        // get split key
+        let new_split_key =
+            left_child.key_at_pos(Self::cell_pos_to_key_pos(first_steal_idx).unwrap())?;
+
+        let left_page = left_child.page_ref.borrow();
+        let mut right_page = right_child.page_ref.borrow_mut();
+        for (i, bytes) in left_page
+            .cell_bytes_iter()
+            .skip(first_steal_idx as usize)
+            .enumerate()
+        {
+            right_page.insert_cell(i as u16, bytes)?;
+        }
+
+        drop(right_page);
+        drop(left_page);
+        let mut left_page = left_child.page_ref.borrow_mut();
+        for _ in first_steal_idx..left_page.cell_count() {
+            left_page.remove_cell(first_steal_idx);
+        }
+
+        self.replace_inner_node_key(pos - 1, &new_split_key)?;
+        Ok(())
+    }
+
+    fn child_steal_from_right_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        // find "halfway marker" on left
+        // snag "split key"
+        // move remaining cells into right (while removing from left)
+        // replace key at pos with split key
+        assert!(pos < self.descendent_count() - 1);
+
+        let left_child = self.descendent_node_at_pos(pos, pager_info)?;
+        let right_child = self.descendent_node_at_pos(pos + 1, pager_info)?;
+        let first_keep_idx = right_child.first_idx_at_or_past_halfway();
+
+        // get split key
+        let new_split_key =
+            right_child.key_at_pos(Self::cell_pos_to_key_pos(first_keep_idx).unwrap())?;
+
+        let mut left_page = left_child.page_ref.borrow_mut();
+        let right_page = right_child.page_ref.borrow();
+
+        // copy cells to left
+        let (skip_num, take_num) = if self.is_leaf() {
+            (2, first_keep_idx - 2)
+        } else {
+            (0, first_keep_idx)
+        };
+        let start = left_page.cell_count();
+        for (i, bytes) in right_page
+            .cell_bytes_iter()
+            .skip(skip_num)
+            .take(take_num as usize)
+            .enumerate()
+        {
+            left_page.insert_cell(start + i as u16, bytes)?;
+        }
+
+        drop(right_page);
+        drop(left_page);
+
+        // remove the from right
+        let mut right_page = right_child.page_ref.borrow_mut();
+        for _ in 2..first_keep_idx {
+            // offset by two to account for sibling pointers
+            right_page.remove_cell(2);
+        }
+
+        self.replace_inner_node_key(pos, &new_split_key)?;
+        Ok(())
+    }
+
+    fn remove<Fd: AsRawFd + Copy>(
+        &mut self,
+        key: &K,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<Option<V>> {
+        if self.is_leaf() {
+            if let Ok(pos) = self.binary_search_keys(key) {
+                let val = self.value_from_leaf(pos)?;
+                let mut page = self.page_ref.borrow_mut();
+                page.remove_cell(pos);
+                Ok(Some(val))
+            } else {
+                Ok(None)
+            }
+        } else {
+            assert!(self.is_node());
+            let (pos, mut child) = self.get_descendent_by_key(key, pager_info)?;
+            let res = child.remove(key, pager_info)?;
+
+            if child.page_used_space() < PB::buffer_size() / 3 {
+                if pos > 0 && self.can_fit_via_merge(pos - 1, pager_info)? {
+                    // merge to left
+                    self.merge_children(pos - 1, pager_info)?;
+                } else if pos < self.descendent_count() - 1
+                    && self.can_fit_via_merge(pos, pager_info)?
+                {
+                    // merge right sibling into this one
+                    self.merge_children(pos, pager_info)?;
+                } else if pos == 0 {
+                    // left edge case
+                    self.child_steal_from_right_sibling(pos, pager_info)?;
+                } else if pos == self.descendent_count() - 1 {
+                    // right edge case
+                    self.child_steal_from_left_sibling(pos, pager_info)?;
+                } else {
+                    // steal from the smaller of siblings to, in theory, move less data around
+                    let left_size = self
+                        .descendent_node_at_pos(pos - 1, pager_info)?
+                        .page_used_space();
+                    let right_size = self
+                        .descendent_node_at_pos(pos + 1, pager_info)?
+                        .page_used_space();
+                    if left_size < right_size {
+                        self.child_steal_from_left_sibling(pos, pager_info)?;
+                    } else {
+                        self.child_steal_from_right_sibling(pos, pager_info)?;
+                    }
+                }
+            }
+
+            Ok(res)
         }
     }
 }
