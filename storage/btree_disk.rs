@@ -483,12 +483,12 @@ impl<
             idx - 1
         } else {
             used_space += Self::leaf_siblings_space_used();
-            while used_space < size {
+            while used_space <= size {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 used_space += ptr.size + CELL_POINTER_SIZE;
                 idx += 1;
             }
-            idx
+            idx - 1
         }
     }
 
@@ -1689,9 +1689,9 @@ mod tests {
     fn leaf_root_split() {
         let filename = "leaf_root_split.test";
         let expected_tree = "
-            0: [4] (2)
-            0->0: L[1, 2, 3, 4]
-            0->1: L[5, 6, 7, 8] 
+            0: [3] (2)
+            0->0: L[1, 2, 3]
+            0->1: L[4, 5, 6, 7, 8] 
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -1725,14 +1725,14 @@ mod tests {
         let expected_tree = "
             0: [9] (2)
             0->0: [3, 6] (3)
-            0->1: [12, 15, 19] (4)
+            0->1: [12, 15, 18] (4)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9]
             0->1->0: L[10, 11, 12] 
             0->1->1: L[13, 14, 15] 
-            0->1->2: L[16, 17, 18, 19] 
-            0->1->3: L[20, 21, 22, 23]
+            0->1->2: L[16, 17, 18] 
+            0->1->3: L[19, 20, 21, 22, 23]
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -1757,10 +1757,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [3, 7] (3)
+            0: [3, 6] (3)
             0->0: L[1, 2, 3] 
-            0->1: L[4, 5, 6, 7] 
-            0->2: L[8, 9, 10, 11] 
+            0->1: L[4, 5, 6] 
+            0->2: L[7, 8, 9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -1783,10 +1783,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [3, 8] (3)
+            0: [3, 7] (3)
             0->0: L[1, 2, 3] 
-            0->1: L[4, 5, 6, 7, 8] 
-            0->2: L[9, 10, 11] 
+            0->1: L[4, 5, 6, 7] 
+            0->2: L[8, 9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -1821,15 +1821,15 @@ mod tests {
         let output_tree = "
             0: [12, 26] (3)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 20, 23] (4)
+            0->1: [15, 18, 23] (4)
             0->2: [29, 32] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9] 
             0->0->3: L[10, 11, 12] 
             0->1->0: L[13, 14, 15] 
-            0->1->1: L[16, 17, 18, 19, 20] 
-            0->1->2: L[21, 22, 23] 
+            0->1->1: L[16, 17, 18] 
+            0->1->2: L[19, 20, 21, 22, 23] 
             0->1->3: L[24, 25, 26] 
             0->2->0: L[17, 28, 29] 
             0->2->1: L[30, 31, 32] 
@@ -1871,7 +1871,7 @@ mod tests {
             0: [12, 21] (3)
             0->0: [3, 6, 9] (4)
             0->1: [15, 18] (3)
-            0->2: [24, 28, 32] (4)
+            0->2: [24, 27, 32] (4)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9] 
@@ -1880,8 +1880,8 @@ mod tests {
             0->1->1: L[16, 17, 18] 
             0->1->2: L[19, 20, 21] 
             0->2->0: L[22, 23, 24] 
-            0->2->1: L[25, 26, 27, 28] 
-            0->2->2: L[29, 30, 31, 32] 
+            0->2->1: L[25, 26, 27] 
+            0->2->2: L[28, 29, 30, 31, 32] 
             0->2->3: L[33, 34, 35] 
         ";
         let output_tree = trim_lines(output_tree);
@@ -2107,9 +2107,9 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [4, 8] (3)
-            0->0: L[1, 2, 3, 4] 
-            0->1: L[5, 6, 7] 
+            0: [3, 8] (3)
+            0->0: L[1, 2, 3] 
+            0->1: L[4, 5, 6, 7] 
             0->2: L[9, 10, 11, 12, 13, 14, 15] 
         ";
         let output_tree = trim_lines(output_tree);
@@ -2139,6 +2139,36 @@ mod tests {
             0: [4] (2)
             0->0: L[1, 2, 3, 4] 
             0->1: L[5, 6, 7, 8] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&9).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(9));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_right_leaf() {
+        let filename = "steal_from_right_leaf.test";
+        let input_tree = "
+            0: [7, 9] (3)
+            0->0: L[1, 2, 3, 4, 5, 6, 7] 
+            0->1: L[8, 9] 
+            0->2: L[10, 11, 12, 13, 14, 15] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [7, 12] (3)
+            0->0: L[1, 2, 3, 4, 5, 6, 7] 
+            0->1: L[8, 10, 11, 12] 
+            0->2: L[13, 14, 15] 
         ";
         let output_tree = trim_lines(output_tree);
 
