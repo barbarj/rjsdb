@@ -466,15 +466,14 @@ impl<
 
     /// Returns the logical position of the first cell at or past the halfway point. In node's this
     /// will always be the first key at or past the halfway point
-    fn first_logical_pos_at_or_past_halfway(&self) -> u16 {
-        let half = PB::buffer_size() / 2;
+    fn first_logical_pos_at_or_past_size(&self, size: u16) -> u16 {
         let mut used_space = 0;
         let mut idx = 0;
         let page = self.page_ref.borrow();
 
         if self.is_node() {
             // Find the index of the first "position" at or past the halfway point
-            while used_space <= half {
+            while used_space <= size {
                 let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
                 let key_ptr =
                     page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
@@ -483,12 +482,13 @@ impl<
             }
             idx - 1
         } else {
-            while used_space < half {
+            used_space += Self::leaf_siblings_space_used();
+            while used_space < size {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 used_space += ptr.size + CELL_POINTER_SIZE;
                 idx += 1;
             }
-            idx - 1
+            idx
         }
     }
 
@@ -550,7 +550,8 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
         assert!(self.page_free_space() < pager_info.buffer_size() / 2);
-        let split_key_logical_pos = self.first_logical_pos_at_or_past_halfway();
+        let split_key_logical_pos =
+            self.first_logical_pos_at_or_past_size(self.page_used_space() / 2);
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
@@ -572,11 +573,21 @@ impl<
         Ok((split_key, new_node))
     }
 
+    fn leaf_siblings_space_used() -> u16 {
+        let dummy_id: PageId = 0;
+        (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2
+    }
+
+    fn leaf_split_point(&self) -> u16 {
+        assert!(self.is_leaf());
+        (self.page_used_space() + Self::leaf_siblings_space_used()) / 2
+    }
+
     fn split_leaf<Fd: AsRawFd + Copy>(
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let logical_idx = self.first_logical_pos_at_or_past_halfway();
+        let logical_idx = self.first_logical_pos_at_or_past_size(self.leaf_split_point());
         assert!(logical_idx > 0);
         let split_key = self.key_from_leaf(logical_idx - 1)?;
 
@@ -841,6 +852,10 @@ impl<
         Ok(())
     }
 
+    fn steal_split_size(a: &Self, b: &Self) -> u16 {
+        (a.page_used_space() + b.page_used_space()) / 2
+    }
+
     // TODO: far into the future, figure out how to handle cases where due to large cells, stealing
     // from a sibling doesn't bring the node being filled to the minimum size
     fn child_steal_from_left_sibling<Fd: AsRawFd + Copy>(
@@ -854,10 +869,11 @@ impl<
             self.descendent_node_at_logical_pos(right_child_logical_pos - 1, pager_info)?;
         let mut right_child =
             self.descendent_node_at_logical_pos(right_child_logical_pos, pager_info)?;
-        let first_steal_pos = left_child.first_logical_pos_at_or_past_halfway();
+        let first_steal_pos = left_child
+            .first_logical_pos_at_or_past_size(Self::steal_split_size(&left_child, &right_child));
 
         // get split key
-        let new_split_key = left_child.key_at_pos(first_steal_pos)?;
+        let new_split_key = left_child.key_at_pos(first_steal_pos - 1)?;
 
         // move cells
         let from_range = if left_child.is_node() {
@@ -883,10 +899,11 @@ impl<
             self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
         let mut right_child =
             self.descendent_node_at_logical_pos(left_child_logical_pos + 1, pager_info)?;
-        let first_keep_pos = right_child.first_logical_pos_at_or_past_halfway();
+        let first_keep_pos = right_child
+            .first_logical_pos_at_or_past_size(Self::steal_split_size(&left_child, &right_child));
 
         // get split key
-        let new_split_key = right_child.key_at_pos(first_keep_pos)?;
+        let new_split_key = right_child.key_at_pos(first_keep_pos - 1)?;
 
         let logical_start = left_child.key_count();
         Self::move_cells(
@@ -960,6 +977,7 @@ impl<
 
 #[cfg(test)]
 /// This size allows for nodes with 5 keys and leaves with 7
+/// - The min size for leaves is 2, and nodes is
 const TEST_BUFFER_SIZE: u16 = 112;
 #[cfg(test)]
 struct TestPageBuffer {
@@ -1473,6 +1491,8 @@ mod tests {
         // These constants may change in the future. They're just tested here to prove that my
         // assumptions about tree construction during the tests are correct.
 
+        let minimum_treshold: usize = TEST_BUFFER_SIZE as usize / 3;
+
         let leaf_key_size = serialized_size(&(42u32, 52u32));
         assert_eq!(leaf_key_size, 8);
         let node_key_size = serialized_size(&42u32);
@@ -1485,18 +1505,33 @@ mod tests {
         assert_eq!(sibling_pointers_size, 24);
 
         let leaf_entry_size = CELL_POINTER_SIZE as usize + leaf_key_size;
-        let buffer_minus_siblings = TEST_BUFFER_SIZE - sibling_pointers_size;
         assert_eq!(leaf_entry_size, 12);
-        assert_eq!(buffer_minus_siblings as usize / leaf_entry_size, 7);
+
+        let space_for_n_leaf_keys =
+            |n: usize| sibling_pointers_size as usize + (n * leaf_entry_size);
+        // fits 7 leaf keys
+        assert!(TEST_BUFFER_SIZE as usize >= space_for_n_leaf_keys(7));
+        assert!((TEST_BUFFER_SIZE as usize) < space_for_n_leaf_keys(8));
+
+        // size below minimum threshold is 2
+        assert!(minimum_treshold > space_for_n_leaf_keys(1));
+        assert!(minimum_treshold <= space_for_n_leaf_keys(2));
 
         let node_key_entry_size = CELL_POINTER_SIZE as usize + node_key_size;
         let node_page_id_entry_size = CELL_POINTER_SIZE as usize + node_page_id_size;
         assert_eq!(node_key_entry_size, 8);
         assert_eq!(node_page_id_entry_size, 12);
 
-        let enough_space_for_5_node_keys =
-            (node_key_entry_size * 5) + (node_page_id_entry_size * 6);
-        assert_eq!(TEST_BUFFER_SIZE as usize, enough_space_for_5_node_keys);
+        let space_for_n_node_keys =
+            |n: usize| (node_key_entry_size * n) + (node_page_id_entry_size * (n + 1));
+
+        // fits 5 node keys
+        assert!(TEST_BUFFER_SIZE as usize >= space_for_n_node_keys(5));
+        assert!((TEST_BUFFER_SIZE as usize) < space_for_n_node_keys(6));
+
+        // size below minimum threshold is 1
+        assert!(minimum_treshold > space_for_n_node_keys(1));
+        assert!(minimum_treshold <= space_for_n_node_keys(2));
     }
 
     #[test]
@@ -1999,6 +2034,119 @@ mod tests {
 
         assert_eq!(&t.to_description(), &output_tree);
         assert_eq!(val, Some(8));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn merge_right_node() {
+        // A merge-right only happens if the left node can not fit the node
+        let filename = "merge_right_node.test";
+        let input_tree = "
+            0: [11, 17] (3)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->2: [19, 21, 23] (4)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[8, 9] 
+            0->0->5: L[10, 11] 
+            0->1->0: L[12, 13] 
+            0->1->1: L[14, 15] 
+            0->1->2: L[16, 17] 
+            0->2->0: L[18, 19] 
+            0->2->1: L[20, 21] 
+            0->2->2: L[22, 23] 
+            0->2->3: L[24, 25] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [11] (2)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [15, 17, 19, 21, 23] (6)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[8, 9] 
+            0->0->5: L[10, 11] 
+            0->1->0: L[12, 14, 15] 
+            0->1->1: L[16, 17] 
+            0->1->2: L[18, 19] 
+            0->1->3: L[20, 21] 
+            0->1->4: L[22, 23] 
+            0->1->5: L[24, 25] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&13).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(13));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_left_leaf() {
+        let filename = "steal_from_left_leaf.test";
+        let input_tree = "
+            0: [6, 8] (3)
+            0->0: L[1, 2, 3, 4, 5, 6] 
+            0->1: L[7, 8] 
+            0->2: L[9, 10, 11, 12, 13, 14, 15] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4, 8] (3)
+            0->0: L[1, 2, 3, 4] 
+            0->1: L[5, 6, 7] 
+            0->2: L[9, 10, 11, 12, 13, 14, 15] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&8).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(8));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_left_leaf_edge() {
+        let filename = "steal_from_left_leaf_edge.test";
+        let input_tree = "
+            0: [7] (2)
+            0->0: L[1, 2, 3, 4, 5, 6, 7] 
+            0->1: L[8, 9] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [4] (2)
+            0->0: L[1, 2, 3, 4] 
+            0->1: L[5, 6, 7, 8] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&9).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(9));
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
