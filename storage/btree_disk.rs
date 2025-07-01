@@ -359,7 +359,7 @@ impl<
     fn leaf_left_sibling(&self) -> Result<PageId> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        assert!(page.cell_count() > 2);
+        assert!(page.cell_count() >= 2);
         Ok(from_reader(page.cell_bytes(0))?)
     }
 
@@ -388,7 +388,7 @@ impl<
     fn leaf_right_sibling(&self) -> Result<PageId> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
-        assert!(page.cell_count() > 2);
+        assert!(page.cell_count() >= 2);
         Ok(from_reader(page.cell_bytes(1))?)
     }
 
@@ -513,11 +513,6 @@ impl<
         } else {
             Self::logical_id_pos_to_physical_pos(to_logical_start)
         };
-
-        println!("logical: {from_logical_range:?}");
-        println!("physical: {physical_range:?}");
-
-        println!("physical start: {physical_start}");
 
         // copy cells to to_page
         let skipped = (*physical_range.start()).into();
@@ -777,7 +772,7 @@ impl<
         let fits = if left_child.is_node() {
             let merge_key = self.key_at_pos(left_child_pos)?;
             let key_size = serialized_size(&merge_key) as u16 + CELL_POINTER_SIZE;
-            left_child.page_free_space() > right_child.page_used_space() + key_size
+            left_child.page_free_space() >= right_child.page_used_space() + key_size
         } else {
             left_child.page_free_space() >= right_child.page_used_space()
         };
@@ -924,7 +919,10 @@ impl<
             let (logical_pos, mut child) = self.get_descendent_by_key(key, pager_info)?;
             let res = child.remove(key, pager_info)?;
 
-            if child.page_used_space() < PB::buffer_size() / 3 {
+            let space_used = child.page_used_space();
+            drop(child);
+
+            if space_used < PB::buffer_size() / 3 {
                 if logical_pos > 0 && self.can_fit_via_merge(logical_pos - 1, pager_info)? {
                     // merge to left
                     self.merge_children(logical_pos - 1, pager_info)?;
@@ -1083,7 +1081,7 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
                 },
             ));
         }
-        description
+        description.trim().to_string()
     }
 
     fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, i32>, root_page_id: PageId) {
@@ -1138,6 +1136,7 @@ impl<
         if self.is_leaf() {
             0
         } else {
+            assert!(self.is_node());
             let page = self.page_ref.borrow();
             let count = page.cell_count() - self.key_count();
             assert_eq!(count - 1, self.key_count());
@@ -1437,7 +1436,7 @@ mod tests {
     use super::{BTree, TestPageBuffer};
 
     fn trim_lines(s: &str) -> String {
-        s.trim().lines().map(|l| l.trim()).join("\n") + "\n"
+        s.trim().lines().map(|l| l.trim()).join("\n")
     }
 
     fn open_file(filename: &str) -> File {
@@ -1856,6 +1855,150 @@ mod tests {
         t.insert(31, 31).unwrap();
 
         assert_eq!(&t.to_description(), &output_tree);
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn leaf_removal() {
+        let filename = "leaf_removal.test";
+        let input_tree = "0: L[1, 2, 3, 4, 5]";
+        let output_tree = "0: L[1, 2, 4, 5]";
+
+        let mut t = init_tree_from_description_in_file(filename, input_tree);
+        let val = t.remove(&3).unwrap();
+
+        assert_eq!(&t.to_description(), output_tree);
+        assert_eq!(val, Some(3));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn leaf_removal_noop() {
+        let filename = "leaf_removal_noop.test";
+        let input_tree = "0: L[1, 2, 3, 4, 5]";
+        let output_tree = "0: L[1, 2, 3, 4, 5]";
+
+        let mut t = init_tree_from_description_in_file(filename, input_tree);
+        let val = t.remove(&42).unwrap();
+
+        assert_eq!(&t.to_description(), output_tree);
+        assert_eq!(val, None);
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn merge_left_leaf() {
+        let filename = "merge_left_leaf.test";
+        let input_tree = "
+            0: [2, 6] (3)
+            0->0: L[0, 1, 2]
+            0->1: L[5, 6] 
+            0->2: L[7, 8, 9, 10]
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [6] (2)
+            0->0: L[0, 1, 2, 5] 
+            0->1: L[7, 8, 9, 10] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&6).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(6));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn merge_right_leaf() {
+        let filename = "merge_right_leaf.test";
+        let input_tree = "
+            0: [5, 7] (3)
+            0->0: L[0, 1, 2, 3, 4, 5] 
+            0->1: L[6, 7] 
+            0->2: L[8, 9, 10]
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [5] (2)
+            0->0: L[0, 1, 2, 3, 4, 5] 
+            0->1: L[6, 8, 9, 10] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&7).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(7));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn merge_left_node() {
+        let filename = "merge_left_node.test";
+        let input_tree = "
+            0: [7, 13] (3)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 11] (3)
+            0->2: [15, 17, 19, 21] (5)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->1->0: L[8, 9] 
+            0->1->1: L[10, 11] 
+            0->1->2: L[12, 13] 
+            0->2->0: L[14, 15] 
+            0->2->1: L[16, 17] 
+            0->2->2: L[18, 19] 
+            0->2->3: L[20, 21] 
+            0->2->4: L[22, 23] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [13] (2)
+            0->0: [1, 3, 5, 7, 11] (6)
+            0->1: [15, 17, 19, 21] (5)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[9, 10, 11] 
+            0->0->5: L[12, 13] 
+            0->1->0: L[14, 15] 
+            0->1->1: L[16, 17] 
+            0->1->2: L[18, 19] 
+            0->1->3: L[20, 21] 
+            0->1->4: L[22, 23] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&8).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(8));
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
