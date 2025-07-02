@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::Error as IoError;
-use std::ops::Add;
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 use std::{collections::HashMap, os::fd::AsRawFd};
@@ -17,7 +16,6 @@ pub type PageBufferOffset = page::PageBufferOffset;
 
 pub use page::{Page, PageBuffer, PageError, PageKind, CELL_POINTER_SIZE, PAGE_SIZE};
 
-use proptest::num::u64;
 use serialize::Error as SerdeError;
 
 /*

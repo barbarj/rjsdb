@@ -472,7 +472,11 @@ impl<
         }
     }
 
-    fn first_logical_pos_at_or_past_size_rev(&self, size: u16, initial_space_used: u16) -> u16 {
+    fn first_logical_pos_from_right_within_half_increment(
+        &self,
+        size: u16,
+        initial_space_used: u16,
+    ) -> u16 {
         println!("size: {size}");
 
         let mut used_space = initial_space_used;
@@ -495,9 +499,7 @@ impl<
                 println!("used {used_space} for {idx}, increment: {increment}");
                 idx -= 1;
             }
-            idx + 1
         } else {
-            //used_space += Self::leaf_siblings_space_used();
             while !Self::within_half_increment(size, increment, used_space) {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 increment = ptr.size + CELL_POINTER_SIZE;
@@ -505,35 +507,45 @@ impl<
                 println!("used {used_space} for {idx}");
                 idx -= 1;
             }
-            idx + 1
         }
+        idx + 1
     }
 
-    fn first_logical_pos_at_or_past_size(&self, size: u16) -> u16 {
+    fn first_logical_pos_past_size(&self, size: u16) -> u16 {
         println!("size: {size}");
 
         let mut used_space = 0;
         let mut idx = 0;
+        let mut increment = 0;
         let page = self.page_ref.borrow();
 
         if self.is_node() {
             // Find the index of the first "position" at or past the halfway point
-            while used_space <= size {
+            while !Self::within_half_increment(size, increment, used_space) {
                 let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
                 let key_ptr =
                     page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
-                used_space += id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
+                increment = id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
+                used_space += increment;
                 println!("used {used_space} for {idx}");
                 idx += 1;
             }
-            idx - 1
         } else {
             used_space += Self::leaf_siblings_space_used();
-            while used_space <= size {
+            println!("used {used_space}");
+            while !Self::within_half_increment(size, increment, used_space) {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
-                used_space += ptr.size + CELL_POINTER_SIZE;
+                increment = ptr.size + CELL_POINTER_SIZE;
+                used_space += increment;
+                println!("used {used_space} for {idx}");
                 idx += 1;
             }
+        }
+        if used_space <= size {
+            println!("returning {idx}");
+            idx
+        } else {
+            println!("returning {}", idx - 1);
             idx - 1
         }
     }
@@ -604,8 +616,7 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
         assert!(self.page_free_space() < pager_info.buffer_size() / 2);
-        let split_key_logical_pos =
-            self.first_logical_pos_at_or_past_size(self.page_used_space() / 2);
+        let split_key_logical_pos = self.first_logical_pos_past_size(self.page_used_space() / 2);
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
@@ -641,9 +652,9 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let logical_idx = self.first_logical_pos_at_or_past_size(self.leaf_split_point());
-        assert!(logical_idx > 0);
-        let split_key = self.key_from_leaf(logical_idx - 1)?;
+        let first_logical_idx = self.first_logical_pos_past_size(self.leaf_split_point());
+        assert!(first_logical_idx > 0);
+        let split_key = self.key_from_leaf(first_logical_idx - 1)?;
 
         // get new page
         let mut new_node = Self::init_leaf(pager_info)?;
@@ -655,7 +666,7 @@ impl<
 
         // copy cells to new page and remove cells from old page
         let key_count = self.key_count();
-        Self::move_cells(self, &mut new_node, logical_idx..=key_count - 1, 0)?;
+        Self::move_cells(self, &mut new_node, first_logical_idx..=key_count - 1, 0)?;
 
         Ok((split_key, new_node))
     }
@@ -948,7 +959,7 @@ impl<
         } else {
             0
         };
-        let first_steal_pos = left_child.first_logical_pos_at_or_past_size_rev(
+        let first_steal_pos = left_child.first_logical_pos_from_right_within_half_increment(
             Self::amount_to_steal(&left_child, &right_child),
             initial_size,
         );
@@ -993,7 +1004,7 @@ impl<
         } else {
             Self::amount_to_steal(&right_child, &left_child)
         };
-        let first_keep_pos = right_child.first_logical_pos_at_or_past_size(keep_point);
+        let first_keep_pos = right_child.first_logical_pos_past_size(keep_point);
 
         // get split key
         let new_split_key = right_child.key_at_pos(first_keep_pos - 1)?;
@@ -2511,6 +2522,51 @@ mod tests {
 
         assert_eq!(&t.to_description(), &output_tree);
         assert_eq!(val, Some(14));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_right_node_edge() {
+        let filename = "steal_from_right_node_edge.test";
+        let input_tree = "
+            0: [19] (2)
+            0->0: [15, 17] (3)
+            0->1: [21, 23, 25, 27, 29] (6)
+            0->0->0: L[14, 15] 
+            0->0->1: L[16, 17] 
+            0->0->2: L[18, 19] 
+            0->1->0: L[20, 21] 
+            0->1->1: L[22, 23] 
+            0->1->2: L[24, 25] 
+            0->1->3: L[26, 27] 
+            0->1->4: L[28, 29] 
+            0->1->5: L[30, 31] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [23] (2)
+            0->0: [17, 19, 21] (4)
+            0->1: [25, 27, 29] (4)
+            0->0->0: L[14, 15, 17] 
+            0->0->1: L[18, 19] 
+            0->0->2: L[20, 21] 
+            0->0->3: L[22, 23] 
+            0->1->0: L[24, 25] 
+            0->1->1: L[26, 27] 
+            0->1->2: L[28, 29] 
+            0->1->3: L[30, 31] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&16).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(16));
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
