@@ -539,6 +539,12 @@ impl<
         Ok(())
     }
 
+    fn remove_leading_key(&mut self) {
+        assert!(self.is_node());
+        let mut page = self.page_ref.borrow_mut();
+        page.remove_cell(0);
+    }
+
     fn remove_trailing_key(&mut self, logical_key_pos: u16) {
         assert!(self.is_node());
         let physical_pos = Self::logical_node_key_pos_to_physical_pos(logical_key_pos);
@@ -861,10 +867,6 @@ impl<
     fn insert_interior_split_key(&mut self, logical_key_pos: u16, key: &K) -> Result<()> {
         assert!(self.is_node());
         let mut page = self.page_ref.borrow_mut();
-        assert!(
-            page.cell_count() %2 == 0,
-            "Should only be called in situations where the page is missing a key and is not yet well-formed"
-        );
         let insert_pos = Self::logical_node_key_pos_to_physical_pos(logical_key_pos);
         page.insert_cell(insert_pos, &to_bytes(key)?)?;
         Ok(())
@@ -933,7 +935,17 @@ impl<
         // get split key
         let new_split_key = right_child.key_at_pos(first_keep_pos - 1)?;
 
-        let logical_start = left_child.key_count();
+        // insert old split key
+        if left_child.is_node() {
+            let old_split_key = self.key_at_pos(left_child_logical_pos)?;
+            left_child.insert_interior_split_key(left_child.key_count(), &old_split_key)?;
+        }
+
+        let logical_start = if left_child.is_node() {
+            left_child.key_count() + 1
+        } else {
+            left_child.key_count()
+        };
         Self::move_cells(
             &mut right_child,
             &mut left_child,
@@ -942,6 +954,9 @@ impl<
         )?;
 
         self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
+        if right_child.is_node() {
+            right_child.remove_leading_key();
+        }
         Ok(())
     }
 
@@ -1105,20 +1120,18 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
     ) -> String {
         use std::collections::VecDeque;
 
-        let mut description = String::new();
+        let mut description_lines = Vec::new();
         let mut queue = VecDeque::new();
         queue.push_back((vec![0], page_id));
         while let Some((ancestry, page_id)) = queue.pop_front() {
             let node: Node<TestPageBuffer, u32, u32> = pager_info.page_node(page_id).unwrap();
-            let path_parts: Vec<_> = ancestry.iter().map(|x| x.to_string()).collect();
-            let path = path_parts.join("->");
-            if node.is_leaf() {
-                let s = format!("{path}: L{:?}\n", node.keys());
-                description.push_str(&s);
-            } else {
-                let s = format!("{path}: {:?} ({})\n", node.keys(), node.descendent_count());
-                description.push_str(&s);
-            }
+            let description_line = DescriptionLine::new(
+                ancestry.clone(),
+                node.is_leaf(),
+                node.keys(),
+                node.descendent_count().into(),
+            );
+            description_lines.push(description_line);
             queue.extend(node.descendent_page_ids().into_iter().enumerate().map(
                 |(idx, page_id)| {
                     let mut child_ancestry = ancestry.clone();
@@ -1127,7 +1140,7 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
                 },
             ));
         }
-        description.trim().to_string()
+        description_lines.into_iter().join("\n")
     }
 
     fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, i32>, root_page_id: PageId) {
@@ -1199,7 +1212,7 @@ impl Node<TestPageBuffer, u32, u32> {
         lines: &mut Peekable<I>,
         this_page_id: PageId,
         sibling_page_ids: (PageId, PageId),
-    ) -> Self {
+    ) -> std::result::Result<Self, DescriptionLineError> {
         let mut new_node = pager_info.page_node(this_page_id).unwrap();
         let mut page = new_node.page_ref.borrow_mut();
 
@@ -1219,6 +1232,11 @@ impl Node<TestPageBuffer, u32, u32> {
             let child_lines: Vec<_> = lines
                 .peeking_take_while(|l| this_node_line.is_child_line(l))
                 .collect();
+            if child_lines.len() != this_node_line.child_count {
+                return Err(DescriptionLineError::InvalidChildCount(
+                    this_node_line.to_string(),
+                ));
+            }
             assert_eq!(child_lines.len(), this_node_line.child_count);
             assert_eq!(this_node_line.keys.len() + 1, this_node_line.child_count);
             let mut children = Vec::new();
@@ -1268,11 +1286,12 @@ impl Node<TestPageBuffer, u32, u32> {
                     lines,
                     page_id,
                     (siblings[i], siblings[i + 2]),
-                );
+                )
+                .unwrap();
             }
         }
 
-        new_node
+        Ok(new_node)
     }
 }
 
@@ -1299,6 +1318,15 @@ struct DescriptionLine {
 }
 #[cfg(test)]
 impl DescriptionLine {
+    fn new(traversal_path: Vec<usize>, is_leaf: bool, keys: Vec<u32>, child_count: usize) -> Self {
+        DescriptionLine {
+            traversal_path,
+            is_leaf,
+            keys,
+            child_count,
+        }
+    }
+
     fn from_str(s: &str) -> std::result::Result<Self, DescriptionLineError> {
         let mut parts = s.split(": ");
         let traversal_path = parts
@@ -1344,6 +1372,21 @@ impl DescriptionLine {
         let tvlen = self.traversal_path.len();
         candidate.traversal_path.len() == tvlen + 1
             && candidate.traversal_path[0..tvlen] == self.traversal_path
+    }
+}
+#[cfg(test)]
+impl Display for DescriptionLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path_parts: Vec<_> = self.traversal_path.iter().map(|x| x.to_string()).collect();
+        let path = path_parts.join("->");
+        if self.is_leaf {
+            f.write_fmt(format_args!("{path}: L{:?}", self.keys))
+        } else {
+            f.write_fmt(format_args!(
+                "{path}: {:?} ({})",
+                self.keys, self.child_count
+            ))
+        }
     }
 }
 
@@ -2295,6 +2338,63 @@ mod tests {
             0->2->3: L[22, 23] 
             0->2->4: L[24, 25] 
             0->2->5: L[26, 27] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&13).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(13));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_right_node() {
+        let filename = "steal_from_right_node.test";
+        let input_tree = "
+            0: [11, 17] (3)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [13, 15] (3)
+            0->2: [19, 21, 23, 25] (5)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[8, 9] 
+            0->0->5: L[10, 11] 
+            0->1->0: L[12, 13] 
+            0->1->1: L[14, 15] 
+            0->1->2: L[16, 17] 
+            0->2->0: L[18, 19] 
+            0->2->1: L[20, 21] 
+            0->2->2: L[22, 23] 
+            0->2->3: L[24, 25] 
+            0->2->4: L[26, 27] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [11, 19] (3)
+            0->0: [1, 3, 5, 7, 9] (6)
+            0->1: [15, 17] (3)
+            0->2: [21, 23, 25] (4)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[8, 9] 
+            0->0->5: L[10, 11] 
+            0->1->0: L[12, 14, 15] 
+            0->1->1: L[16, 17] 
+            0->1->2: L[18, 19]
+            0->2->0: L[20, 21] 
+            0->2->1: L[22, 23] 
+            0->2->2: L[24, 25] 
+            0->2->3: L[26, 27] 
         ";
         let output_tree = trim_lines(output_tree);
 
