@@ -446,7 +446,7 @@ impl<
         let mut low = 0;
         let mut high = self.key_count() - 1;
         while low < high {
-            let mid = (low + high) / 2;
+            let mid = (low + high) / 2; // TODO: Rework to prevent overflow
             let cell_key = self.key_at_pos(mid).unwrap();
             match &cell_key.cmp(key) {
                 Ordering::Less => {
@@ -467,7 +467,6 @@ impl<
     /// Returns the logical position of the first cell at or past the halfway point. In node's this
     /// will always be the first key at or past the halfway point
     fn first_logical_pos_at_or_past_size(&self, size: u16) -> u16 {
-        println!("splitting/stealing at size: {size}");
         let mut used_space = 0;
         let mut idx = 0;
         let page = self.page_ref.borrow();
@@ -484,17 +483,11 @@ impl<
             idx - 1
         } else {
             used_space += Self::leaf_siblings_space_used();
-            println!("space used: {used_space}");
             while used_space <= size {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 used_space += ptr.size + CELL_POINTER_SIZE;
-                println!(
-                    "space used: {used_space} for {:?} at idx {idx}",
-                    self.key_at_pos(idx).unwrap()
-                );
                 idx += 1;
             }
-            println!("returning idx for {:?}", self.key_at_pos(idx - 1).unwrap());
             idx - 1
         }
     }
@@ -505,9 +498,6 @@ impl<
         from_logical_range: RangeInclusive<u16>,
         to_logical_start: u16,
     ) -> Result<()> {
-        let from_page = from_node.page_ref.borrow();
-        let mut to_page = to_node.page_ref.borrow_mut();
-
         let physical_range = if from_node.is_leaf() {
             Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.start())
                 ..=Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.end())
@@ -515,11 +505,14 @@ impl<
             Self::logical_id_pos_to_physical_pos(*from_logical_range.start())
                 ..=Self::logical_id_pos_to_physical_pos(*from_logical_range.end())
         };
-        let physical_start = if from_node.is_leaf() {
+        let physical_start = if to_node.is_leaf() {
             Self::logical_leaf_key_pos_to_physical_pos(to_logical_start)
         } else {
             Self::logical_id_pos_to_physical_pos(to_logical_start)
         };
+
+        let from_page = from_node.page_ref.borrow();
+        let mut to_page = to_node.page_ref.borrow_mut();
 
         // copy cells to to_page
         let skipped = (*physical_range.start()).into();
@@ -537,6 +530,8 @@ impl<
         drop(from_page);
         // remove cells from from_page
         let mut from_page = from_node.page_ref.borrow_mut();
+        // it's more efficient to remove in reverse, as doing so causes fewer-to-no cell pointers
+        // to be moved in response
         for i in physical_range.rev() {
             from_page.remove_cell(i);
         }
@@ -860,15 +855,19 @@ impl<
     }
 
     fn amount_to_steal(from: &Self, to: &Self) -> u16 {
-        println!("from - to / 2");
-        let res = (from.page_used_space() - to.page_used_space()) / 2;
-        println!(
-            "{} - {} / 2 = {}",
-            from.page_used_space(),
-            to.page_used_space(),
-            res
+        (from.page_used_space() - to.page_used_space()) / 2
+    }
+
+    fn insert_interior_split_key(&mut self, logical_key_pos: u16, key: &K) -> Result<()> {
+        assert!(self.is_node());
+        let mut page = self.page_ref.borrow_mut();
+        assert!(
+            page.cell_count() %2 == 0,
+            "Should only be called in situations where the page is missing a key and is not yet well-formed"
         );
-        res
+        let insert_pos = Self::logical_node_key_pos_to_physical_pos(logical_key_pos);
+        page.insert_cell(insert_pos, &to_bytes(key)?)?;
+        Ok(())
     }
 
     // TODO: far into the future, figure out how to handle cases where due to large cells, stealing
@@ -898,9 +897,18 @@ impl<
             first_steal_pos..=left_child.key_count() - 1
         };
 
-        Self::move_cells(&mut left_child, &mut right_child, from_range, 0)?;
+        Self::move_cells(&mut left_child, &mut right_child, from_range.clone(), 0)?;
+
+        if right_child.is_node() {
+            let old_split_key = self.key_at_pos(right_child_logical_pos - 1)?;
+            let key_insert_pos = from_range.len() - 1;
+            right_child.insert_interior_split_key(key_insert_pos as u16, &old_split_key)?;
+        }
 
         self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
+        if left_child.is_node() {
+            left_child.remove_trailing_key(first_steal_pos - 1);
+        }
         Ok(())
     }
 
@@ -915,10 +923,12 @@ impl<
             self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
         let mut right_child =
             self.descendent_node_at_logical_pos(left_child_logical_pos + 1, pager_info)?;
-        let keep_point =
-            Self::leaf_siblings_space_used() + Self::amount_to_steal(&right_child, &left_child);
+        let keep_point = if right_child.is_leaf() {
+            Self::leaf_siblings_space_used() + Self::amount_to_steal(&right_child, &left_child)
+        } else {
+            Self::amount_to_steal(&right_child, &left_child)
+        };
         let first_keep_pos = right_child.first_logical_pos_at_or_past_size(keep_point);
-        println!("first_keep pos: {first_keep_pos}");
 
         // get split key
         let new_split_key = right_child.key_at_pos(first_keep_pos - 1)?;
@@ -1053,7 +1063,7 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
             .trim()
             .split('\n')
             .map(|x| x.trim())
-            .map(DescriptionLine::from_str)
+            .map(|s| DescriptionLine::from_str(s).unwrap())
             .peekable();
 
         assert!(lines.peek().is_some());
@@ -1266,6 +1276,19 @@ impl Node<TestPageBuffer, u32, u32> {
     }
 }
 
+#[derive(Debug)]
+enum DescriptionLineError {
+    InvalidChildCount(String),
+}
+impl Display for DescriptionLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidChildCount(s) => f.write_fmt(format_args!("InvalidChildCount - '{s}'")),
+        }
+    }
+}
+impl std::error::Error for DescriptionLineError {}
+
 #[cfg(test)]
 #[derive(Debug, Clone)]
 struct DescriptionLine {
@@ -1276,7 +1299,7 @@ struct DescriptionLine {
 }
 #[cfg(test)]
 impl DescriptionLine {
-    fn from_str(s: &str) -> Self {
+    fn from_str(s: &str) -> std::result::Result<Self, DescriptionLineError> {
         let mut parts = s.split(": ");
         let traversal_path = parts
             .next()
@@ -1305,16 +1328,16 @@ impl DescriptionLine {
                 .unwrap()
         };
 
-        if !is_leaf {
-            assert_eq!(keys.len() + 1, child_count);
+        if !is_leaf && keys.len() + 1 != child_count {
+            return Err(DescriptionLineError::InvalidChildCount(s.to_string()));
         }
 
-        DescriptionLine {
+        Ok(DescriptionLine {
             traversal_path,
             is_leaf,
             keys,
             child_count,
-        }
+        })
     }
 
     fn is_child_line(&self, candidate: &DescriptionLine) -> bool {
@@ -1531,7 +1554,7 @@ mod tests {
         assert!(TEST_BUFFER_SIZE as usize >= space_for_n_leaf_keys(7));
         assert!((TEST_BUFFER_SIZE as usize) < space_for_n_leaf_keys(8));
 
-        // size below minimum threshold is 2
+        // size below minimum threshold is 1
         assert!(minimum_treshold > space_for_n_leaf_keys(1));
         assert!(minimum_treshold <= space_for_n_leaf_keys(2));
 
@@ -2223,6 +2246,63 @@ mod tests {
 
         assert_eq!(&t.to_description(), &output_tree);
         assert_eq!(val, Some(1));
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn steal_from_left_node() {
+        let filename = "steal_from_left_node.test";
+        let input_tree = "
+            0: [9, 15] (3)
+            0->0: [1, 3, 5, 7] (5)
+            0->1: [11, 13] (3)
+            0->2: [17, 19, 21, 23, 25] (6)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->0->3: L[6, 7] 
+            0->0->4: L[8, 9] 
+            0->1->0: L[10, 11] 
+            0->1->1: L[12, 13] 
+            0->1->2: L[14, 15] 
+            0->2->0: L[16, 17] 
+            0->2->1: L[18, 19] 
+            0->2->2: L[20, 21] 
+            0->2->3: L[22, 23] 
+            0->2->4: L[24, 25] 
+            0->2->5: L[26, 27] 
+        ";
+        let input_tree = trim_lines(input_tree);
+
+        let output_tree = "
+            0: [5, 15] (3)
+            0->0: [1, 3] (3)
+            0->1: [7, 9, 13] (4)
+            0->2: [17, 19, 21, 23, 25] (6)
+            0->0->0: L[0, 1] 
+            0->0->1: L[2, 3] 
+            0->0->2: L[4, 5] 
+            0->1->0: L[6, 7] 
+            0->1->1: L[8, 9] 
+            0->1->2: L[10, 11, 12] 
+            0->1->3: L[14, 15] 
+            0->2->0: L[16, 17] 
+            0->2->1: L[18, 19] 
+            0->2->2: L[20, 21] 
+            0->2->3: L[22, 23] 
+            0->2->4: L[24, 25] 
+            0->2->5: L[26, 27] 
+        ";
+        let output_tree = trim_lines(output_tree);
+
+        let mut t = init_tree_from_description_in_file(filename, &input_tree);
+        let val = t.remove(&13).unwrap();
+
+        assert_eq!(&t.to_description(), &output_tree);
+        assert_eq!(val, Some(13));
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
