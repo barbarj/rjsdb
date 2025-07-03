@@ -1570,7 +1570,11 @@ impl Display for DescriptionLine {
 }
 
 #[cfg(test)]
-fn tree_keys_fully_ordered<PB: PageBuffer>(root: &Node<PB, u32, u32>) -> bool {
+fn tree_keys_fully_ordered<PB, T>(root: &Node<PB, T, T>) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+{
     let keys = root.keys();
     let mut sorted_keys = keys.clone();
     sorted_keys.sort();
@@ -1578,10 +1582,14 @@ fn tree_keys_fully_ordered<PB: PageBuffer>(root: &Node<PB, u32, u32>) -> bool {
 }
 
 #[cfg(test)]
-fn all_node_keys_ordered_and_deduped<PB: PageBuffer>(
-    node: &Node<PB, u32, u32>,
+fn all_node_keys_ordered_and_deduped<PB, T>(
+    node: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool {
+) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug,
+{
     let mut sorted_keys = node.keys();
     sorted_keys.sort();
     sorted_keys.dedup();
@@ -1593,47 +1601,72 @@ fn all_node_keys_ordered_and_deduped<PB: PageBuffer>(
 }
 
 #[cfg(test)]
-fn all_keys_in_range<PB: PageBuffer>(node: &Node<PB, u32, u32>, min: u32, max: u32) -> bool {
-    node.keys().iter().all(|k| (min..=max).contains(k))
+fn all_keys_in_range<PB, T>(
+    node: &Node<PB, T, T>,
+    min_exclusive: Option<&T>,
+    max_inclusive: Option<&T>,
+) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug,
+{
+    match (min_exclusive, max_inclusive) {
+        (Some(min), Some(max)) => node.keys().iter().all(|k| k > min && k <= max),
+        (None, Some(max)) => node.keys().iter().all(|k| k <= max),
+        (Some(min), None) => node.keys().iter().all(|k| k > min),
+        (None, None) => unimplemented!("Should not ever happen"),
+    }
 }
 
 #[cfg(test)]
-fn all_subnode_keys_ordered_relative_to_node_keys<PB: PageBuffer>(
-    node: &Node<PB, u32, u32>,
+fn all_subnode_keys_ordered_relative_to_node_keys<PB, T>(
+    node: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool {
+) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+{
     if node.is_leaf() {
         return true;
     }
-    let mut min_key = u32::MIN;
-    for (idx, k) in node.keys().iter().enumerate() {
-        let max_key = *k;
+    let mut min_key_exclusive = None;
+    for (idx, k) in node.keys().into_iter().enumerate() {
+        let max_key = k.clone();
         if !all_keys_in_range(
             &node
                 .descendent_node_at_logical_pos(idx as u16, pager_info)
                 .unwrap(),
-            min_key,
-            max_key,
+            min_key_exclusive.as_ref(),
+            Some(&max_key),
         ) {
             return false;
         }
-        min_key = k + 1;
+        min_key_exclusive = Some(k);
     }
     all_keys_in_range(
         &node
             .descendent_node_at_logical_pos(node.key_count(), pager_info)
             .unwrap(),
-        min_key,
-        u32::MAX,
+        min_key_exclusive.as_ref(),
+        None,
     )
 }
 
 #[cfg(test)]
-fn all_nodes_sized_correctly<PB: PageBuffer>(
-    root: &Node<PB, u32, u32>,
+fn all_nodes_sized_correctly<PB, T>(
+    root: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool {
-    fn correct_cell_count<PB: PageBuffer>(node: &Node<PB, u32, u32>) -> bool {
+) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug,
+{
+    fn correct_cell_count<PB, T>(node: &Node<PB, T, T>) -> bool
+    where
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug,
+    {
         if node.is_leaf() {
             true
         } else {
@@ -1642,10 +1675,14 @@ fn all_nodes_sized_correctly<PB: PageBuffer>(
         }
     }
 
-    fn all_nodes_sized_correctly_not_root<PB: PageBuffer>(
-        node: &Node<PB, u32, u32>,
+    fn all_nodes_sized_correctly_not_root<PB, T>(
+        node: &Node<PB, T, T>,
         pager_info: &mut PagerInfo<PB, i32>,
-    ) -> bool {
+    ) -> bool
+    where
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug,
+    {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_free_space() >= third_size;
 
@@ -1671,15 +1708,20 @@ fn all_nodes_sized_correctly<PB: PageBuffer>(
 }
 
 #[cfg(test)]
-fn all_leaves_same_level<PB: PageBuffer>(
-    root: &Node<PB, u32, u32>,
-    pager_info: &mut PagerInfo<PB, i32>,
-) -> bool {
-    fn leaf_levels<PB: PageBuffer>(
-        node: &Node<PB, u32, u32>,
+fn all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>) -> bool
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug,
+{
+    fn leaf_levels<PB, T>(
+        node: &Node<PB, T, T>,
         level: usize,
         pager_info: &mut PagerInfo<PB, i32>,
-    ) -> Vec<usize> {
+    ) -> Vec<usize>
+    where
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug,
+    {
         if node.is_leaf() {
             return vec![level];
         }
@@ -1696,10 +1738,11 @@ fn all_leaves_same_level<PB: PageBuffer>(
 }
 
 #[cfg(test)]
-fn assert_subtree_valid<PB: PageBuffer>(
-    node: &Node<PB, u32, u32>,
-    pager_info: &mut PagerInfo<PB, i32>,
-) {
+fn assert_subtree_valid<PB, T>(node: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
+where
+    PB: PageBuffer,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+{
     assert!(all_nodes_sized_correctly(node, pager_info));
     assert!(tree_keys_fully_ordered(node));
     assert!(all_node_keys_ordered_and_deduped(node, pager_info));
@@ -1769,7 +1812,11 @@ mod tests {
         BTree::init(pager_ref, backing_fd).unwrap()
     }
 
-    fn init_tree_in_file_with_pb<PB: PageBuffer>(filename: &str) -> BTree<i32, PB, u32, u32> {
+    fn init_tree_in_file_with_pb<PB, T>(filename: &str) -> BTree<i32, PB, T, T>
+    where
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug,
+    {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
@@ -2778,33 +2825,39 @@ mod tests {
      * Proptest stuff below here ---------------------------
      */
 
-    fn first_nonretrievable_inserted_value<PB: PageBuffer>(
-        tree: &BTree<i32, PB, u32, u32>,
-        ref_tree: &BTreeMap<u32, u32>,
-    ) -> Option<u32> {
+    fn first_nonretrievable_inserted_value<PB, T>(
+        tree: &BTree<i32, PB, T, T>,
+        ref_tree: &BTreeMap<T, T>,
+    ) -> Option<T>
+    where
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug + PartialEq + Clone,
+    {
         ref_tree
             .iter()
-            .find(|(k, v)| tree.get(k).unwrap() != Some(**v))
+            .find(|(k, v)| tree.get(k).unwrap().as_ref() != Some(*v))
             .map(|(k, v)| {
-                println!("didn't find: ({k}, {v})");
+                println!("didn't find: ({k:?}, {v:?})");
                 println!("actual value: {:?}", tree.get(k));
-                *k
+                (*k).clone()
             })
     }
 
     #[derive(Debug, Clone)]
-    pub enum TreeOperation {
-        Insert(u32, u32),
-        Remove(u32),
+    pub enum TreeOperation<T: Ord + Serialize + DeserializeOwned + Debug> {
+        Insert(T, T),
+        Remove(T),
     }
 
     #[derive(Debug, Clone)]
-    pub struct ReferenceBTree {
-        ref_tree: BTreeMap<u32, u32>,
+    pub struct ReferenceBTree<T> {
+        ref_tree: BTreeMap<T, T>,
     }
-    impl ReferenceStateMachine for ReferenceBTree {
+    impl<T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static>
+        ReferenceStateMachine for ReferenceBTree<T>
+    {
         type State = Self;
-        type Transition = TreeOperation;
+        type Transition = TreeOperation<T>;
 
         fn init_state() -> BoxedStrategy<Self::State> {
             let ref_tree = ReferenceBTree {
@@ -2818,12 +2871,12 @@ mod tests {
                 let keys: Vec<_> = state.ref_tree.keys().cloned().collect();
                 let removal_key = proptest::sample::select(keys);
                 prop_oneof![
-                    (any::<u32>(), any::<u32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+                    (any::<T>(), any::<T>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
                     removal_key.prop_map(TreeOperation::Remove)
                 ]
                 .boxed()
             } else {
-                (any::<u32>(), any::<u32>())
+                (any::<T>(), any::<T>())
                     .prop_map(|(k, v)| TreeOperation::Insert(k, v))
                     .boxed()
             }
@@ -2831,7 +2884,7 @@ mod tests {
 
         fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
             match transition {
-                TreeOperation::Insert(k, v) => state.ref_tree.insert(*k, *v),
+                TreeOperation::Insert(k, v) => state.ref_tree.insert(k.clone(), v.clone()),
                 TreeOperation::Remove(k) => state.ref_tree.remove(k),
             };
             state
@@ -2845,28 +2898,23 @@ mod tests {
         }
     }
 
-    pub struct BTreeTestWrapper<
-        PB: PageBuffer,
-        K: Ord + Serialize + DeserializeOwned + Debug,
-        V: Serialize + DeserializeOwned,
-    > {
-        tree: BTree<i32, PB, K, V>,
+    pub struct BTreeTestWrapper<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> {
+        tree: BTree<i32, PB, T, T>,
         filename: String,
     }
-    impl<
-            PB: PageBuffer,
-            K: Ord + Serialize + DeserializeOwned + Debug,
-            V: Serialize + DeserializeOwned,
-        > BTreeTestWrapper<PB, K, V>
-    {
-        fn new(tree: BTree<i32, PB, K, V>, filename: String) -> Self {
+    impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> BTreeTestWrapper<PB, T> {
+        fn new(tree: BTree<i32, PB, T, T>, filename: String) -> Self {
             BTreeTestWrapper { tree, filename }
         }
     }
 
-    impl<PB: PageBuffer> StateMachineTest for BTree<i32, PB, u32, u32> {
-        type SystemUnderTest = BTreeTestWrapper<PB, u32, u32>;
-        type Reference = ReferenceBTree;
+    impl<
+            PB: PageBuffer,
+            T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static,
+        > StateMachineTest for BTree<i32, PB, T, T>
+    {
+        type SystemUnderTest = BTreeTestWrapper<PB, T>;
+        type Reference = ReferenceBTree<T>;
 
         fn init_test(
             _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
@@ -2889,7 +2937,7 @@ mod tests {
                     assert!(state.tree.get(&k).unwrap().is_none());
                 }
                 TreeOperation::Insert(k, v) => {
-                    state.tree.insert(k, v).unwrap();
+                    state.tree.insert(k.clone(), v.clone()).unwrap();
                     //println!("{}", state.tree.to_description());
                     assert_eq!(state.tree.get(&k).unwrap(), Some(v));
                 }
