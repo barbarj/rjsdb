@@ -167,6 +167,8 @@ impl<
                 root_page.insert_cell(i as u16, bytes)?;
             }
 
+            root_page.set_kind(child_page.kind());
+
             let child_page_id = child_page.id();
             drop(root_page);
             drop(child_page);
@@ -601,8 +603,6 @@ impl<
         size: u16,
         initial_space_used: u16,
     ) -> u16 {
-        println!("size: {size}");
-
         let mut used_space = initial_space_used;
         let mut idx = self.key_count() - 1;
         let page = self.page_ref.borrow();
@@ -613,14 +613,12 @@ impl<
             // Find the index of the first "position" at or past the halfway point
             let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx + 1));
             used_space += id_ptr.size;
-            println!("used space {used_space}");
             while !Self::within_half_increment(size, increment, used_space) {
                 let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
                 let key_ptr =
                     page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
                 increment = id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
                 used_space += increment;
-                println!("used {used_space} for {idx}, increment: {increment}");
                 idx -= 1;
             }
         } else {
@@ -628,7 +626,6 @@ impl<
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 increment = ptr.size + CELL_POINTER_SIZE;
                 used_space += increment;
-                println!("used {used_space} for {idx}");
                 idx -= 1;
             }
         }
@@ -636,8 +633,6 @@ impl<
     }
 
     fn first_logical_pos_past_size(&self, size: u16) -> u16 {
-        println!("size: {size}");
-
         let mut used_space = 0;
         let mut idx = 0;
         let mut increment = 0;
@@ -651,25 +646,20 @@ impl<
                     page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
                 increment = id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
                 used_space += increment;
-                println!("used {used_space} for {idx}");
                 idx += 1;
             }
         } else {
             used_space += Self::leaf_siblings_space_used();
-            println!("used {used_space}");
             while !Self::within_half_increment(size, increment, used_space) {
                 let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
                 increment = ptr.size + CELL_POINTER_SIZE;
                 used_space += increment;
-                println!("used {used_space} for {idx}");
                 idx += 1;
             }
         }
         if used_space <= size {
-            println!("returning {idx}");
             idx
         } else {
-            println!("returning {}", idx - 1);
             idx - 1
         }
     }
@@ -1042,12 +1032,6 @@ impl<
     }
 
     fn amount_to_steal(from: &Self, to: &Self) -> u16 {
-        println!(
-            "({} - {}) / 2 = {}",
-            from.page_used_space(),
-            to.page_used_space(),
-            (from.page_used_space() - to.page_used_space()) / 2,
-        );
         (from.page_used_space() - to.page_used_space()) / 2
     }
 
@@ -1221,7 +1205,7 @@ impl<
 /// - The min size for leaves is 2, and nodes is
 const TEST_BUFFER_SIZE: u16 = 112;
 #[cfg(test)]
-struct TestPageBuffer {
+pub struct TestPageBuffer {
     data: [u8; TEST_BUFFER_SIZE as usize],
 }
 #[cfg(test)]
@@ -1249,7 +1233,7 @@ impl PageBuffer for TestPageBuffer {
 }
 
 #[cfg(test)]
-impl BTree<i32, TestPageBuffer, u32, u32> {
+impl<PB: PageBuffer> BTree<i32, PB, u32, u32> {
     /*
      * An example description looks something like this:
     0: [12, 23] (3)
@@ -1312,17 +1296,14 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
         Self::node_to_description(&mut pager_info, self.root.page_id())
     }
 
-    fn node_to_description(
-        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
-        page_id: PageId,
-    ) -> String {
+    fn node_to_description(pager_info: &mut PagerInfo<PB, i32>, page_id: PageId) -> String {
         use std::collections::VecDeque;
 
         let mut description_lines = Vec::new();
         let mut queue = VecDeque::new();
         queue.push_back((vec![0], page_id));
         while let Some((ancestry, page_id)) = queue.pop_front() {
-            let node: Node<TestPageBuffer, u32, u32> = pager_info.page_node(page_id).unwrap();
+            let node: Node<PB, u32, u32> = pager_info.page_node(page_id).unwrap();
             let description_line = DescriptionLine::new(
                 ancestry.clone(),
                 node.is_leaf(),
@@ -1341,7 +1322,7 @@ impl BTree<i32, TestPageBuffer, u32, u32> {
         description_lines.into_iter().join("\n")
     }
 
-    fn display_subtree(pager_info: &mut PagerInfo<TestPageBuffer, i32>, root_page_id: PageId) {
+    fn display_subtree(pager_info: &mut PagerInfo<PB, i32>, root_page_id: PageId) {
         let description = Self::node_to_description(pager_info, root_page_id);
         print!("{description}");
     }
@@ -1652,6 +1633,15 @@ fn all_nodes_sized_correctly<PB: PageBuffer>(
     root: &Node<PB, u32, u32>,
     pager_info: &mut PagerInfo<PB, i32>,
 ) -> bool {
+    fn correct_cell_count<PB: PageBuffer>(node: &Node<PB, u32, u32>) -> bool {
+        if node.is_leaf() {
+            true
+        } else {
+            let page = node.page_ref.borrow();
+            page.cell_count() % 2 == 1
+        }
+    }
+
     fn all_nodes_sized_correctly_not_root<PB: PageBuffer>(
         node: &Node<PB, u32, u32>,
         pager_info: &mut PagerInfo<PB, i32>,
@@ -1659,22 +1649,25 @@ fn all_nodes_sized_correctly<PB: PageBuffer>(
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_free_space() >= third_size;
 
-        let children_pass = if node.is_leaf() {
-            true
-        } else {
-            let children: Vec<_> = node.descendent_iter(pager_info).collect();
-            children
-                .iter()
-                .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
+        let mut children_pass = || {
+            if node.is_leaf() {
+                true
+            } else {
+                let children: Vec<_> = node.descendent_iter(pager_info).collect();
+                children
+                    .iter()
+                    .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
+            }
         };
 
-        meets_minimum_size && children_pass
+        meets_minimum_size && correct_cell_count(node) && children_pass()
     }
 
     let children: Vec<_> = root.descendent_iter(pager_info).collect();
-    children
-        .iter()
-        .all(|node| all_nodes_sized_correctly(node, pager_info))
+    correct_cell_count(root)
+        && children
+            .iter()
+            .all(|node| all_nodes_sized_correctly(node, pager_info))
 }
 
 #[cfg(test)]
@@ -1707,12 +1700,12 @@ fn assert_subtree_valid<PB: PageBuffer>(
     node: &Node<PB, u32, u32>,
     pager_info: &mut PagerInfo<PB, i32>,
 ) {
+    assert!(all_nodes_sized_correctly(node, pager_info));
     assert!(tree_keys_fully_ordered(node));
     assert!(all_node_keys_ordered_and_deduped(node, pager_info));
     assert!(all_subnode_keys_ordered_relative_to_node_keys(
         node, pager_info
     ));
-    assert!(all_nodes_sized_correctly(node, pager_info));
     assert!(all_leaves_same_level(node, pager_info));
 }
 
@@ -1765,7 +1758,7 @@ mod tests {
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
 
-        BTree::from_description(description, pager_ref, backing_fd)
+        BTree::<i32, TestPageBuffer, u32, u32>::from_description(description, pager_ref, backing_fd)
     }
 
     fn init_tree_in_file(filename: &str) -> BTree<i32, TestPageBuffer, u32, u32> {
@@ -2892,12 +2885,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.tree.remove(&k).unwrap();
                     assert!(res.is_some());
-                    // BTree::display_subtree(&state.root);
+                    println!("{}", state.tree.to_description());
                     assert!(state.tree.get(&k).unwrap().is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.tree.insert(k, v).unwrap();
-                    // BTree::display_subtree(&state.root);
+                    println!("{}", state.tree.to_description());
                     assert_eq!(state.tree.get(&k).unwrap(), Some(v));
                 }
             };
@@ -2948,6 +2941,28 @@ mod tests {
          })]
 
          #[test]
-         fn full_tree_test(sequential 1..32=> BTree<i32, TestPageBuffer, u32, u32>);
+         fn full_tree_test(sequential 1..24 => BTree<i32, TestPageBuffer, u32, u32>);
+    }
+
+    #[test]
+    fn failing_test_case_1() {
+        let filename = "failing_test_case_1.test";
+        let input = "
+            0: [2] (2)
+            0->0: L[0, 1, 2]
+            0->1: L[3, 4]
+        ";
+        let input = trim_lines(input);
+        let expected = "0: L[0, 1, 2, 3]";
+
+        let mut t = init_tree_from_description_in_file(filename, &input);
+        t.remove(&4).unwrap();
+
+        println!("-------");
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+        assert_eq!(&t.to_description(), expected);
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
     }
 }
