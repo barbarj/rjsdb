@@ -176,6 +176,36 @@ impl<
 
         Ok(res)
     }
+
+    pub fn iter(
+        &self,
+        min_key: KeyLimit<K>,
+        max_key: KeyLimit<K>,
+    ) -> Result<BTreeIter<PB, Fd, K, V>> {
+        let mut pager_info = self.pager_info();
+        let mut node: Node<PB, K, V> = pager_info.page_node(self.root.page_id())?;
+        while !node.is_leaf() {
+            node = match &min_key {
+                KeyLimit::None => node.descendent_node_at_logical_pos(0, &mut pager_info)?,
+                KeyLimit::Exclusive(k) => node.get_descendent_by_key(k, &mut pager_info)?.1,
+                KeyLimit::Inclusive(k) => node.get_descendent_by_key(k, &mut pager_info)?.1,
+            };
+        }
+        let starting_pos = match &min_key {
+            KeyLimit::None => 0,
+            KeyLimit::Exclusive(k) => match node.binary_search_keys(k) {
+                Ok(pos) => pos + 1,
+                Err(pos) => pos,
+            },
+            KeyLimit::Inclusive(k) => match node.binary_search_keys(k) {
+                Ok(pos) => pos,
+                Err(pos) => pos,
+            },
+        };
+
+        let iter = BTreeIter::new(node, starting_pos, max_key, pager_info);
+        Ok(iter)
+    }
 }
 
 struct PagerInfo<PB: PageBuffer, Fd: AsRawFd + Copy> {
@@ -234,6 +264,92 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
         let mut pager = self.pager_ref.borrow_mut();
         pager.delete_page(self.backing_fd, page_id)?;
         Ok(())
+    }
+}
+
+pub enum KeyLimit<K: Ord + Serialize + DeserializeOwned + Debug> {
+    None,
+    Inclusive(K),
+    Exclusive(K),
+}
+
+pub struct BTreeIter<
+    PB: PageBuffer,
+    Fd: AsRawFd + Copy,
+    K: Ord + Serialize + DeserializeOwned + Debug,
+    V: Serialize + DeserializeOwned,
+> {
+    leaf: Node<PB, K, V>,
+    logical_pos: u16,
+    max_key: KeyLimit<K>,
+    pager_info: PagerInfo<PB, Fd>,
+}
+impl<
+        PB: PageBuffer,
+        Fd: AsRawFd + Copy,
+        K: Ord + Serialize + DeserializeOwned + Debug,
+        V: Serialize + DeserializeOwned,
+    > BTreeIter<PB, Fd, K, V>
+{
+    fn new(
+        leftmost_leaf: Node<PB, K, V>,
+        starting_pos: u16,
+        max_key: KeyLimit<K>,
+        pager_info: PagerInfo<PB, Fd>,
+    ) -> Self {
+        BTreeIter {
+            leaf: leftmost_leaf,
+            logical_pos: starting_pos,
+            max_key,
+            pager_info,
+        }
+    }
+}
+
+impl<
+        PB: PageBuffer,
+        Fd: AsRawFd + Copy,
+        K: Ord + Serialize + DeserializeOwned + Debug,
+        V: Serialize + DeserializeOwned,
+    > Iterator for BTreeIter<PB, Fd, K, V>
+{
+    type Item = Result<(K, V)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.logical_pos == self.leaf.key_count() {
+            // replace with next leaf
+            let next_page_id = match self.leaf.leaf_right_sibling() {
+                Ok(id) => id,
+                Err(err) => return Some(Err(err)),
+            };
+            if next_page_id == 0 {
+                return None;
+            }
+            self.leaf = match self.pager_info.page_node(next_page_id) {
+                Ok(node) => node,
+                Err(err) => return Some(Err(err)),
+            };
+            self.logical_pos = 0;
+        }
+        let (key, val) = match self.leaf.leaf_kv_at_pos(self.logical_pos) {
+            Ok(kv) => kv,
+            Err(err) => return Some(Err(err)),
+        };
+        match &self.max_key {
+            KeyLimit::Exclusive(max) => {
+                if &key >= max {
+                    return None;
+                }
+            }
+            KeyLimit::Inclusive(max) => {
+                if &key > max {
+                    return None;
+                }
+            }
+            KeyLimit::None => {}
+        }
+        self.logical_pos += 1;
+        Some(Ok((key, val)))
     }
 }
 
@@ -354,6 +470,14 @@ impl<
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
         let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
         Ok(val)
+    }
+
+    fn leaf_kv_at_pos(&self, logical: u16) -> Result<(K, V)> {
+        assert!(self.is_leaf());
+        let page = self.page_ref.borrow();
+        let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
+        let kv = from_reader(page.cell_bytes(pos))?;
+        Ok(kv)
     }
 
     fn leaf_left_sibling(&self) -> Result<PageId> {
@@ -1609,7 +1733,7 @@ mod tests {
         pager::{PageId, Pager, CELL_POINTER_SIZE},
     };
 
-    use super::{BTree, TestPageBuffer};
+    use super::{BTree, KeyLimit, TestPageBuffer};
 
     fn trim_lines(s: &str) -> String {
         s.trim().lines().map(|l| l.trim()).join("\n")
@@ -2568,6 +2692,74 @@ mod tests {
         assert_eq!(&t.to_description(), &output_tree);
         assert_eq!(val, Some(16));
         assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn basic_iter_test() {
+        let filename = "basic_iter_test.test";
+        let mut t = init_tree_in_file(filename);
+
+        let mut expected = Vec::new();
+        for i in 0..=50 {
+            t.insert(i, i).unwrap();
+            expected.push((i, i));
+        }
+
+        let actual: Vec<_> = t
+            .iter(KeyLimit::None, KeyLimit::None)
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn iter_test_inclusive_limits() {
+        let filename = "iter_test_inclusive_limits.test";
+        let mut t = init_tree_in_file(filename);
+
+        let mut expected = Vec::new();
+        for i in 0..=50 {
+            t.insert(i, i).unwrap();
+            expected.push((i, i));
+        }
+        expected.retain(|x| x.0 >= 10 && x.0 <= 40);
+
+        let actual: Vec<_> = t
+            .iter(KeyLimit::Inclusive(10), KeyLimit::Inclusive(40))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn iter_test_exclusive_limits() {
+        let filename = "iter_test_exclusive_limits.test";
+        let mut t = init_tree_in_file(filename);
+
+        let mut expected = Vec::new();
+        for i in 0..=50 {
+            t.insert(i, i).unwrap();
+            expected.push((i, i));
+        }
+        expected.retain(|x| x.0 > 10 && x.0 < 40);
+
+        let actual: Vec<_> = t
+            .iter(KeyLimit::Exclusive(10), KeyLimit::Exclusive(40))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(actual, expected);
 
         drop(t);
         fs::remove_file(filename).unwrap();
