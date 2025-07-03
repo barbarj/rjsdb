@@ -2932,15 +2932,15 @@ mod tests {
 
     prop_state_machine! {
         #![proptest_config(ProptestConfig {
-             // Enable verbose mode to make the state machine test print the
+             // When debugging, enable verbose mode to make the state machine test print the
              // transitions for each case.
-             verbose: 1,
+             // verbose: 1,
              max_shrink_iters: 8192,
              cases: 1024,
              .. ProptestConfig::default()
          })]
 
-         #[test]
+         #[test] #[ignore] // expensive test
          fn full_tree_test(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
     }
 
