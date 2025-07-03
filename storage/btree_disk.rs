@@ -1684,7 +1684,7 @@ where
         T: Ord + Serialize + DeserializeOwned + Debug,
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
-        let meets_minimum_size = node.page_free_space() >= third_size;
+        let meets_minimum_size = node.page_used_space() >= third_size;
 
         let mut children_pass = || {
             if node.is_leaf() {
@@ -1697,14 +1697,16 @@ where
             }
         };
 
-        meets_minimum_size && correct_cell_count(node) && children_pass()
+        let correct_cell_count = correct_cell_count(node);
+        let children_pass = children_pass();
+        meets_minimum_size && correct_cell_count && children_pass
     }
 
     let children: Vec<_> = root.descendent_iter(pager_info).collect();
     correct_cell_count(root)
         && children
             .iter()
-            .all(|node| all_nodes_sized_correctly(node, pager_info))
+            .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
 }
 
 #[cfg(test)]
@@ -1878,7 +1880,7 @@ mod tests {
             0: [12, 23] (3)
             0->0: [3, 6, 9] (4)
             0->1: [15, 17, 20] (4)
-            0->2: [28] (2)
+            0->2: [28, 31] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6]
             0->0->2: L[7, 8, 9] 
@@ -1888,7 +1890,9 @@ mod tests {
             0->1->2: L[18, 19, 20] 
             0->1->3: L[21, 22, 23]
             0->2->0: L[24, 25, 26, 27] 
-            0->2->1: L[29, 30, 31]";
+            0->2->1: L[29, 30, 31]
+            0->2->2: L[32, 33, 34]
+        ";
         let input_description = trim_lines(input_description);
 
         let filename = "end_to_end_description.test";
