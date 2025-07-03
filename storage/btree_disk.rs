@@ -153,15 +153,15 @@ impl<
         let mut pager_info = self.pager_info();
         let res = self.root.remove(key, &mut pager_info)?;
 
-        if self.root.key_count() == 0 {
+        if self.root.key_count() == 0 && self.root.is_node() {
             // "replace" root with child by moving all data on child to root and dropping child
-            let mut root_page = self.root.page_ref.borrow_mut();
-            assert_eq!(root_page.cell_count(), 1);
             let child = self
                 .root
                 .descendent_node_at_logical_pos(0, &mut pager_info)?;
             let child_page = child.page_ref.borrow();
 
+            let mut root_page = self.root.page_ref.borrow_mut();
+            assert_eq!(root_page.cell_count(), 1);
             root_page.remove_cell(0); // remove the one cell that should be here
             for (i, bytes) in child_page.cell_bytes_iter().enumerate() {
                 root_page.insert_cell(i as u16, bytes)?;
@@ -1589,7 +1589,7 @@ impl Display for DescriptionLine {
 }
 
 #[cfg(test)]
-fn tree_keys_fully_ordered(root: &Node<TestPageBuffer, u32, u32>) -> bool {
+fn tree_keys_fully_ordered<PB: PageBuffer>(root: &Node<PB, u32, u32>) -> bool {
     let keys = root.keys();
     let mut sorted_keys = keys.clone();
     sorted_keys.sort();
@@ -1597,9 +1597,9 @@ fn tree_keys_fully_ordered(root: &Node<TestPageBuffer, u32, u32>) -> bool {
 }
 
 #[cfg(test)]
-fn all_node_keys_ordered_and_deduped(
-    node: &Node<TestPageBuffer, u32, u32>,
-    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+fn all_node_keys_ordered_and_deduped<PB: PageBuffer>(
+    node: &Node<PB, u32, u32>,
+    pager_info: &mut PagerInfo<PB, i32>,
 ) -> bool {
     let mut sorted_keys = node.keys();
     sorted_keys.sort();
@@ -1612,14 +1612,14 @@ fn all_node_keys_ordered_and_deduped(
 }
 
 #[cfg(test)]
-fn all_keys_in_range(node: &Node<TestPageBuffer, u32, u32>, min: u32, max: u32) -> bool {
+fn all_keys_in_range<PB: PageBuffer>(node: &Node<PB, u32, u32>, min: u32, max: u32) -> bool {
     node.keys().iter().all(|k| (min..=max).contains(k))
 }
 
 #[cfg(test)]
-fn all_subnode_keys_ordered_relative_to_node_keys(
-    node: &Node<TestPageBuffer, u32, u32>,
-    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+fn all_subnode_keys_ordered_relative_to_node_keys<PB: PageBuffer>(
+    node: &Node<PB, u32, u32>,
+    pager_info: &mut PagerInfo<PB, i32>,
 ) -> bool {
     if node.is_leaf() {
         return true;
@@ -1648,13 +1648,13 @@ fn all_subnode_keys_ordered_relative_to_node_keys(
 }
 
 #[cfg(test)]
-fn all_nodes_sized_correctly(
-    root: &Node<TestPageBuffer, u32, u32>,
-    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+fn all_nodes_sized_correctly<PB: PageBuffer>(
+    root: &Node<PB, u32, u32>,
+    pager_info: &mut PagerInfo<PB, i32>,
 ) -> bool {
-    fn all_nodes_sized_correctly_not_root(
-        node: &Node<TestPageBuffer, u32, u32>,
-        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+    fn all_nodes_sized_correctly_not_root<PB: PageBuffer>(
+        node: &Node<PB, u32, u32>,
+        pager_info: &mut PagerInfo<PB, i32>,
     ) -> bool {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_free_space() >= third_size;
@@ -1678,14 +1678,14 @@ fn all_nodes_sized_correctly(
 }
 
 #[cfg(test)]
-fn all_leaves_same_level(
-    root: &Node<TestPageBuffer, u32, u32>,
-    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+fn all_leaves_same_level<PB: PageBuffer>(
+    root: &Node<PB, u32, u32>,
+    pager_info: &mut PagerInfo<PB, i32>,
 ) -> bool {
-    fn leaf_levels(
-        node: &Node<TestPageBuffer, u32, u32>,
+    fn leaf_levels<PB: PageBuffer>(
+        node: &Node<PB, u32, u32>,
         level: usize,
-        pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+        pager_info: &mut PagerInfo<PB, i32>,
     ) -> Vec<usize> {
         if node.is_leaf() {
             return vec![level];
@@ -1703,9 +1703,9 @@ fn all_leaves_same_level(
 }
 
 #[cfg(test)]
-fn assert_subtree_valid(
-    node: &Node<TestPageBuffer, u32, u32>,
-    pager_info: &mut PagerInfo<TestPageBuffer, i32>,
+fn assert_subtree_valid<PB: PageBuffer>(
+    node: &Node<PB, u32, u32>,
+    pager_info: &mut PagerInfo<PB, i32>,
 ) {
     assert!(tree_keys_fully_ordered(node));
     assert!(all_node_keys_ordered_and_deduped(node, pager_info));
@@ -1720,18 +1720,26 @@ fn assert_subtree_valid(
 mod tests {
     use std::{
         cell::RefCell,
+        collections::BTreeMap,
+        fmt::Debug,
         fs::{self, File, OpenOptions},
         os::fd::AsRawFd,
         rc::Rc,
     };
 
     use itertools::Itertools;
+    use proptest::prelude::*;
+    use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
+    use serde::{de::DeserializeOwned, Serialize};
     use serialize::serialized_size;
 
-    use crate::{
-        btree_disk::{assert_subtree_valid, TEST_BUFFER_SIZE},
-        pager::{PageId, Pager, CELL_POINTER_SIZE},
+    use super::{
+        all_leaves_same_level, all_node_keys_ordered_and_deduped, all_nodes_sized_correctly,
+        all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
+        tree_keys_fully_ordered, TEST_BUFFER_SIZE,
     };
+
+    use crate::pager::{PageBuffer, PageId, Pager, CELL_POINTER_SIZE};
 
     use super::{BTree, KeyLimit, TestPageBuffer};
 
@@ -1761,6 +1769,14 @@ mod tests {
     }
 
     fn init_tree_in_file(filename: &str) -> BTree<i32, TestPageBuffer, u32, u32> {
+        let file = open_file(filename);
+        let backing_fd = file.as_raw_fd();
+        let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
+
+        BTree::init(pager_ref, backing_fd).unwrap()
+    }
+
+    fn init_tree_in_file_with_pb<PB: PageBuffer>(filename: &str) -> BTree<i32, PB, u32, u32> {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
@@ -2763,5 +2779,175 @@ mod tests {
 
         drop(t);
         fs::remove_file(filename).unwrap();
+    }
+
+    /*
+     * Proptest stuff below here ---------------------------
+     */
+
+    fn first_nonretrievable_inserted_value<PB: PageBuffer>(
+        tree: &BTree<i32, PB, u32, u32>,
+        ref_tree: &BTreeMap<u32, u32>,
+    ) -> Option<u32> {
+        ref_tree
+            .iter()
+            .find(|(k, v)| tree.get(k).unwrap() != Some(**v))
+            .map(|(k, v)| {
+                println!("didn't find: ({k}, {v})");
+                println!("actual value: {:?}", tree.get(k));
+                *k
+            })
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum TreeOperation {
+        Insert(u32, u32),
+        Remove(u32),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ReferenceBTree {
+        ref_tree: BTreeMap<u32, u32>,
+    }
+    impl ReferenceStateMachine for ReferenceBTree {
+        type State = Self;
+        type Transition = TreeOperation;
+
+        fn init_state() -> BoxedStrategy<Self::State> {
+            let ref_tree = ReferenceBTree {
+                ref_tree: BTreeMap::new(),
+            };
+            Just(ref_tree).boxed()
+        }
+
+        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+            if !state.ref_tree.is_empty() {
+                let keys: Vec<_> = state.ref_tree.keys().cloned().collect();
+                let removal_key = proptest::sample::select(keys);
+                prop_oneof![
+                    (any::<u32>(), any::<u32>()).prop_map(|(k, v)| TreeOperation::Insert(k, v)),
+                    removal_key.prop_map(TreeOperation::Remove)
+                ]
+                .boxed()
+            } else {
+                (any::<u32>(), any::<u32>())
+                    .prop_map(|(k, v)| TreeOperation::Insert(k, v))
+                    .boxed()
+            }
+        }
+
+        fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
+            match transition {
+                TreeOperation::Insert(k, v) => state.ref_tree.insert(*k, *v),
+                TreeOperation::Remove(k) => state.ref_tree.remove(k),
+            };
+            state
+        }
+
+        fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+            match transition {
+                TreeOperation::Insert(_, _) => true,
+                TreeOperation::Remove(k) => state.ref_tree.contains_key(k),
+            }
+        }
+    }
+
+    pub struct BTreeTestWrapper<
+        PB: PageBuffer,
+        K: Ord + Serialize + DeserializeOwned + Debug,
+        V: Serialize + DeserializeOwned,
+    > {
+        tree: BTree<i32, PB, K, V>,
+        filename: String,
+    }
+    impl<
+            PB: PageBuffer,
+            K: Ord + Serialize + DeserializeOwned + Debug,
+            V: Serialize + DeserializeOwned,
+        > BTreeTestWrapper<PB, K, V>
+    {
+        fn new(tree: BTree<i32, PB, K, V>, filename: String) -> Self {
+            BTreeTestWrapper { tree, filename }
+        }
+    }
+
+    impl<PB: PageBuffer> StateMachineTest for BTree<i32, PB, u32, u32> {
+        type SystemUnderTest = BTreeTestWrapper<PB, u32, u32>;
+        type Reference = ReferenceBTree;
+
+        fn init_test(
+            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) -> Self::SystemUnderTest {
+            let filename = "btree_state_machine_u32_u32.test";
+            let t = init_tree_in_file_with_pb(filename);
+            BTreeTestWrapper::new(t, filename.to_string())
+        }
+
+        fn apply(
+            mut state: Self::SystemUnderTest,
+            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            transition: <Self::Reference as ReferenceStateMachine>::Transition,
+        ) -> Self::SystemUnderTest {
+            match transition {
+                TreeOperation::Remove(k) => {
+                    let res = state.tree.remove(&k).unwrap();
+                    assert!(res.is_some());
+                    // BTree::display_subtree(&state.root);
+                    assert!(state.tree.get(&k).unwrap().is_none());
+                }
+                TreeOperation::Insert(k, v) => {
+                    state.tree.insert(k, v).unwrap();
+                    // BTree::display_subtree(&state.root);
+                    assert_eq!(state.tree.get(&k).unwrap(), Some(v));
+                }
+            };
+            state
+        }
+
+        fn check_invariants(
+            state: &Self::SystemUnderTest,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        ) {
+            assert!(tree_keys_fully_ordered(&state.tree.root));
+            assert_eq!(
+                first_nonretrievable_inserted_value(&state.tree, &ref_state.ref_tree),
+                None
+            );
+            assert!(all_node_keys_ordered_and_deduped(
+                &state.tree.root,
+                &mut state.tree.pager_info()
+            ));
+            assert!(all_subnode_keys_ordered_relative_to_node_keys(
+                &state.tree.root,
+                &mut state.tree.pager_info()
+            ));
+            assert!(all_nodes_sized_correctly(
+                &state.tree.root,
+                &mut state.tree.pager_info()
+            ));
+            assert!(all_leaves_same_level(
+                &state.tree.root,
+                &mut state.tree.pager_info()
+            ));
+        }
+
+        fn teardown(state: Self::SystemUnderTest) {
+            drop(state.tree);
+            fs::remove_file(state.filename).unwrap();
+        }
+    }
+
+    prop_state_machine! {
+        #![proptest_config(ProptestConfig {
+             // Enable verbose mode to make the state machine test print the
+             // transitions for each case.
+             verbose: 1,
+             max_shrink_iters: 8192,
+             cases: 1024,
+             .. ProptestConfig::default()
+         })]
+
+         #[test]
+         fn full_tree_test(sequential 1..32=> BTree<i32, TestPageBuffer, u32, u32>);
     }
 }

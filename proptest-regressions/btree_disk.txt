@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b21325ea6001ca35b8f3b9ca65d09d96b486d54035901e7a756bade79ad0ea94 # shrinks to (initial_state, transitions, seen_counter) = (ReferenceBTree { ref_tree: {} }, [Insert(705590544, 575465938), Insert(3599936949, 2957802565), Remove(3599936949), Remove(705590544)], None)
+cc 278fa3790259d545b0fc75e066ed1172ad7a09667bb88daa6de4048574d5eb86 # shrinks to (initial_state, transitions, seen_counter) = (ReferenceBTree { ref_tree: {} }, [Insert(1494568197, 986701722), Remove(1494568197)], None)
+cc ae623d15f82d834e7b31e1358b9c34b9e29e6a6810911d08b05b97c53f05ac9a # shrinks to (initial_state, transitions, seen_counter) = (ReferenceBTree { ref_tree: {} }, [Insert(387304876, 3145639723), Insert(794779581, 4205860168), Remove(387304876), Remove(794779581), Insert(1222269886, 2440696387), Insert(1889287316, 3754117572), Insert(207210802, 2846866961), Remove(1222269886), Insert(1842262227, 1835450157), Insert(1993892082, 0), Insert(0, 0), Insert(1993892083, 0), Insert(1993892081, 2208494068), Insert(1993892081, 0), Remove(1842262227), Remove(207210802), Remove(1993892081), Remove(1889287316)], None)
