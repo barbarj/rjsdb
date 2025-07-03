@@ -904,8 +904,6 @@ impl<
                 } else {
                     // after the split, there's one less key between the two nodes, so account for
                     // that
-                    println!("logical_pos: {logical_pos}");
-                    println!("key_count: {}", self.key_count());
                     let pos = logical_pos - self.key_count() - 1;
                     parent_new_node.insert_split_results_into_node(pos, &split_key, new_page_id)?;
                 }
@@ -2887,12 +2885,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.tree.remove(&k).unwrap();
                     assert!(res.is_some());
-                    println!("{}", state.tree.to_description());
+                    //println!("{}", state.tree.to_description());
                     assert!(state.tree.get(&k).unwrap().is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.tree.insert(k, v).unwrap();
-                    println!("{}", state.tree.to_description());
+                    //println!("{}", state.tree.to_description());
                     assert_eq!(state.tree.get(&k).unwrap(), Some(v));
                 }
             };
@@ -2943,7 +2941,7 @@ mod tests {
          })]
 
          #[test]
-         fn full_tree_test(sequential 1..128 => BTree<i32, TestPageBuffer, u32, u32>);
+         fn full_tree_test(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
     }
 
     #[test]
@@ -2960,7 +2958,6 @@ mod tests {
         let mut t = init_tree_from_description_in_file(filename, &input);
         t.remove(&4).unwrap();
 
-        println!("-------");
         assert_subtree_valid(&t.root, &mut t.pager_info());
         assert_eq!(&t.to_description(), expected);
 
