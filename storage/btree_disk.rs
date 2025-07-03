@@ -12,6 +12,8 @@ use std::{
 
 #[cfg(test)]
 use std::iter::Peekable;
+#[cfg(test)]
+use std::str::FromStr;
 
 use crate::pager::{
     PageBuffer, PageBufferOffset, PageError, PageId, PageKind, PageRef, Pager, PagerError,
@@ -34,8 +36,10 @@ use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 
 /*
  * TODO:
- * - I still have lots of operations that mix logical and physical position. I need to make it so
- * that they all operate only in one domain or the other
+ * - I may need to rework the split logic a bit. When splitting, it's because we're about to do an
+ * insertion that won't fit. However, we can know where that insertion would be and much space it
+ * would occupy. So I would like to modify the split logic to attempt to achieve evenness between
+ * the resulting pages post-insertion, instead of the current target, which is pre-insertion
  */
 
 #[derive(Debug)]
@@ -985,6 +989,7 @@ impl<
         this_page.remove_cell(key_cell_idx); // remove key
     }
 
+    #[allow(clippy::reversed_empty_ranges)]
     fn merge_children<Fd: AsRawFd + Copy>(
         &mut self,
         left_child_pos: u16,
@@ -1010,8 +1015,11 @@ impl<
 
         let from_range = if right_child.is_node() {
             0..=right_child.key_count()
-        } else {
+        } else if right_child.key_count() > 0 {
             0..=right_child.key_count() - 1
+        } else {
+            1..=0 // intentionally creating an empty range here, since the right child is empty in
+                  // this case
         };
 
         Self::move_cells(&mut right_child, &mut left_child, from_range, logical_start)?;
@@ -1233,7 +1241,9 @@ impl PageBuffer for TestPageBuffer {
 }
 
 #[cfg(test)]
-impl<PB: PageBuffer> BTree<i32, PB, u32, u32> {
+impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone>
+    BTree<i32, PB, T, T>
+{
     /*
      * An example description looks something like this:
     0: [12, 23] (3)
@@ -1255,12 +1265,12 @@ impl<PB: PageBuffer> BTree<i32, PB, u32, u32> {
         description: &str,
         pager_ref: Rc<RefCell<Pager<TestPageBuffer>>>,
         backing_fd: i32,
-    ) -> BTree<i32, TestPageBuffer, u32, u32> {
+    ) -> BTree<i32, TestPageBuffer, T, T> {
         let mut lines = description
             .trim()
             .split('\n')
             .map(|x| x.trim())
-            .map(|s| DescriptionLine::from_str(s).unwrap())
+            .map(|s| DescriptionLine::<T>::from_str(s).unwrap())
             .peekable();
 
         assert!(lines.peek().is_some());
@@ -1290,7 +1300,10 @@ impl<PB: PageBuffer> BTree<i32, PB, u32, u32> {
         assert_subtree_valid(&tree.root, &mut pager_info);
         tree
     }
+}
 
+#[cfg(test)]
+impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> BTree<i32, PB, T, T> {
     fn to_description(&self) -> String {
         let mut pager_info = self.pager_info();
         Self::node_to_description(&mut pager_info, self.root.page_id())
@@ -1303,7 +1316,7 @@ impl<PB: PageBuffer> BTree<i32, PB, u32, u32> {
         let mut queue = VecDeque::new();
         queue.push_back((vec![0], page_id));
         while let Some((ancestry, page_id)) = queue.pop_front() {
-            let node: Node<PB, u32, u32> = pager_info.page_node(page_id).unwrap();
+            let node: Node<PB, T, T> = pager_info.page_node(page_id).unwrap();
             let description_line = DescriptionLine::new(
                 ancestry.clone(),
                 node.is_leaf(),
@@ -1384,10 +1397,10 @@ impl<
 }
 
 #[cfg(test)]
-impl Node<TestPageBuffer, u32, u32> {
-    fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine>>(
+impl<T: Ord + Serialize + DeserializeOwned + Debug + FromStr> Node<TestPageBuffer, T, T> {
+    fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine<T>>>(
         pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
-        this_node_line: DescriptionLine,
+        this_node_line: DescriptionLine<T>,
         lines: &mut Peekable<I>,
         this_page_id: PageId,
         sibling_page_ids: (PageId, PageId),
@@ -1489,15 +1502,15 @@ impl std::error::Error for DescriptionLineError {}
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-struct DescriptionLine {
+struct DescriptionLine<T> {
     traversal_path: Vec<usize>,
     is_leaf: bool,
-    keys: Vec<u32>,
+    keys: Vec<T>,
     child_count: usize,
 }
 #[cfg(test)]
-impl DescriptionLine {
-    fn new(traversal_path: Vec<usize>, is_leaf: bool, keys: Vec<u32>, child_count: usize) -> Self {
+impl<T> DescriptionLine<T> {
+    fn new(traversal_path: Vec<usize>, is_leaf: bool, keys: Vec<T>, child_count: usize) -> Self {
         DescriptionLine {
             traversal_path,
             is_leaf,
@@ -1505,7 +1518,9 @@ impl DescriptionLine {
             child_count,
         }
     }
-
+}
+#[cfg(test)]
+impl<T: FromStr> DescriptionLine<T> {
     fn from_str(s: &str) -> std::result::Result<Self, DescriptionLineError> {
         let mut parts = s.split(": ");
         let traversal_path = parts
@@ -1522,7 +1537,12 @@ impl DescriptionLine {
 
         let closing_bracket_pos = second_half.chars().position(|c| c == ']').unwrap();
         let num_strs = second_half[skip_num..closing_bracket_pos].split(", ");
-        let keys: Vec<u32> = num_strs.map(|x| x.parse::<u32>().unwrap()).collect();
+        let keys: Vec<T> = num_strs
+            .map(|x| match x.parse() {
+                Ok(k) => k,
+                Err(_) => panic!("failed to parse: '{}'", x),
+            })
+            .collect();
 
         let child_count = if is_leaf {
             0
@@ -1547,14 +1567,14 @@ impl DescriptionLine {
         })
     }
 
-    fn is_child_line(&self, candidate: &DescriptionLine) -> bool {
+    fn is_child_line(&self, candidate: &DescriptionLine<T>) -> bool {
         let tvlen = self.traversal_path.len();
         candidate.traversal_path.len() == tvlen + 1
             && candidate.traversal_path[0..tvlen] == self.traversal_path
     }
 }
 #[cfg(test)]
-impl Display for DescriptionLine {
+impl<T: Debug> Display for DescriptionLine<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path_parts: Vec<_> = self.traversal_path.iter().map(|x| x.to_string()).collect();
         let path = path_parts.join("->");
@@ -1570,7 +1590,7 @@ impl Display for DescriptionLine {
 }
 
 #[cfg(test)]
-fn tree_keys_fully_ordered<PB, T>(root: &Node<PB, T, T>) -> bool
+fn assert_tree_keys_fully_ordered<PB, T>(root: &Node<PB, T, T>)
 where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug + Clone,
@@ -1578,15 +1598,14 @@ where
     let keys = root.keys();
     let mut sorted_keys = keys.clone();
     sorted_keys.sort();
-    keys == sorted_keys
+    assert_eq!(keys, sorted_keys);
 }
 
 #[cfg(test)]
-fn all_node_keys_ordered_and_deduped<PB, T>(
+fn assert_all_node_keys_ordered_and_deduped<PB, T>(
     node: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool
-where
+) where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug,
 {
@@ -1594,57 +1613,54 @@ where
     sorted_keys.sort();
     sorted_keys.dedup();
     let nodes: Vec<_> = node.descendent_iter(pager_info).collect();
-    sorted_keys == node.keys()
-        && nodes
-            .into_iter()
-            .all(|node| all_node_keys_ordered_and_deduped(&node, pager_info))
+    assert_eq!(sorted_keys, node.keys());
+    nodes
+        .into_iter()
+        .for_each(|node| assert_all_node_keys_ordered_and_deduped(&node, pager_info));
 }
 
 #[cfg(test)]
-fn all_keys_in_range<PB, T>(
+fn assert_all_keys_in_range<PB, T>(
     node: &Node<PB, T, T>,
     min_exclusive: Option<&T>,
     max_inclusive: Option<&T>,
-) -> bool
-where
+) where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug,
 {
-    match (min_exclusive, max_inclusive) {
+    let res = match (min_exclusive, max_inclusive) {
         (Some(min), Some(max)) => node.keys().iter().all(|k| k > min && k <= max),
         (None, Some(max)) => node.keys().iter().all(|k| k <= max),
         (Some(min), None) => node.keys().iter().all(|k| k > min),
         (None, None) => unimplemented!("Should not ever happen"),
-    }
+    };
+    assert!(res);
 }
 
 #[cfg(test)]
-fn all_subnode_keys_ordered_relative_to_node_keys<PB, T>(
+fn assert_all_subnode_keys_ordered_relative_to_node_keys<PB, T>(
     node: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool
-where
+) where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     if node.is_leaf() {
-        return true;
+        return;
     }
     let mut min_key_exclusive = None;
     for (idx, k) in node.keys().into_iter().enumerate() {
         let max_key = k.clone();
-        if !all_keys_in_range(
+        assert_all_keys_in_range(
             &node
                 .descendent_node_at_logical_pos(idx as u16, pager_info)
                 .unwrap(),
             min_key_exclusive.as_ref(),
             Some(&max_key),
-        ) {
-            return false;
-        }
+        );
         min_key_exclusive = Some(k);
     }
-    all_keys_in_range(
+    assert_all_keys_in_range(
         &node
             .descendent_node_at_logical_pos(node.key_count(), pager_info)
             .unwrap(),
@@ -1654,11 +1670,10 @@ where
 }
 
 #[cfg(test)]
-fn all_nodes_sized_correctly<PB, T>(
+fn assert_all_nodes_sized_correctly<PB, T>(
     root: &Node<PB, T, T>,
     pager_info: &mut PagerInfo<PB, i32>,
-) -> bool
-where
+) where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug,
 {
@@ -1675,42 +1690,38 @@ where
         }
     }
 
-    fn all_nodes_sized_correctly_not_root<PB, T>(
+    fn assert_all_nodes_sized_correctly_not_root<PB, T>(
         node: &Node<PB, T, T>,
         pager_info: &mut PagerInfo<PB, i32>,
-    ) -> bool
-    where
+    ) where
         PB: PageBuffer,
         T: Ord + Serialize + DeserializeOwned + Debug,
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
-
-        let mut children_pass = || {
-            if node.is_leaf() {
-                true
-            } else {
-                let children: Vec<_> = node.descendent_iter(pager_info).collect();
-                children
-                    .iter()
-                    .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
-            }
-        };
-
+        println!("minimum_size: {third_size}");
+        println!("actual size: {}", node.page_used_space());
+        assert!(meets_minimum_size);
         let correct_cell_count = correct_cell_count(node);
-        let children_pass = children_pass();
-        meets_minimum_size && correct_cell_count && children_pass
+        assert!(correct_cell_count);
+
+        if node.is_node() {
+            let children: Vec<_> = node.descendent_iter(pager_info).collect();
+            children
+                .iter()
+                .for_each(|node| assert_all_nodes_sized_correctly_not_root(node, pager_info));
+        }
     }
 
     let children: Vec<_> = root.descendent_iter(pager_info).collect();
-    correct_cell_count(root)
-        && children
-            .iter()
-            .all(|node| all_nodes_sized_correctly_not_root(node, pager_info))
+    assert!(correct_cell_count(root));
+    children
+        .iter()
+        .for_each(|node| assert_all_nodes_sized_correctly_not_root(node, pager_info));
 }
 
 #[cfg(test)]
-fn all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>) -> bool
+fn assert_all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug,
@@ -1736,7 +1747,7 @@ where
 
     let mut levels = leaf_levels(root, 0, pager_info).into_iter();
     let first = levels.next().unwrap();
-    levels.all(|x| x == first)
+    assert!(levels.all(|x| x == first));
 }
 
 #[cfg(test)]
@@ -1745,13 +1756,11 @@ where
     PB: PageBuffer,
     T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
-    assert!(all_nodes_sized_correctly(node, pager_info));
-    assert!(tree_keys_fully_ordered(node));
-    assert!(all_node_keys_ordered_and_deduped(node, pager_info));
-    assert!(all_subnode_keys_ordered_relative_to_node_keys(
-        node, pager_info
-    ));
-    assert!(all_leaves_same_level(node, pager_info));
+    assert_all_nodes_sized_correctly(node, pager_info);
+    assert_tree_keys_fully_ordered(node);
+    assert_all_node_keys_ordered_and_deduped(node, pager_info);
+    assert_all_subnode_keys_ordered_relative_to_node_keys(node, pager_info);
+    assert_all_leaves_same_level(node, pager_info);
 }
 
 #[cfg(test)]
@@ -1772,9 +1781,9 @@ mod tests {
     use serialize::serialized_size;
 
     use super::{
-        all_leaves_same_level, all_node_keys_ordered_and_deduped, all_nodes_sized_correctly,
-        all_subnode_keys_ordered_relative_to_node_keys, assert_subtree_valid,
-        tree_keys_fully_ordered, TEST_BUFFER_SIZE,
+        assert_all_leaves_same_level, assert_all_node_keys_ordered_and_deduped,
+        assert_all_nodes_sized_correctly, assert_all_subnode_keys_ordered_relative_to_node_keys,
+        assert_subtree_valid, assert_tree_keys_fully_ordered, TEST_BUFFER_SIZE,
     };
 
     use crate::pager::{PageBuffer, PageId, Pager, CELL_POINTER_SIZE};
@@ -1806,7 +1815,10 @@ mod tests {
         BTree::<i32, TestPageBuffer, u32, u32>::from_description(description, pager_ref, backing_fd)
     }
 
-    fn init_tree_in_file(filename: &str) -> BTree<i32, TestPageBuffer, u32, u32> {
+    fn init_tree_in_file<T>(filename: &str) -> BTree<i32, TestPageBuffer, T, T>
+    where
+        T: Ord + Serialize + DeserializeOwned + Debug,
+    {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
@@ -2007,8 +2019,8 @@ mod tests {
     }
 
     #[test]
-    fn leaf_root_insertion() {
-        let filename = "leaf_root_insertion.test";
+    fn leaf_root_insertion_u32() {
+        let filename = "leaf_root_insertion_u32.test";
         let expected_tree = "
             0: L[1, 2, 3, 4, 5]
         ";
@@ -2019,6 +2031,28 @@ mod tests {
         for i in 1..=5 {
             tree.insert(i, i).unwrap();
         }
+
+        assert_eq!(&tree.to_description(), &expected_tree);
+        assert_subtree_valid(&tree.root, &mut tree.pager_info());
+
+        drop(tree);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn leaf_root_insertion_i64() {
+        let filename = "leaf_root_insertion_i64.test";
+        let expected_tree = "
+            0: L[1]
+        ";
+        let expected_tree = trim_lines(expected_tree);
+
+        let mut tree = init_tree_in_file(filename);
+
+        tree.insert(1i64, 1i64).unwrap();
+        //for i in 1i64..=4 {
+        //    tree.insert(i, i).unwrap();
+        //}
 
         assert_eq!(&tree.to_description(), &expected_tree);
         assert_subtree_valid(&tree.root, &mut tree.pager_info());
@@ -2856,18 +2890,22 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct ReferenceBTree<T> {
         ref_tree: BTreeMap<T, T>,
+        type_str: String,
     }
-    impl<T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static>
-        ReferenceStateMachine for ReferenceBTree<T>
+    impl<
+            T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static + ToString,
+        > ReferenceStateMachine for ReferenceBTree<T>
     {
         type State = Self;
         type Transition = TreeOperation<T>;
 
         fn init_state() -> BoxedStrategy<Self::State> {
-            let ref_tree = ReferenceBTree {
-                ref_tree: BTreeMap::new(),
-            };
-            Just(ref_tree).boxed()
+            T::arbitrary()
+                .prop_map(|t| ReferenceBTree {
+                    ref_tree: BTreeMap::new(),
+                    type_str: t.to_string(),
+                })
+                .boxed()
         }
 
         fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
@@ -2914,18 +2952,19 @@ mod tests {
 
     impl<
             PB: PageBuffer,
-            T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static,
+            T: Ord + Serialize + DeserializeOwned + Debug + Clone + Arbitrary + 'static + ToString,
         > StateMachineTest for BTree<i32, PB, T, T>
     {
         type SystemUnderTest = BTreeTestWrapper<PB, T>;
         type Reference = ReferenceBTree<T>;
 
         fn init_test(
-            _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+            ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) -> Self::SystemUnderTest {
-            let filename = "btree_state_machine_u32_u32.test";
-            let t = init_tree_in_file_with_pb(filename);
-            BTreeTestWrapper::new(t, filename.to_string())
+            let id = &ref_state.type_str;
+            let filename = format!("btree_state_machine_{id}_{id}.test");
+            let t = init_tree_in_file_with_pb(&filename);
+            BTreeTestWrapper::new(t, filename)
         }
 
         fn apply(
@@ -2937,12 +2976,12 @@ mod tests {
                 TreeOperation::Remove(k) => {
                     let res = state.tree.remove(&k).unwrap();
                     assert!(res.is_some());
-                    //println!("{}", state.tree.to_description());
+                    println!("{}", state.tree.to_description());
                     assert!(state.tree.get(&k).unwrap().is_none());
                 }
                 TreeOperation::Insert(k, v) => {
                     state.tree.insert(k.clone(), v.clone()).unwrap();
-                    //println!("{}", state.tree.to_description());
+                    println!("{}", state.tree.to_description());
                     assert_eq!(state.tree.get(&k).unwrap(), Some(v));
                 }
             };
@@ -2953,27 +2992,21 @@ mod tests {
             state: &Self::SystemUnderTest,
             ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         ) {
-            assert!(tree_keys_fully_ordered(&state.tree.root));
+            assert_tree_keys_fully_ordered(&state.tree.root);
             assert_eq!(
                 first_nonretrievable_inserted_value(&state.tree, &ref_state.ref_tree),
                 None
             );
-            assert!(all_node_keys_ordered_and_deduped(
+            assert_all_node_keys_ordered_and_deduped(
                 &state.tree.root,
-                &mut state.tree.pager_info()
-            ));
-            assert!(all_subnode_keys_ordered_relative_to_node_keys(
+                &mut state.tree.pager_info(),
+            );
+            assert_all_subnode_keys_ordered_relative_to_node_keys(
                 &state.tree.root,
-                &mut state.tree.pager_info()
-            ));
-            assert!(all_nodes_sized_correctly(
-                &state.tree.root,
-                &mut state.tree.pager_info()
-            ));
-            assert!(all_leaves_same_level(
-                &state.tree.root,
-                &mut state.tree.pager_info()
-            ));
+                &mut state.tree.pager_info(),
+            );
+            assert_all_nodes_sized_correctly(&state.tree.root, &mut state.tree.pager_info());
+            assert_all_leaves_same_level(&state.tree.root, &mut state.tree.pager_info());
         }
 
         fn teardown(state: Self::SystemUnderTest) {
@@ -2986,14 +3019,17 @@ mod tests {
         #![proptest_config(ProptestConfig {
              // When debugging, enable verbose mode to make the state machine test print the
              // transitions for each case.
-             // verbose: 1,
+             verbose: 1,
              max_shrink_iters: 8192,
              cases: 1024,
              .. ProptestConfig::default()
          })]
 
          #[test] #[ignore] // expensive test
-         fn full_tree_test(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
+         fn full_tree_test_u32(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
+
+         #[test]
+         fn full_tree_test_i64(sequential 1..512=> BTree<i32, TestPageBuffer, i64, i64>);
     }
 
     #[test]
