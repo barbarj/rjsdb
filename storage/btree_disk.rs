@@ -899,11 +899,13 @@ impl<
                 let (parent_split_key, mut parent_new_node) = self.split_node(pager_info)?;
                 assert!(parent_new_node.is_node());
 
-                if logical_pos < self.key_count() {
+                if split_key <= parent_split_key {
                     self.insert_split_results_into_node(logical_pos, &split_key, new_page_id)?
                 } else {
                     // after the split, there's one less key between the two nodes, so account for
                     // that
+                    println!("logical_pos: {logical_pos}");
+                    println!("key_count: {}", self.key_count());
                     let pos = logical_pos - self.key_count() - 1;
                     parent_new_node.insert_split_results_into_node(pos, &split_key, new_page_id)?;
                 }
@@ -2941,7 +2943,7 @@ mod tests {
          })]
 
          #[test]
-         fn full_tree_test(sequential 1..24 => BTree<i32, TestPageBuffer, u32, u32>);
+         fn full_tree_test(sequential 1..128 => BTree<i32, TestPageBuffer, u32, u32>);
     }
 
     #[test]
