@@ -907,9 +907,13 @@ impl<
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        let first_logical_idx = self.first_logical_pos_past_size(self.leaf_split_point());
-        assert!(first_logical_idx > 0);
-        let split_key = self.key_from_leaf(first_logical_idx - 1)?;
+        // TODO: Make this take into account insertion size
+        let size_goal = self.leaf_space_used_ignoring_siblings() / 2;
+        let split_key_pos = self
+            .leaf_find_logical_position_meeting_size_goal(0, |_, _| size_goal)?
+            .unwrap();
+
+        let split_key = self.key_from_leaf(split_key_pos)?;
 
         // get new page
         let mut new_node = Self::init_leaf(pager_info)?;
@@ -921,7 +925,7 @@ impl<
 
         // copy cells to new page and remove cells from old page
         let key_count = self.key_count();
-        Self::move_cells(self, &mut new_node, first_logical_idx..=key_count - 1, 0)?;
+        Self::move_cells(self, &mut new_node, split_key_pos + 1..=key_count - 1, 0)?;
 
         Ok((split_key, new_node))
     }
@@ -1193,6 +1197,24 @@ impl<
         Ok(())
     }
 
+    fn leaf_find_logical_position_meeting_size_goal(
+        &self,
+        starting_size: u16,
+        size_goal_fn: impl Fn(&K, &V) -> u16,
+    ) -> Result<Option<u16>> {
+        assert!(self.is_leaf());
+        let mut used_space = starting_size;
+        for i in 0..self.key_count() {
+            let (k, v) = self.leaf_kv_at_pos(i)?;
+            let increment = serialized_size(&(&k, &v)) as u16 + CELL_POINTER_SIZE;
+            used_space += increment;
+            if used_space >= size_goal_fn(&k, &v) {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
+    }
+
     fn child_leaf_steal_from_left_sibling<Fd: AsRawFd + Copy>(
         &mut self,
         right_child_logical_pos: u16,
@@ -1210,19 +1232,9 @@ impl<
             + right_child.leaf_space_used_ignoring_siblings())
             / 2;
 
-        let mut new_split_pos = None;
-        let mut used_space = 0;
-        for i in 0..left_child.key_count() {
-            let (k, v) = left_child.leaf_kv_at_pos(i)?;
-            let increment = serialized_size(&(k, v)) as u16 + CELL_POINTER_SIZE;
-            used_space += increment;
-            if used_space >= size_goal {
-                new_split_pos = Some(i);
-                break;
-            }
-        }
-
-        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_pos = left_child
+            .leaf_find_logical_position_meeting_size_goal(0, |_, _| size_goal)?
+            .expect("Should always have a value");
         let new_split_key = left_child.key_at_pos(new_split_pos)?;
         let from_range = new_split_pos + 1..=left_child.key_count() - 1;
         Self::move_cells(&mut left_child, &mut right_child, from_range, 0)?;
@@ -1248,19 +1260,12 @@ impl<
             + right_child.leaf_space_used_ignoring_siblings())
             / 2;
 
-        let mut new_split_pos = None;
-        let mut used_space = left_child.leaf_space_used_ignoring_siblings();
-        for i in 0..right_child.key_count() {
-            let (k, v) = right_child.leaf_kv_at_pos(i)?;
-            let increment = serialized_size(&(k, v)) as u16 + CELL_POINTER_SIZE;
-            used_space += increment;
-            if used_space >= size_goal {
-                new_split_pos = Some(i);
-                break;
-            }
-        }
-
-        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_pos = right_child
+            .leaf_find_logical_position_meeting_size_goal(
+                left_child.leaf_space_used_ignoring_siblings(),
+                |_, _| size_goal,
+            )?
+            .expect("Should always have a value");
         let new_split_key = right_child.key_at_pos(new_split_pos)?;
         let from_range = 0..=new_split_pos;
         let left_child_key_count = left_child.key_count();
@@ -2328,9 +2333,9 @@ mod tests {
     fn leaf_root_split() {
         let filename = "leaf_root_split.test";
         let expected_tree = "
-            0: [3] (2)
-            0->0: L[1, 2, 3]
-            0->1: L[4, 5, 6, 7, 8] 
+            0: [4] (2)
+            0->0: L[1, 2, 3, 4]
+            0->1: L[5, 6, 7, 8] 
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -2364,14 +2369,14 @@ mod tests {
         let expected_tree = "
             0: [12] (2)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 18] (3)
+            0->1: [15, 19] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9]
             0->0->3: L[10, 11, 12] 
             0->1->0: L[13, 14, 15] 
-            0->1->1: L[16, 17, 18] 
-            0->1->2: L[19, 20, 21, 22, 23]
+            0->1->1: L[16, 17, 18, 19] 
+            0->1->2: L[20, 21, 22, 23]
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -2396,10 +2401,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [3, 6] (3)
+            0: [3, 7] (3)
             0->0: L[1, 2, 3] 
-            0->1: L[4, 5, 6] 
-            0->2: L[7, 8, 9, 10, 11] 
+            0->1: L[4, 5, 6, 7] 
+            0->2: L[8, 9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -2422,10 +2427,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [3, 7] (3)
+            0: [3, 8] (3)
             0->0: L[1, 2, 3] 
-            0->1: L[4, 5, 6, 7] 
-            0->2: L[8, 9, 10, 11] 
+            0->1: L[4, 5, 6, 7, 8] 
+            0->2: L[9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
@@ -2460,15 +2465,15 @@ mod tests {
         let output_tree = "
             0: [12, 26] (3)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 18, 23] (4)
+            0->1: [15, 20, 23] (4)
             0->2: [29, 32] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9] 
             0->0->3: L[10, 11, 12] 
             0->1->0: L[13, 14, 15] 
-            0->1->1: L[16, 17, 18] 
-            0->1->2: L[19, 20, 21, 22, 23] 
+            0->1->1: L[16, 17, 18, 19, 20] 
+            0->1->2: L[21, 22, 23] 
             0->1->3: L[24, 25, 26] 
             0->2->0: L[17, 28, 29] 
             0->2->1: L[30, 31, 32] 
@@ -2510,7 +2515,7 @@ mod tests {
             0: [12, 24] (3)
             0->0: [3, 6, 9] (4)
             0->1: [15, 18, 21] (4)
-            0->2: [27, 32] (3)
+            0->2: [28, 32] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9] 
@@ -2519,8 +2524,8 @@ mod tests {
             0->1->1: L[16, 17, 18] 
             0->1->2: L[19, 20, 21] 
             0->1->3: L[22, 23, 24] 
-            0->2->0: L[25, 26, 27] 
-            0->2->1: L[28, 29, 30, 31, 32] 
+            0->2->0: L[25, 26, 27, 28] 
+            0->2->1: L[29, 30, 31, 32] 
             0->2->2: L[33, 34, 35] 
         ";
         let output_tree = trim_lines(output_tree);
