@@ -787,7 +787,9 @@ impl<
 
         println!("{:?}", self.keys());
         println!("logical insertion pos: {logical_insertion_pos}");
+        println!("total space used: {}", self.page_used_space());
         for i in 0..self.key_count() {
+            println!("i: {i}");
             if i == logical_insertion_pos {
                 // at i == logical_insertion_pos, we need to try 2 positions.
                 // - using the key_to_be_inserted as a split key
@@ -811,31 +813,30 @@ impl<
                 // treated similarly to the rest
             }
 
-            let this_key = self.key_at_pos(i)?;
-            let space_used_minus_this_key =
-                self.page_used_space() - serialized_size(&this_key) as u16 - CELL_POINTER_SIZE;
-            let size_goal = if logical_insertion_pos <= i {
-                // will be inserted left
-                (space_used_minus_this_key - insertion_size) / 2
-            } else {
-                // will be inserted right
-                ((space_used_minus_this_key + insertion_size) / 2) + insertion_size
+            let this_key_used_space =
+                serialized_size(&self.key_at_pos(i)?) as u16 + CELL_POINTER_SIZE;
+            println!("this key used space: {this_key_used_space}");
+            let space_used_minus_this_key = self.page_used_space() - this_key_used_space;
+            println!("space minus key: {space_used_minus_this_key}");
+            let size_goal = match i.cmp(&logical_insertion_pos) {
+                Ordering::Greater => (space_used_minus_this_key - insertion_size) / 2,
+                Ordering::Equal => unreachable!("should be handled by condition above"),
+                Ordering::Less => (space_used_minus_this_key / 2) + insertion_size,
             };
 
             // determine if this would put us at or past that page size goal
             let increment = self.space_used_by_key_and_page_id_at_logical_pos(i);
             used_space += increment;
 
-            println!("i: {i}");
             println!("insertion_size: {insertion_size}");
             println!("size goal: {size_goal}");
             println!("used_space: {used_space}");
 
             if used_space >= size_goal {
                 if i >= logical_insertion_pos {
-                    return Ok(SplitDetermination::InsertLeft(i + 1));
+                    return Ok(SplitDetermination::InsertLeft(i));
                 } else {
-                    return Ok(SplitDetermination::InsertRight(i + 1));
+                    return Ok(SplitDetermination::InsertRight(i));
                 }
             }
         }
@@ -861,7 +862,7 @@ impl<
         // that before asking for the key
         let (split_key, move_start_logical_pos, move_offset) = match split_determination {
             SplitDetermination::InsertLeft(pos) | SplitDetermination::InsertRight(pos) => {
-                (self.key_from_inner_node(pos)?, pos, 0)
+                (self.key_from_inner_node(pos)?, pos + 1, 0)
             }
             SplitDetermination::DontInsert(pos) => (key_to_be_inserted.clone(), pos, 1),
         };
@@ -886,7 +887,7 @@ impl<
                 self.remove_trailing_key(split_logical_pos);
                 self.insert_split_key_and_page_id_into_node(
                     logical_insertion_pos,
-                    &split_key,
+                    key_to_be_inserted,
                     new_page_id,
                 )?;
             }
@@ -895,7 +896,7 @@ impl<
                 let insert_pos = logical_insertion_pos - self.key_count() - 1;
                 new_node.insert_split_key_and_page_id_into_node(
                     insert_pos,
-                    &split_key,
+                    key_to_be_inserted,
                     new_page_id,
                 )?;
             }
