@@ -1231,6 +1231,50 @@ impl<
         Ok(())
     }
 
+    fn child_leaf_steal_from_right_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        left_child_logical_pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        assert!(left_child_logical_pos < self.descendent_count() - 1);
+
+        let mut left_child =
+            self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
+        let mut right_child =
+            self.descendent_node_at_logical_pos(left_child_logical_pos + 1, pager_info)?;
+        assert!(left_child.is_leaf());
+
+        let size_goal = (left_child.leaf_space_used_ignoring_siblings()
+            + right_child.leaf_space_used_ignoring_siblings())
+            / 2;
+
+        let mut new_split_pos = None;
+        let mut used_space = left_child.leaf_space_used_ignoring_siblings();
+        for i in 0..right_child.key_count() {
+            let (k, v) = right_child.leaf_kv_at_pos(i)?;
+            let increment = serialized_size(&(k, v)) as u16 + CELL_POINTER_SIZE;
+            used_space += increment;
+            if used_space >= size_goal {
+                new_split_pos = Some(i);
+                break;
+            }
+        }
+
+        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_key = right_child.key_at_pos(new_split_pos)?;
+        let from_range = 0..=new_split_pos;
+        let left_child_key_count = left_child.key_count();
+        Self::move_cells(
+            &mut right_child,
+            &mut left_child,
+            from_range,
+            left_child_key_count,
+        )?;
+
+        self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
+        Ok(())
+    }
+
     fn child_node_steal_from_left_sibling<Fd: AsRawFd + Copy>(
         &mut self,
         right_child_logical_pos: u16,
@@ -1281,6 +1325,63 @@ impl<
         Ok(())
     }
 
+    fn child_node_steal_from_right_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        left_child_logical_pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        assert!(left_child_logical_pos < self.descendent_count() - 1);
+
+        let dummy_id: PageId = 0;
+        let id_size = serialized_size(&dummy_id) as u16;
+        let id_used_space = id_size + CELL_POINTER_SIZE;
+
+        let old_split_key = self.key_at_pos(left_child_logical_pos)?;
+
+        let mut left_child =
+            self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
+        let mut right_child =
+            self.descendent_node_at_logical_pos(left_child_logical_pos + 1, pager_info)?;
+        assert!(left_child.is_node());
+
+        let combined_size = left_child.page_used_space()
+            + right_child.page_used_space()
+            + serialized_size(&old_split_key) as u16
+            + CELL_POINTER_SIZE;
+
+        let mut new_split_pos = None;
+        let mut used_space = left_child.page_used_space()
+            + serialized_size(&old_split_key) as u16
+            + CELL_POINTER_SIZE;
+        for i in 0..right_child.key_count() {
+            let current_key = right_child.key_at_pos(i)?;
+            let key_space_used = serialized_size(&current_key) as u16 + CELL_POINTER_SIZE;
+            let size_goal = (combined_size - key_space_used) / 2;
+            used_space += id_used_space;
+            if used_space >= size_goal {
+                new_split_pos = Some(i);
+                break;
+            }
+            used_space += key_space_used;
+        }
+
+        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_key = right_child.key_at_pos(new_split_pos)?;
+        let from_range = 0..=new_split_pos;
+        let left_child_key_count = left_child.key_count();
+        left_child.insert_interior_split_key(left_child_key_count, &old_split_key)?;
+        Self::move_cells(
+            &mut right_child,
+            &mut left_child,
+            from_range.clone(),
+            left_child_key_count + 1,
+        )?;
+        right_child.remove_leading_key();
+
+        self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
+        Ok(())
+    }
+
     // TODO: far into the future, figure out how to handle cases where due to large cells, stealing
     // from a sibling doesn't bring the node being filled to the minimum size
     fn child_steal_from_left_sibling<Fd: AsRawFd + Copy>(
@@ -1304,44 +1405,12 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<()> {
         assert!(left_child_logical_pos < self.descendent_count() - 1);
-
-        let mut left_child =
-            self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
-        let mut right_child =
-            self.descendent_node_at_logical_pos(left_child_logical_pos + 1, pager_info)?;
-        let keep_point = if right_child.is_leaf() {
-            Self::leaf_siblings_space_used() + Self::amount_to_steal(&right_child, &left_child)
-        } else {
-            Self::amount_to_steal(&right_child, &left_child)
-        };
-        let first_keep_pos = right_child.first_logical_pos_past_size(keep_point);
-
-        // get split key
-        let new_split_key = right_child.key_at_pos(first_keep_pos - 1)?;
-
-        // insert old split key
+        let left_child = self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
         if left_child.is_node() {
-            let old_split_key = self.key_at_pos(left_child_logical_pos)?;
-            left_child.insert_interior_split_key(left_child.key_count(), &old_split_key)?;
-        }
-
-        let logical_start = if left_child.is_node() {
-            left_child.key_count() + 1
+            self.child_node_steal_from_right_sibling(left_child_logical_pos, pager_info)
         } else {
-            left_child.key_count()
-        };
-        Self::move_cells(
-            &mut right_child,
-            &mut left_child,
-            0..=first_keep_pos - 1,
-            logical_start,
-        )?;
-
-        self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
-        if right_child.is_node() {
-            right_child.remove_leading_key();
+            self.child_leaf_steal_from_right_sibling(left_child_logical_pos, pager_info)
         }
-        Ok(())
     }
 
     fn remove<Fd: AsRawFd + Copy>(
@@ -1893,8 +1962,8 @@ fn assert_all_nodes_sized_correctly<PB, T>(
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
-        println!("minimum_size: {third_size}");
-        println!("actual size: {}", node.page_used_space());
+        //        println!("minimum_size: {third_size}");
+        //       println!("actual size: {}", node.page_used_space());
         assert!(meets_minimum_size);
         let correct_cell_count = correct_cell_count(node);
         assert!(correct_cell_count);
@@ -2735,10 +2804,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [7, 11] (3)
+            0: [7, 12] (3)
             0->0: L[1, 2, 3, 4, 5, 6, 7] 
-            0->1: L[8, 10, 11] 
-            0->2: L[12, 13, 14, 15] 
+            0->1: L[8, 10, 11, 12] 
+            0->2: L[13, 14, 15] 
         ";
         let output_tree = trim_lines(output_tree);
 
@@ -2864,10 +2933,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [11, 19] (3)
+            0: [11, 21] (3)
             0->0: [1, 3, 5, 7, 9] (6)
-            0->1: [15, 17] (3)
-            0->2: [21, 23, 25] (4)
+            0->1: [15, 17, 19] (4)
+            0->2: [23, 25] (3)
             0->0->0: L[0, 1] 
             0->0->1: L[2, 3] 
             0->0->2: L[4, 5] 
@@ -2877,10 +2946,10 @@ mod tests {
             0->1->0: L[12, 14, 15] 
             0->1->1: L[16, 17] 
             0->1->2: L[18, 19]
-            0->2->0: L[20, 21] 
-            0->2->1: L[22, 23] 
-            0->2->2: L[24, 25] 
-            0->2->3: L[26, 27] 
+            0->1->3: L[20, 21] 
+            0->2->0: L[22, 23] 
+            0->2->1: L[24, 25] 
+            0->2->2: L[26, 27] 
         ";
         let output_tree = trim_lines(output_tree);
 
