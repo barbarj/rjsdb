@@ -786,11 +786,7 @@ impl<
         let insertion_size = key_size + id_size + (CELL_POINTER_SIZE * 2);
         let mut used_space = 0;
 
-        println!("{:?}", self.keys());
-        println!("logical insertion pos: {logical_insertion_pos}");
-        println!("total space used: {}", self.page_used_space());
         for i in 0..self.key_count() {
-            println!("i: {i}");
             if i == logical_insertion_pos {
                 // at i == logical_insertion_pos, we need to try 2 positions.
                 // - using the key_to_be_inserted as a split key
@@ -799,12 +795,9 @@ impl<
                 // if this key to be inserted would be used as a split key, we only have a page id
                 // to add to the right
                 let size_goal = (self.page_used_space() + id_used_space) / 2;
-                println!("size goal when i == logical_insertion_pos: {size_goal}");
                 used_space += id_used_space;
-                println!("used space: {used_space}");
 
                 if used_space >= size_goal {
-                    println!("returning dont insert");
                     return Ok(SplitDetermination::DontInsert(i));
                 }
 
@@ -816,16 +809,10 @@ impl<
 
             let this_key_used_space =
                 serialized_size(&self.key_at_pos(i)?) as u16 + CELL_POINTER_SIZE;
-            println!("this key used space: {this_key_used_space}");
             let space_used_minus_this_key = self.page_used_space() - this_key_used_space;
-            println!("space minus key: {space_used_minus_this_key}");
             let size_goal = (space_used_minus_this_key + insertion_size) / 2;
             // determine if splitting here would put us at or past that page size goal
             used_space += id_used_space; // the id would stay, so consider that space
-
-            println!("insertion_size: {insertion_size}");
-            println!("size goal: {size_goal}");
-            println!("used_space: {used_space}");
 
             if used_space >= size_goal {
                 if i >= logical_insertion_pos {
@@ -875,9 +862,6 @@ impl<
             0,
             move_offset,
         )?;
-        // TODO: In case of DontInsert, need to get the page id at pos 0 from right, replace it with new
-        // page id, and stick the page id we grabbed at the end of left. Can I instead get the
-        // move_cells call to offset by 1 for me so the id isn't moved?
 
         match split_determination {
             SplitDetermination::InsertLeft(split_logical_pos) => {
@@ -897,14 +881,16 @@ impl<
                     new_page_id,
                 )?;
             }
-            SplitDetermination::DontInsert(pos) => {
-                println!("logical_insert_pos: {logical_insertion_pos}");
-                println!("don't insert pos: {pos}");
+            SplitDetermination::DontInsert(_) => {
                 new_node.insert_split_page_id_into_node(0, new_page_id)?
             }
         }
 
         Ok((split_key, new_node))
+    }
+
+    fn leaf_space_used_ignoring_siblings(&self) -> u16 {
+        self.page_used_space() - Self::leaf_siblings_space_used()
     }
 
     fn leaf_siblings_space_used() -> u16 {
@@ -1207,6 +1193,94 @@ impl<
         Ok(())
     }
 
+    fn child_leaf_steal_from_left_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        right_child_logical_pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        assert!(right_child_logical_pos > 0);
+
+        let mut left_child =
+            self.descendent_node_at_logical_pos(right_child_logical_pos - 1, pager_info)?;
+        let mut right_child =
+            self.descendent_node_at_logical_pos(right_child_logical_pos, pager_info)?;
+        assert!(left_child.is_leaf());
+
+        let size_goal = (left_child.leaf_space_used_ignoring_siblings()
+            + right_child.leaf_space_used_ignoring_siblings())
+            / 2;
+
+        let mut new_split_pos = None;
+        let mut used_space = 0;
+        for i in 0..left_child.key_count() {
+            let (k, v) = left_child.leaf_kv_at_pos(i)?;
+            let increment = serialized_size(&(k, v)) as u16 + CELL_POINTER_SIZE;
+            used_space += increment;
+            if used_space >= size_goal {
+                new_split_pos = Some(i);
+                break;
+            }
+        }
+
+        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_key = left_child.key_at_pos(new_split_pos)?;
+        let from_range = new_split_pos + 1..=left_child.key_count() - 1;
+        Self::move_cells(&mut left_child, &mut right_child, from_range, 0)?;
+
+        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
+        Ok(())
+    }
+
+    fn child_node_steal_from_left_sibling<Fd: AsRawFd + Copy>(
+        &mut self,
+        right_child_logical_pos: u16,
+        pager_info: &mut PagerInfo<PB, Fd>,
+    ) -> Result<()> {
+        assert!(right_child_logical_pos > 0);
+
+        let dummy_id: PageId = 0;
+        let id_size = serialized_size(&dummy_id) as u16;
+        let id_used_space = id_size + CELL_POINTER_SIZE;
+
+        let old_split_key = self.key_at_pos(right_child_logical_pos - 1)?;
+
+        let mut left_child =
+            self.descendent_node_at_logical_pos(right_child_logical_pos - 1, pager_info)?;
+        let mut right_child =
+            self.descendent_node_at_logical_pos(right_child_logical_pos, pager_info)?;
+        assert!(left_child.is_node());
+
+        let combined_size = left_child.page_used_space()
+            + right_child.page_used_space()
+            + serialized_size(&old_split_key) as u16
+            + CELL_POINTER_SIZE;
+
+        let mut new_split_pos = None;
+        let mut used_space = 0;
+        for i in 0..left_child.key_count() {
+            let current_key = left_child.key_at_pos(i)?;
+            let key_space_used = serialized_size(&current_key) as u16 + CELL_POINTER_SIZE;
+            let size_goal = (combined_size - key_space_used) / 2;
+            used_space += id_used_space;
+            if used_space >= size_goal {
+                new_split_pos = Some(i);
+                break;
+            }
+            used_space += key_space_used;
+        }
+
+        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_key = left_child.key_at_pos(new_split_pos)?;
+        let from_range = new_split_pos + 1..=left_child.key_count();
+        Self::move_cells(&mut left_child, &mut right_child, from_range.clone(), 0)?;
+
+        let key_insert_pos = from_range.len() - 1;
+        right_child.insert_interior_split_key(key_insert_pos as u16, &old_split_key)?;
+        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
+        left_child.remove_trailing_key(new_split_pos);
+        Ok(())
+    }
+
     // TODO: far into the future, figure out how to handle cases where due to large cells, stealing
     // from a sibling doesn't bring the node being filled to the minimum size
     fn child_steal_from_left_sibling<Fd: AsRawFd + Copy>(
@@ -1215,49 +1289,13 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<()> {
         assert!(right_child_logical_pos > 0);
-
-        let old_split_key = self.key_at_pos(right_child_logical_pos - 1)?;
-
-        let mut left_child =
-            self.descendent_node_at_logical_pos(right_child_logical_pos - 1, pager_info)?;
-        let mut right_child =
+        let right_child =
             self.descendent_node_at_logical_pos(right_child_logical_pos, pager_info)?;
-
-        let initial_size = if left_child.is_node() {
-            // We need to account for the size of the split key we'll add. However, we don't yet
-            // know what that key will be, or its size, so we'll use the old split key as a
-            // stand-in to hopefully get us close.
-            serialized_size(&old_split_key) as u16
-        } else {
-            0
-        };
-        let first_steal_pos = left_child.first_logical_pos_from_right_within_half_increment(
-            Self::amount_to_steal(&left_child, &right_child),
-            initial_size,
-        );
-
-        // get split key
-        let new_split_key = left_child.key_at_pos(first_steal_pos - 1)?;
-
-        // move cells
-        let from_range = if left_child.is_node() {
-            first_steal_pos..=left_child.key_count()
-        } else {
-            first_steal_pos..=left_child.key_count() - 1
-        };
-
-        Self::move_cells(&mut left_child, &mut right_child, from_range.clone(), 0)?;
-
         if right_child.is_node() {
-            let key_insert_pos = from_range.len() - 1;
-            right_child.insert_interior_split_key(key_insert_pos as u16, &old_split_key)?;
+            self.child_node_steal_from_left_sibling(right_child_logical_pos, pager_info)
+        } else {
+            self.child_leaf_steal_from_left_sibling(right_child_logical_pos, pager_info)
         }
-
-        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
-        if left_child.is_node() {
-            left_child.remove_trailing_key(first_steal_pos - 1);
-        }
-        Ok(())
     }
 
     fn child_steal_from_right_sibling<Fd: AsRawFd + Copy>(
@@ -2769,17 +2807,17 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [5, 15] (3)
-            0->0: [1, 3] (3)
-            0->1: [7, 9, 13] (4)
+            0: [7, 15] (3)
+            0->0: [1, 3, 5] (4)
+            0->1: [9, 13] (3)
             0->2: [17, 19, 21, 23, 25] (6)
             0->0->0: L[0, 1] 
             0->0->1: L[2, 3] 
             0->0->2: L[4, 5] 
-            0->1->0: L[6, 7] 
-            0->1->1: L[8, 9] 
-            0->1->2: L[10, 11, 12] 
-            0->1->3: L[14, 15] 
+            0->0->3: L[6, 7] 
+            0->1->0: L[8, 9] 
+            0->1->1: L[10, 11, 12] 
+            0->1->2: L[14, 15] 
             0->2->0: L[16, 17] 
             0->2->1: L[18, 19] 
             0->2->2: L[20, 21] 
@@ -3254,7 +3292,6 @@ mod tests {
             init_tree_from_description_in_file(filename, &input);
         t.insert(12, 0).unwrap();
 
-        println!("{}", t.to_description());
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
@@ -3278,7 +3315,6 @@ mod tests {
             init_tree_from_description_in_file(filename, &input);
         t.insert(18, 18).unwrap();
 
-        println!("{}", t.to_description());
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
