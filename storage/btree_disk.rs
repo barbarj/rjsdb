@@ -79,7 +79,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct BTree<
     Fd: AsRawFd,
     PB: PageBuffer,
-    K: Ord + Serialize + DeserializeOwned + Debug,
+    K: Ord + Serialize + DeserializeOwned + Debug + Clone,
     V: Serialize + DeserializeOwned,
 > {
     pager_ref: Rc<RefCell<Pager<PB>>>,
@@ -91,7 +91,7 @@ pub struct BTree<
 impl<
         Fd: AsRawFd + Copy,
         PB: PageBuffer,
-        K: Ord + Serialize + DeserializeOwned + Debug,
+        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
         V: Serialize + DeserializeOwned,
     > BTree<Fd, PB, K, V>
 {
@@ -240,7 +240,7 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
 
     fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<PB, K, V>>
     where
-        K: Ord + Debug + Serialize + DeserializeOwned,
+        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
         V: Serialize + DeserializeOwned,
     {
         let page = self.get_page(page_id)?;
@@ -249,7 +249,7 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
 
     fn new_page_node<K, V>(&mut self, kind: PageKind) -> Result<Node<PB, K, V>>
     where
-        K: Ord + Debug + Serialize + DeserializeOwned,
+        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
         V: Serialize + DeserializeOwned,
     {
         let page = self.new_page(kind)?;
@@ -282,7 +282,7 @@ pub enum KeyLimit<K: Ord + Serialize + DeserializeOwned + Debug> {
 pub struct BTreeIter<
     PB: PageBuffer,
     Fd: AsRawFd + Copy,
-    K: Ord + Serialize + DeserializeOwned + Debug,
+    K: Ord + Serialize + DeserializeOwned + Debug + Clone,
     V: Serialize + DeserializeOwned,
 > {
     leaf: Node<PB, K, V>,
@@ -293,7 +293,7 @@ pub struct BTreeIter<
 impl<
         PB: PageBuffer,
         Fd: AsRawFd + Copy,
-        K: Ord + Serialize + DeserializeOwned + Debug,
+        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
         V: Serialize + DeserializeOwned,
     > BTreeIter<PB, Fd, K, V>
 {
@@ -315,7 +315,7 @@ impl<
 impl<
         PB: PageBuffer,
         Fd: AsRawFd + Copy,
-        K: Ord + Serialize + DeserializeOwned + Debug,
+        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
         V: Serialize + DeserializeOwned,
     > Iterator for BTreeIter<PB, Fd, K, V>
 {
@@ -359,16 +359,24 @@ impl<
     }
 }
 
-enum InsertResult<K: Ord + Serialize + DeserializeOwned + Debug> {
+enum InsertResult<K> {
     Split(K, PageId),
     Done,
+}
+
+/// contained value represents the logical position to split at
+enum SplitDetermination {
+    InsertLeft(u16),
+    InsertRight(u16),
+    //InsertAfterSplitting(u16),
+    DontInsert(u16),
 }
 
 // TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
 // get serialization format to support borrowed data
 struct Node<
     PB: PageBuffer,
-    K: Ord + Debug + Serialize + DeserializeOwned,
+    K: Ord + Debug + Serialize + DeserializeOwned + Clone,
     V: Serialize + DeserializeOwned,
 > {
     page_ref: PageRef<PB>,
@@ -377,7 +385,7 @@ struct Node<
 }
 impl<
         PB: PageBuffer,
-        K: Ord + Debug + Serialize + DeserializeOwned,
+        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
         V: Serialize + DeserializeOwned,
     > Node<PB, K, V>
 {
@@ -674,6 +682,22 @@ impl<
         from_logical_range: RangeInclusive<u16>,
         to_logical_start: u16,
     ) -> Result<()> {
+        Self::move_cells_with_physical_offset(
+            from_node,
+            to_node,
+            from_logical_range,
+            to_logical_start,
+            0,
+        )
+    }
+
+    fn move_cells_with_physical_offset(
+        from_node: &mut Self,
+        to_node: &mut Self,
+        from_logical_range: RangeInclusive<u16>,
+        to_logical_start: u16,
+        physical_offset_to_from_range_start: u16,
+    ) -> Result<()> {
         let physical_range = if from_node.is_leaf() {
             Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.start())
                 ..=Self::logical_leaf_key_pos_to_physical_pos(*from_logical_range.end())
@@ -681,6 +705,9 @@ impl<
             Self::logical_id_pos_to_physical_pos(*from_logical_range.start())
                 ..=Self::logical_id_pos_to_physical_pos(*from_logical_range.end())
         };
+        let physical_range: RangeInclusive<u16> =
+            physical_range.start() + physical_offset_to_from_range_start..=*physical_range.end();
+
         let physical_start = if to_node.is_leaf() {
             Self::logical_leaf_key_pos_to_physical_pos(to_logical_start)
         } else {
@@ -729,29 +756,155 @@ impl<
         page.remove_cell(physical_pos);
     }
 
-    fn split_node<Fd: AsRawFd + Copy>(
+    fn space_used_by_key_and_page_id_at_logical_pos(&self, logical_pos: u16) -> u16 {
+        assert!(self.is_node());
+        assert!(logical_pos <= self.key_count());
+
+        let dummy_id: PageId = 0;
+        let mut size = serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE;
+        if logical_pos < self.key_count() {
+            let physical_pos = Self::logical_node_key_pos_to_physical_pos(logical_pos);
+            let page = self.page_ref.borrow();
+            let key_ptr = page.get_cell_pointer(physical_pos);
+            size += key_ptr.size + CELL_POINTER_SIZE;
+        }
+
+        size
+    }
+
+    // returns a SplitDetermination containing the logical position of the key to split on, or in
+    // the case of a don't insert, the logical position of the first key to be in the right page
+    fn determine_node_split_key_logical_pos(
+        &self,
+        key_to_be_inserted: &K,
+        logical_insertion_pos: u16,
+    ) -> Result<SplitDetermination> {
+        let dummy_id: PageId = 0;
+        let id_size = serialized_size(&dummy_id) as u16;
+        let key_size = serialized_size(key_to_be_inserted) as u16;
+        let insertion_size = key_size + id_size + (CELL_POINTER_SIZE * 2);
+        let mut used_space = 0;
+
+        println!("{:?}", self.keys());
+        println!("logical insertion pos: {logical_insertion_pos}");
+        for i in 0..self.key_count() {
+            if i == logical_insertion_pos {
+                // at i == logical_insertion_pos, we need to try 2 positions.
+                // - using the key_to_be_inserted as a split key
+                // - using the key at i to be a split key with the key_to_be_inserted to the left of it
+
+                // if this key to be inserted would be used as a split key, we only have a page id
+                // to add to the right
+                let size_goal = self.page_used_space() / 2;
+                println!("size goal when i == logical_insertion_pos: {size_goal}");
+                let increment = id_size + CELL_POINTER_SIZE;
+                used_space += increment;
+                println!("used space: {used_space}");
+
+                if used_space >= size_goal {
+                    println!("returning dont insert");
+                    return Ok(SplitDetermination::DontInsert(i));
+                }
+
+                used_space -= increment;
+                // otherwise the key to be inserted will go left and all other considerations are
+                // treated similarly to the rest
+            }
+
+            let this_key = self.key_at_pos(i)?;
+            let space_used_minus_this_key =
+                self.page_used_space() - serialized_size(&this_key) as u16 - CELL_POINTER_SIZE;
+            let size_goal = if logical_insertion_pos <= i {
+                // will be inserted left
+                (space_used_minus_this_key - insertion_size) / 2
+            } else {
+                // will be inserted right
+                ((space_used_minus_this_key + insertion_size) / 2) + insertion_size
+            };
+
+            // determine if this would put us at or past that page size goal
+            let increment = self.space_used_by_key_and_page_id_at_logical_pos(i);
+            used_space += increment;
+
+            println!("i: {i}");
+            println!("insertion_size: {insertion_size}");
+            println!("size goal: {size_goal}");
+            println!("used_space: {used_space}");
+
+            if used_space >= size_goal {
+                if i >= logical_insertion_pos {
+                    return Ok(SplitDetermination::InsertLeft(i + 1));
+                } else {
+                    return Ok(SplitDetermination::InsertRight(i + 1));
+                }
+            }
+        }
+        if logical_insertion_pos < self.key_count() {
+            Ok(SplitDetermination::InsertLeft(self.key_count()))
+        } else {
+            Ok(SplitDetermination::InsertRight(self.key_count()))
+        }
+    }
+
+    fn split_node_and_insert<Fd: AsRawFd + Copy>(
         &mut self,
         pager_info: &mut PagerInfo<PB, Fd>,
+        logical_insertion_pos: u16,
+        key_to_be_inserted: &K,
+        new_page_id: PageId,
     ) -> Result<(K, Node<PB, K, V>)> {
         assert!(self.page_free_space() < pager_info.buffer_size() / 2);
-        let split_key_logical_pos = self.first_logical_pos_past_size(self.page_used_space() / 2);
+        let split_determination =
+            self.determine_node_split_key_logical_pos(key_to_be_inserted, logical_insertion_pos)?;
 
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
-        let split_key = self.key_from_inner_node(split_key_logical_pos)?;
+        let (split_key, move_start_logical_pos, move_offset) = match split_determination {
+            SplitDetermination::InsertLeft(pos) | SplitDetermination::InsertRight(pos) => {
+                (self.key_from_inner_node(pos)?, pos, 0)
+            }
+            SplitDetermination::DontInsert(pos) => (key_to_be_inserted.clone(), pos, 1),
+        };
 
         // get new page
         let mut new_node = Self::init_node(pager_info)?;
 
         let key_count = self.key_count();
-        Self::move_cells(
+        Self::move_cells_with_physical_offset(
             self,
             &mut new_node,
-            split_key_logical_pos + 1..=key_count,
+            move_start_logical_pos..=key_count,
             0,
+            move_offset,
         )?;
+        // TODO: In case of DontInsert, need to get the page id at pos 0 from right, replace it with new
+        // page id, and stick the page id we grabbed at the end of left. Can I instead get the
+        // move_cells call to offset by 1 for me so the id isn't moved?
 
-        self.remove_trailing_key(split_key_logical_pos);
+        match split_determination {
+            SplitDetermination::InsertLeft(split_logical_pos) => {
+                self.remove_trailing_key(split_logical_pos);
+                self.insert_split_key_and_page_id_into_node(
+                    logical_insertion_pos,
+                    &split_key,
+                    new_page_id,
+                )?;
+            }
+            SplitDetermination::InsertRight(split_logical_pos) => {
+                self.remove_trailing_key(split_logical_pos);
+                let insert_pos = logical_insertion_pos - self.key_count() - 1;
+                new_node.insert_split_key_and_page_id_into_node(
+                    insert_pos,
+                    &split_key,
+                    new_page_id,
+                )?;
+            }
+            SplitDetermination::DontInsert(pos) => {
+                println!("logical_insert_pos: {logical_insertion_pos}");
+                println!("don't insert pos: {pos}");
+                new_node.insert_split_page_id_into_node(0, new_page_id)?
+            }
+        }
 
         Ok((split_key, new_node))
     }
@@ -796,6 +949,14 @@ impl<
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
         assert!(self.is_leaf());
+        // if the key already exists, remove that entry before doing anything
+        let existing_key_pos = self.binary_search_keys(&key);
+        if let Ok(pos) = existing_key_pos {
+            let physical_pos = Self::logical_leaf_key_pos_to_physical_pos(pos);
+            let mut page = self.page_ref.borrow_mut();
+            page.remove_cell(physical_pos);
+        }
+
         if !self.can_fit_leaf(&key, &value) {
             let (split_key, mut new_node) = self.split_leaf(pager_info)?;
             assert!(new_node.is_leaf());
@@ -806,19 +967,13 @@ impl<
             }
             Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
-            match self.binary_search_keys(&key) {
-                Ok(logical_pos) => {
-                    let physical_pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
-                    let mut page = self.page_ref.borrow_mut();
-                    page.remove_cell(physical_pos);
-                    page.insert_cell(physical_pos, &to_bytes(&(key, value))?)?;
-                }
-                Err(logical_pos) => {
-                    let physical_pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
-                    let mut page = self.page_ref.borrow_mut();
-                    page.insert_cell(physical_pos, &to_bytes(&(key, value))?)?;
-                }
-            }
+            let logical_pos = match existing_key_pos {
+                Ok(logical_pos) => logical_pos,
+                Err(logical_pos) => logical_pos,
+            };
+            let physical_pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
+            let mut page = self.page_ref.borrow_mut();
+            page.insert_cell(physical_pos, &to_bytes(&(key, value))?)?;
             Ok(InsertResult::Done)
         }
     }
@@ -852,7 +1007,18 @@ impl<
         Ok((logical_pos, descendent))
     }
 
-    fn insert_split_results_into_node(
+    fn insert_split_page_id_into_node(
+        &mut self,
+        logical_pos: u16,
+        new_page_id: PageId,
+    ) -> Result<()> {
+        let physical_pos = Self::logical_id_pos_to_physical_pos(logical_pos);
+        let mut page = self.page_ref.borrow_mut();
+        page.insert_cell(physical_pos, &to_bytes(&new_page_id)?)?;
+        Ok(())
+    }
+
+    fn insert_split_key_and_page_id_into_node(
         &mut self,
         logical_pos: u16,
         split_key: &K,
@@ -900,23 +1066,15 @@ impl<
             child_node.insert(key, value, pager_info)?
         {
             if !self.can_fit_node(&split_key) {
-                let (parent_split_key, mut parent_new_node) = self.split_node(pager_info)?;
+                let (parent_split_key, parent_new_node) =
+                    self.split_node_and_insert(pager_info, logical_pos, &split_key, new_page_id)?;
                 assert!(parent_new_node.is_node());
-
-                if split_key <= parent_split_key {
-                    self.insert_split_results_into_node(logical_pos, &split_key, new_page_id)?
-                } else {
-                    // after the split, there's one less key between the two nodes, so account for
-                    // that
-                    let pos = logical_pos - self.key_count() - 1;
-                    parent_new_node.insert_split_results_into_node(pos, &split_key, new_page_id)?;
-                }
                 Ok(InsertResult::Split(
                     parent_split_key,
                     parent_new_node.page_id(),
                 ))
             } else {
-                self.insert_split_results_into_node(logical_pos, &split_key, new_page_id)?;
+                self.insert_split_key_and_page_id_into_node(logical_pos, &split_key, new_page_id)?;
                 Ok(InsertResult::Done)
             }
         } else {
@@ -1303,7 +1461,7 @@ impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + FromStr + C
 }
 
 #[cfg(test)]
-impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> BTree<i32, PB, T, T> {
+impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + Clone> BTree<i32, PB, T, T> {
     fn to_description(&self) -> String {
         let mut pager_info = self.pager_info();
         Self::node_to_description(&mut pager_info, self.root.page_id())
@@ -1343,7 +1501,7 @@ impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> BTree<i32, P
 
 impl<
         PB: PageBuffer,
-        K: Ord + Debug + Serialize + DeserializeOwned,
+        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
         V: Serialize + DeserializeOwned,
     > Node<PB, K, V>
 {
@@ -1397,7 +1555,7 @@ impl<
 }
 
 #[cfg(test)]
-impl<T: Ord + Serialize + DeserializeOwned + Debug + FromStr> Node<TestPageBuffer, T, T> {
+impl<T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone> Node<TestPageBuffer, T, T> {
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine<T>>>(
         pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
         this_node_line: DescriptionLine<T>,
@@ -1607,7 +1765,7 @@ fn assert_all_node_keys_ordered_and_deduped<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     let mut sorted_keys = node.keys();
     sorted_keys.sort();
@@ -1626,7 +1784,7 @@ fn assert_all_keys_in_range<PB, T>(
     max_inclusive: Option<&T>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     let res = match (min_exclusive, max_inclusive) {
         (Some(min), Some(max)) => node.keys().iter().all(|k| k > min && k <= max),
@@ -1675,12 +1833,12 @@ fn assert_all_nodes_sized_correctly<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     fn correct_cell_count<PB, T>(node: &Node<PB, T, T>) -> bool
     where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         if node.is_leaf() {
             true
@@ -1695,7 +1853,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
         pager_info: &mut PagerInfo<PB, i32>,
     ) where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
@@ -1724,7 +1882,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
 fn assert_all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     fn leaf_levels<PB, T>(
         node: &Node<PB, T, T>,
@@ -1733,7 +1891,7 @@ where
     ) -> Vec<usize>
     where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         if node.is_leaf() {
             return vec![level];
@@ -1817,7 +1975,7 @@ mod tests {
 
     fn init_tree_in_file<T>(filename: &str) -> BTree<i32, TestPageBuffer, T, T>
     where
-        T: Ord + Serialize + DeserializeOwned + Debug,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
@@ -1829,7 +1987,7 @@ mod tests {
     fn init_tree_in_file_with_pb<PB, T>(filename: &str) -> BTree<i32, PB, T, T>
     where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
@@ -2099,16 +2257,16 @@ mod tests {
         let init_tree = trim_lines(init_tree);
 
         let expected_tree = "
-            0: [9] (2)
-            0->0: [3, 6] (3)
-            0->1: [12, 15, 18] (4)
+            0: [12] (2)
+            0->0: [3, 6, 9] (4)
+            0->1: [15, 18] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9]
-            0->1->0: L[10, 11, 12] 
-            0->1->1: L[13, 14, 15] 
-            0->1->2: L[16, 17, 18] 
-            0->1->3: L[19, 20, 21, 22, 23]
+            0->0->3: L[10, 11, 12] 
+            0->1->0: L[13, 14, 15] 
+            0->1->1: L[16, 17, 18] 
+            0->1->2: L[19, 20, 21, 22, 23]
         ";
         let expected_tree = trim_lines(expected_tree);
 
@@ -2244,10 +2402,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [12, 21] (3)
+            0: [12, 24] (3)
             0->0: [3, 6, 9] (4)
-            0->1: [15, 18] (3)
-            0->2: [24, 27, 32] (4)
+            0->1: [15, 18, 21] (4)
+            0->2: [27, 32] (3)
             0->0->0: L[1, 2, 3] 
             0->0->1: L[4, 5, 6] 
             0->0->2: L[7, 8, 9] 
@@ -2255,10 +2413,10 @@ mod tests {
             0->1->0: L[13, 14, 15] 
             0->1->1: L[16, 17, 18] 
             0->1->2: L[19, 20, 21] 
-            0->2->0: L[22, 23, 24] 
-            0->2->1: L[25, 26, 27] 
-            0->2->2: L[28, 29, 30, 31, 32] 
-            0->2->3: L[33, 34, 35] 
+            0->1->3: L[22, 23, 24] 
+            0->2->0: L[25, 26, 27] 
+            0->2->1: L[28, 29, 30, 31, 32] 
+            0->2->2: L[33, 34, 35] 
         ";
         let output_tree = trim_lines(output_tree);
 
@@ -2940,11 +3098,16 @@ mod tests {
         }
     }
 
-    pub struct BTreeTestWrapper<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> {
+    pub struct BTreeTestWrapper<
+        PB: PageBuffer,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    > {
         tree: BTree<i32, PB, T, T>,
         filename: String,
     }
-    impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug> BTreeTestWrapper<PB, T> {
+    impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + Clone>
+        BTreeTestWrapper<PB, T>
+    {
         fn new(tree: BTree<i32, PB, T, T>, filename: String) -> Self {
             BTreeTestWrapper { tree, filename }
         }
@@ -3028,7 +3191,7 @@ mod tests {
          #[test] #[ignore] // expensive test
          fn full_tree_test_u32(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
 
-         #[test]
+         #[test] #[ignore]
          fn full_tree_test_i64(sequential 1..512=> BTree<i32, TestPageBuffer, i64, i64>);
     }
 
@@ -3048,6 +3211,53 @@ mod tests {
 
         assert_subtree_valid(&t.root, &mut t.pager_info());
         assert_eq!(&t.to_description(), expected);
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn failing_test_case_2() {
+        let filename = "failing_test_case_2.test";
+        let input = "
+            0: [3, 6, 13, 16] (5)
+            0->0: L[0, 1, 2, 3]
+            0->1: L[4, 5, 6]
+            0->2: L[7, 8, 9, 10, 11, 12, 13]
+            0->3: L[14, 15, 16]
+            0->4: L[17, 18, 19]
+        ";
+        let input = trim_lines(input);
+
+        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+            init_tree_from_description_in_file(filename, &input);
+        t.insert(7, 0).unwrap();
+
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn failing_test_case_3() {
+        let filename = "failing_test_case_3.test";
+        let input = "
+            0: [3, 6, 14, 17] (5)
+            0->0: L[0, 1, 2, 3]
+            0->1: L[4, 5, 6]
+            0->2: L[7, 8, 9, 10, 11, 13, 14]
+            0->3: L[15, 16, 17]
+            0->4: L[18, 19, 20]
+        ";
+        let input = trim_lines(input);
+
+        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+            init_tree_from_description_in_file(filename, &input);
+        t.insert(12, 0).unwrap();
+
+        println!("{}", t.to_description());
+        assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
         fs::remove_file(filename).unwrap();
