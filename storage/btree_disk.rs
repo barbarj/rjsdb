@@ -781,6 +781,7 @@ impl<
     ) -> Result<SplitDetermination> {
         let dummy_id: PageId = 0;
         let id_size = serialized_size(&dummy_id) as u16;
+        let id_used_space = id_size + CELL_POINTER_SIZE;
         let key_size = serialized_size(key_to_be_inserted) as u16;
         let insertion_size = key_size + id_size + (CELL_POINTER_SIZE * 2);
         let mut used_space = 0;
@@ -797,10 +798,9 @@ impl<
 
                 // if this key to be inserted would be used as a split key, we only have a page id
                 // to add to the right
-                let size_goal = self.page_used_space() / 2;
+                let size_goal = (self.page_used_space() + id_used_space) / 2;
                 println!("size goal when i == logical_insertion_pos: {size_goal}");
-                let increment = id_size + CELL_POINTER_SIZE;
-                used_space += increment;
+                used_space += id_used_space;
                 println!("used space: {used_space}");
 
                 if used_space >= size_goal {
@@ -808,7 +808,8 @@ impl<
                     return Ok(SplitDetermination::DontInsert(i));
                 }
 
-                used_space -= increment;
+                used_space -= id_used_space;
+                used_space += insertion_size;
                 // otherwise the key to be inserted will go left and all other considerations are
                 // treated similarly to the rest
             }
@@ -818,16 +819,9 @@ impl<
             println!("this key used space: {this_key_used_space}");
             let space_used_minus_this_key = self.page_used_space() - this_key_used_space;
             println!("space minus key: {space_used_minus_this_key}");
-            let size_goal = match i.cmp(&logical_insertion_pos) {
-                Ordering::Greater | Ordering::Equal => {
-                    (space_used_minus_this_key - insertion_size) / 2
-                }
-                Ordering::Less => (space_used_minus_this_key / 2) + insertion_size,
-            };
-
-            // determine if this would put us at or past that page size goal
-            let increment = self.space_used_by_key_and_page_id_at_logical_pos(i);
-            used_space += increment;
+            let size_goal = (space_used_minus_this_key + insertion_size) / 2;
+            // determine if splitting here would put us at or past that page size goal
+            used_space += id_used_space; // the id would stay, so consider that space
 
             println!("insertion_size: {insertion_size}");
             println!("size goal: {size_goal}");
@@ -840,6 +834,8 @@ impl<
                     return Ok(SplitDetermination::InsertRight(i));
                 }
             }
+
+            used_space += this_key_used_space; // this key stays now too
         }
         if logical_insertion_pos < self.key_count() {
             Ok(SplitDetermination::InsertLeft(self.key_count()))
@@ -3257,6 +3253,30 @@ mod tests {
         let mut t: BTree<i32, TestPageBuffer, u32, u32> =
             init_tree_from_description_in_file(filename, &input);
         t.insert(12, 0).unwrap();
+
+        println!("{}", t.to_description());
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn failing_test_case_4() {
+        let filename = "failing_test_case_4.test";
+        let input = "
+            0: [2, 5, 8, 11] (5)
+            0->0: L[0, 1, 2]
+            0->1: L[3, 4, 5]
+            0->2: L[6, 7, 8]
+            0->3: L[9, 10, 11]
+            0->4: L[12, 13, 14, 15, 16, 17, 19]
+        ";
+        let input = trim_lines(input);
+
+        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+            init_tree_from_description_in_file(filename, &input);
+        t.insert(18, 18).unwrap();
 
         println!("{}", t.to_description());
         assert_subtree_valid(&t.root, &mut t.pager_info());
