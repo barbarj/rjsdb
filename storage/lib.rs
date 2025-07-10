@@ -26,6 +26,8 @@ mod btree_disk;
 mod generate; // TODO: This should probably be its own crate??
 mod pager;
 
+pub use btree_disk::BTree;
+
 #[derive(Debug)]
 pub enum StorageError {
     IoError(io::Error),

@@ -247,23 +247,8 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
         Ok(Node::new(page))
     }
 
-    fn new_page_node<K, V>(&mut self, kind: PageKind) -> Result<Node<PB, K, V>>
-    where
-        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
-        V: Serialize + DeserializeOwned,
-    {
-        let page = self.new_page(kind)?;
-        Ok(Node::new(page))
-    }
-
     fn buffer_size(&self) -> PageBufferOffset {
         PB::buffer_size()
-    }
-
-    fn leaf_effective_buffer_size(&self) -> PageBufferOffset {
-        let dummy_id: PageId = 0;
-        let siblings_space_used = (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2;
-        PB::buffer_size() - siblings_space_used
     }
 
     fn drop_page(&mut self, page_id: PageId) -> Result<()> {
@@ -494,6 +479,7 @@ impl<
         Ok(kv)
     }
 
+    #[allow(dead_code)]
     fn leaf_left_sibling(&self) -> Result<PageId> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
@@ -542,17 +528,6 @@ impl<
         id_pos * 2
     }
 
-    /// Returns None if this cell position will not contain a key
-    fn node_physical_pos_to_logical_key_pos(physical_pos: u16) -> Option<u16> {
-        if physical_pos % 2 == 0 {
-            None
-        } else {
-            Some(physical_pos / 2) // integer division makes the division of an odd number (2n + 1) by
-                                   // 2 result in the same number as if the input were the odd number's
-                                   // even counterpart (2n)
-        }
-    }
-
     fn key_from_inner_node(&self, key_pos: u16) -> Result<K> {
         assert!(self.is_node());
         let pos = Self::logical_node_key_pos_to_physical_pos(key_pos);
@@ -599,80 +574,6 @@ impl<
             Ordering::Greater => Err(low),
             Ordering::Equal => Ok(low),
             Ordering::Less => Err(low + 1),
-        }
-    }
-
-    fn within_half_increment(goal: u16, increment: u16, current: u16) -> bool {
-        if goal > current {
-            goal - current <= increment / 2
-        } else {
-            current - goal <= increment / 2
-        }
-    }
-
-    fn first_logical_pos_from_right_within_half_increment(
-        &self,
-        size: u16,
-        initial_space_used: u16,
-    ) -> u16 {
-        let mut used_space = initial_space_used;
-        let mut idx = self.key_count() - 1;
-        let page = self.page_ref.borrow();
-
-        let mut increment = 0;
-
-        if self.is_node() {
-            // Find the index of the first "position" at or past the halfway point
-            let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx + 1));
-            used_space += id_ptr.size;
-            while !Self::within_half_increment(size, increment, used_space) {
-                let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
-                let key_ptr =
-                    page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
-                increment = id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
-                used_space += increment;
-                idx -= 1;
-            }
-        } else {
-            while !Self::within_half_increment(size, increment, used_space) {
-                let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
-                increment = ptr.size + CELL_POINTER_SIZE;
-                used_space += increment;
-                idx -= 1;
-            }
-        }
-        idx + 1
-    }
-
-    fn first_logical_pos_past_size(&self, size: u16) -> u16 {
-        let mut used_space = 0;
-        let mut idx = 0;
-        let mut increment = 0;
-        let page = self.page_ref.borrow();
-
-        if self.is_node() {
-            // Find the index of the first "position" at or past the halfway point
-            while !Self::within_half_increment(size, increment, used_space) {
-                let id_ptr = page.get_cell_pointer(Self::logical_id_pos_to_physical_pos(idx));
-                let key_ptr =
-                    page.get_cell_pointer(Self::logical_node_key_pos_to_physical_pos(idx));
-                increment = id_ptr.size + key_ptr.size + (2 * CELL_POINTER_SIZE);
-                used_space += increment;
-                idx += 1;
-            }
-        } else {
-            used_space += Self::leaf_siblings_space_used();
-            while !Self::within_half_increment(size, increment, used_space) {
-                let ptr = page.get_cell_pointer(Self::logical_leaf_key_pos_to_physical_pos(idx));
-                increment = ptr.size + CELL_POINTER_SIZE;
-                used_space += increment;
-                idx += 1;
-            }
-        }
-        if used_space <= size {
-            idx
-        } else {
-            idx - 1
         }
     }
 
@@ -754,22 +655,6 @@ impl<
         let mut page = self.page_ref.borrow_mut();
         assert_eq!(physical_pos, page.cell_count() - 1); // should always be the last cell
         page.remove_cell(physical_pos);
-    }
-
-    fn space_used_by_key_and_page_id_at_logical_pos(&self, logical_pos: u16) -> u16 {
-        assert!(self.is_node());
-        assert!(logical_pos <= self.key_count());
-
-        let dummy_id: PageId = 0;
-        let mut size = serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE;
-        if logical_pos < self.key_count() {
-            let physical_pos = Self::logical_node_key_pos_to_physical_pos(logical_pos);
-            let page = self.page_ref.borrow();
-            let key_ptr = page.get_cell_pointer(physical_pos);
-            size += key_ptr.size + CELL_POINTER_SIZE;
-        }
-
-        size
     }
 
     // returns a SplitDetermination containing the logical position of the key to split on, or in
@@ -896,11 +781,6 @@ impl<
     fn leaf_siblings_space_used() -> u16 {
         let dummy_id: PageId = 0;
         (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2
-    }
-
-    fn leaf_split_point(&self) -> u16 {
-        assert!(self.is_leaf());
-        (self.page_used_space() + Self::leaf_siblings_space_used()) / 2
     }
 
     fn split_leaf<Fd: AsRawFd + Copy>(
@@ -1183,10 +1063,6 @@ impl<
 
         self.remove_merged_key_and_id(left_child_pos);
         Ok(())
-    }
-
-    fn amount_to_steal(from: &Self, to: &Self) -> u16 {
-        (from.page_used_space() - to.page_used_space()) / 2
     }
 
     fn insert_interior_split_key(&mut self, logical_key_pos: u16, key: &K) -> Result<()> {
@@ -1603,6 +1479,7 @@ impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + Clone> BTre
         description_lines.into_iter().join("\n")
     }
 
+    #[allow(dead_code)]
     fn display_subtree(pager_info: &mut PagerInfo<PB, i32>, root_page_id: PageId) {
         let description = Self::node_to_description(pager_info, root_page_id);
         print!("{description}");
@@ -1615,6 +1492,7 @@ impl<
         V: Serialize + DeserializeOwned,
     > Node<PB, K, V>
 {
+    #[allow(dead_code)]
     fn keys(&self) -> Vec<K> {
         if self.is_leaf() {
             (0..self.key_count())
@@ -1628,6 +1506,7 @@ impl<
     }
 
     #[allow(clippy::reversed_empty_ranges)]
+    #[allow(dead_code)]
     fn descendent_iter<'a, Fd: AsRawFd + Copy>(
         &'a self,
         pager_info: &'a mut PagerInfo<PB, Fd>,
@@ -1641,6 +1520,7 @@ impl<
         range.map(|i| self.descendent_node_at_logical_pos(i, pager_info).unwrap())
     }
 
+    #[allow(dead_code)]
     fn descendent_page_ids(&self) -> Vec<PageId> {
         if self.is_leaf() {
             Vec::new()
@@ -1755,10 +1635,12 @@ impl<T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone> Node<TestP
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 enum DescriptionLineError {
     InvalidChildCount(String),
 }
+#[cfg(test)]
 impl Display for DescriptionLineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1766,6 +1648,7 @@ impl Display for DescriptionLineError {
         }
     }
 }
+#[cfg(test)]
 impl std::error::Error for DescriptionLineError {}
 
 #[cfg(test)]
