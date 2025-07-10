@@ -819,8 +819,9 @@ impl<
             let space_used_minus_this_key = self.page_used_space() - this_key_used_space;
             println!("space minus key: {space_used_minus_this_key}");
             let size_goal = match i.cmp(&logical_insertion_pos) {
-                Ordering::Greater => (space_used_minus_this_key - insertion_size) / 2,
-                Ordering::Equal => unreachable!("should be handled by condition above"),
+                Ordering::Greater | Ordering::Equal => {
+                    (space_used_minus_this_key - insertion_size) / 2
+                }
                 Ordering::Less => (space_used_minus_this_key / 2) + insertion_size,
             };
 
