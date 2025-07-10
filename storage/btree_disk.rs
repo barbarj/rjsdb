@@ -1091,6 +1091,27 @@ impl<
         Ok(None)
     }
 
+    fn node_find_logical_position_meeting_size_goal(
+        &self,
+        starting_size: u16,
+        size_goal_fn: impl Fn(&K, u16) -> u16, // takes key and index
+    ) -> Result<Option<u16>> {
+        let dummy_id: PageId = 0;
+        let dummy_space_used = serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE;
+
+        assert!(self.is_node());
+        let mut used_space = starting_size;
+        for i in 0..self.key_count() {
+            used_space += dummy_space_used;
+            let key = self.key_at_pos(i)?;
+            if used_space >= size_goal_fn(&key, i) {
+                return Ok(Some(i));
+            }
+            used_space += serialized_size(&key) as u16 + CELL_POINTER_SIZE;
+        }
+        Ok(None)
+    }
+
     fn child_leaf_steal_from_left_sibling<Fd: AsRawFd + Copy>(
         &mut self,
         right_child_logical_pos: u16,
@@ -1163,10 +1184,6 @@ impl<
     ) -> Result<()> {
         assert!(right_child_logical_pos > 0);
 
-        let dummy_id: PageId = 0;
-        let id_size = serialized_size(&dummy_id) as u16;
-        let id_used_space = id_size + CELL_POINTER_SIZE;
-
         let old_split_key = self.key_at_pos(right_child_logical_pos - 1)?;
 
         let mut left_child =
@@ -1180,21 +1197,12 @@ impl<
             + serialized_size(&old_split_key) as u16
             + CELL_POINTER_SIZE;
 
-        let mut new_split_pos = None;
-        let mut used_space = 0;
-        for i in 0..left_child.key_count() {
-            let current_key = left_child.key_at_pos(i)?;
-            let key_space_used = serialized_size(&current_key) as u16 + CELL_POINTER_SIZE;
-            let size_goal = (combined_size - key_space_used) / 2;
-            used_space += id_used_space;
-            if used_space >= size_goal {
-                new_split_pos = Some(i);
-                break;
-            }
-            used_space += key_space_used;
-        }
-
-        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_pos = left_child
+            .node_find_logical_position_meeting_size_goal(0, |key: &K, _: u16| {
+                let key_space_used = serialized_size(&key) as u16 + CELL_POINTER_SIZE;
+                (combined_size - key_space_used) / 2
+            })?
+            .expect("Should always have a value");
         let new_split_key = left_child.key_at_pos(new_split_pos)?;
         let from_range = new_split_pos + 1..=left_child.key_count();
         Self::move_cells(&mut left_child, &mut right_child, from_range.clone(), 0)?;
@@ -1213,10 +1221,6 @@ impl<
     ) -> Result<()> {
         assert!(left_child_logical_pos < self.descendent_count() - 1);
 
-        let dummy_id: PageId = 0;
-        let id_size = serialized_size(&dummy_id) as u16;
-        let id_used_space = id_size + CELL_POINTER_SIZE;
-
         let old_split_key = self.key_at_pos(left_child_logical_pos)?;
 
         let mut left_child =
@@ -1230,23 +1234,15 @@ impl<
             + serialized_size(&old_split_key) as u16
             + CELL_POINTER_SIZE;
 
-        let mut new_split_pos = None;
-        let mut used_space = left_child.page_used_space()
+        let starting_size = left_child.page_used_space()
             + serialized_size(&old_split_key) as u16
             + CELL_POINTER_SIZE;
-        for i in 0..right_child.key_count() {
-            let current_key = right_child.key_at_pos(i)?;
-            let key_space_used = serialized_size(&current_key) as u16 + CELL_POINTER_SIZE;
-            let size_goal = (combined_size - key_space_used) / 2;
-            used_space += id_used_space;
-            if used_space >= size_goal {
-                new_split_pos = Some(i);
-                break;
-            }
-            used_space += key_space_used;
-        }
-
-        let new_split_pos = new_split_pos.expect("Should always have a value");
+        let new_split_pos = right_child
+            .node_find_logical_position_meeting_size_goal(starting_size, |key: &K, _: u16| {
+                let key_space_used = serialized_size(key) as u16 + CELL_POINTER_SIZE;
+                (combined_size - key_space_used) / 2
+            })?
+            .expect("Should always have a value");
         let new_split_key = right_child.key_at_pos(new_split_pos)?;
         let from_range = 0..=new_split_pos;
         let left_child_key_count = left_child.key_count();
