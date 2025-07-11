@@ -783,14 +783,21 @@ impl<
         (serialized_size(&dummy_id) as u16 + CELL_POINTER_SIZE) * 2
     }
 
-    fn split_leaf<Fd: AsRawFd + Copy>(
+    fn split_leaf_and_insert<Fd: AsRawFd + Copy>(
         &mut self,
+        key: K,
+        value: V,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
-        // TODO: Make this take into account insertion size
-        let size_goal = self.leaf_space_used_ignoring_siblings() / 2;
+        let insertion_size = serialized_size(&(&key, &value)) as u16 + CELL_POINTER_SIZE;
+        let size_goal_fn = |this_key: &K, _: &V| match key.cmp(this_key) {
+            Ordering::Less => (self.leaf_space_used_ignoring_siblings() - insertion_size) / 2,
+            Ordering::Equal => unreachable!("Existing keys shouldn't be inserted here"),
+            Ordering::Greater => self.leaf_space_used_ignoring_siblings() / 2,
+        };
+
         let split_key_pos = self
-            .leaf_find_logical_position_meeting_size_goal(0, |_, _| size_goal)?
+            .leaf_find_logical_position_meeting_size_goal(0, size_goal_fn)?
             .unwrap();
 
         let split_key = self.key_from_leaf(split_key_pos)?;
@@ -806,6 +813,12 @@ impl<
         // copy cells to new page and remove cells from old page
         let key_count = self.key_count();
         Self::move_cells(self, &mut new_node, split_key_pos + 1..=key_count - 1, 0)?;
+
+        if key > split_key {
+            new_node.insert_as_leaf(key, value, pager_info)?;
+        } else {
+            self.insert_as_leaf(key, value, pager_info)?;
+        }
 
         Ok((split_key, new_node))
     }
@@ -826,13 +839,8 @@ impl<
         }
 
         if !self.can_fit_leaf(&key, &value) {
-            let (split_key, mut new_node) = self.split_leaf(pager_info)?;
+            let (split_key, new_node) = self.split_leaf_and_insert(key, value, pager_info)?;
             assert!(new_node.is_leaf());
-            if key > split_key {
-                new_node.insert_as_leaf(key, value, pager_info)?;
-            } else {
-                self.insert_as_leaf(key, value, pager_info)?;
-            }
             Ok(InsertResult::Split(split_key, new_node.page_id()))
         } else {
             let logical_pos = match existing_key_pos {
@@ -2306,10 +2314,10 @@ mod tests {
         let input_tree = trim_lines(input_tree);
 
         let output_tree = "
-            0: [3, 8] (3)
+            0: [3, 7] (3)
             0->0: L[1, 2, 3] 
-            0->1: L[4, 5, 6, 7, 8] 
-            0->2: L[9, 10, 11] 
+            0->1: L[4, 5, 6, 7] 
+            0->2: L[8, 9, 10, 11] 
             ";
         let output_tree = trim_lines(output_tree);
 
