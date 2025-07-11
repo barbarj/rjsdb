@@ -1,31 +1,33 @@
 use std::io::Read;
+use std::str;
 
 use crate::error::{Error, Result};
-use serde::de::{EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
-use serde::{de, Deserialize};
+use serde::de;
+use serde::de::{DeserializeOwned, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 
-pub struct Deserializer<R: Read> {
-    reader: R,
+pub struct Deserializer<'de> {
+    bytes: &'de [u8],
+    offset: usize,
 }
-impl<R: Read> Deserializer<R> {
-    fn from_reader(reader: R) -> Self {
-        Deserializer { reader }
+impl<'de> Deserializer<'de> {
+    fn from_bytes(bytes: &'de [u8]) -> Self {
+        Deserializer { bytes, offset: 0 }
     }
 }
 
-pub fn from_reader<'de, R, T>(reader: R) -> Result<T>
+pub fn from_bytes<'de, T>(bytes: &'de [u8]) -> Result<T>
 where
-    R: Read,
-    T: Deserialize<'de>,
+    T: DeserializeOwned,
 {
-    let mut deserializer = Deserializer::from_reader(reader);
+    let mut deserializer = Deserializer::from_bytes(bytes);
     T::deserialize(&mut deserializer)
 }
 
-impl<R: Read> Deserializer<R> {
+impl<'de> Deserializer<'de> {
     fn parse_bool(&mut self) -> Result<bool> {
         let mut buf = [0; 1];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 1;
         let byte = buf[0];
         if byte == 0 {
             Ok(false)
@@ -38,93 +40,108 @@ impl<R: Read> Deserializer<R> {
 
     fn parse_i8(&mut self) -> Result<i8> {
         let mut buf = [0; 1];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 1;
         Ok(i8::from_be_bytes(buf))
     }
 
     fn parse_i16(&mut self) -> Result<i16> {
         let mut buf = [0; 2];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 2;
         Ok(i16::from_be_bytes(buf))
     }
 
     fn parse_i32(&mut self) -> Result<i32> {
         let mut buf = [0; 4];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 4;
         Ok(i32::from_be_bytes(buf))
     }
 
     fn parse_i64(&mut self) -> Result<i64> {
         let mut buf = [0; 8];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 8;
         Ok(i64::from_be_bytes(buf))
     }
 
     fn parse_i128(&mut self) -> Result<i128> {
         let mut buf = [0; 16];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 16;
         Ok(i128::from_be_bytes(buf))
     }
 
     fn parse_u8(&mut self) -> Result<u8> {
         let mut buf = [0; 1];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 1;
         Ok(u8::from_be_bytes(buf))
     }
 
     fn parse_u16(&mut self) -> Result<u16> {
         let mut buf = [0; 2];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 2;
         Ok(u16::from_be_bytes(buf))
     }
 
     fn parse_u32(&mut self) -> Result<u32> {
         let mut buf = [0; 4];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 4;
         Ok(u32::from_be_bytes(buf))
     }
 
     fn parse_u64(&mut self) -> Result<u64> {
         let mut buf = [0; 8];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 8;
         Ok(u64::from_be_bytes(buf))
     }
 
     fn parse_u128(&mut self) -> Result<u128> {
         let mut buf = [0; 16];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 16;
         Ok(u128::from_be_bytes(buf))
     }
 
     fn parse_f32(&mut self) -> Result<f32> {
         let mut buf = [0; 4];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 4;
         Ok(f32::from_be_bytes(buf))
     }
 
     fn parse_f64(&mut self) -> Result<f64> {
         let mut buf = [0; 8];
-        self.reader.read_exact(&mut buf)?;
+        (&self.bytes[self.offset..]).read_exact(&mut buf)?;
+        self.offset += 8;
         Ok(f64::from_be_bytes(buf))
     }
 
-    fn parse_byte_slice(&mut self) -> Result<Vec<u8>> {
+    fn parse_byte_slice(&mut self) -> Result<&'de [u8]> {
         let len: usize = self.parse_u64()? as usize;
-        let mut buf = vec![0; len];
-        self.reader.read_exact(&mut buf)?;
-        Ok(buf)
+        let slice_end = self.offset + len;
+        Ok(&self.bytes[self.offset..slice_end])
     }
 
-    fn parse_string(&mut self) -> Result<String> {
-        let buf = self.parse_byte_slice()?;
-        match String::from_utf8(buf) {
+    fn parse_str(&mut self) -> Result<&'de str> {
+        let bytes = self.parse_byte_slice()?;
+        match str::from_utf8(bytes) {
             Ok(s) => Ok(s),
             Err(err) => Err(Error::ExpectedUtf8String(err)),
         }
     }
+
+    fn parse_string(&mut self) -> Result<String> {
+        Ok(self.parse_str()?.to_string())
+    }
 }
 
-impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
+impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
 
     fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value>
@@ -231,7 +248,7 @@ impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_str(&self.parse_string()?)
+        visitor.visit_borrowed_str(self.parse_str()?)
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
@@ -277,7 +294,7 @@ impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_byte_buf(self.parse_byte_slice()?)
+        visitor.visit_byte_buf(self.parse_byte_slice()?.to_vec())
     }
 
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
@@ -381,19 +398,19 @@ impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
     }
 }
 
-struct SequenceWithLength<'a, R: Read> {
-    de: &'a mut Deserializer<R>,
+struct SequenceWithLength<'a, 'de> {
+    de: &'a mut Deserializer<'de>,
     items_left: u64,
 }
-impl<'a, R: Read> SequenceWithLength<'a, R> {
-    fn new(de: &'a mut Deserializer<R>, length: u64) -> Self {
+impl<'a, 'de> SequenceWithLength<'a, 'de> {
+    fn new(de: &'a mut Deserializer<'de>, length: u64) -> Self {
         SequenceWithLength {
             de,
             items_left: length,
         }
     }
 }
-impl<'a, 'de, R: Read> SeqAccess<'de> for SequenceWithLength<'a, R> {
+impl<'a, 'de> SeqAccess<'de> for SequenceWithLength<'a, 'de> {
     type Error = Error;
 
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
@@ -409,7 +426,7 @@ impl<'a, 'de, R: Read> SeqAccess<'de> for SequenceWithLength<'a, R> {
         }
     }
 }
-impl<'a, 'de, R: Read> MapAccess<'de> for SequenceWithLength<'a, R> {
+impl<'a, 'de> MapAccess<'de> for SequenceWithLength<'a, 'de> {
     type Error = Error;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
@@ -433,15 +450,15 @@ impl<'a, 'de, R: Read> MapAccess<'de> for SequenceWithLength<'a, R> {
     }
 }
 
-struct Enum<'a, R: Read> {
-    de: &'a mut Deserializer<R>,
+struct Enum<'a, 'de> {
+    de: &'a mut Deserializer<'de>,
 }
-impl<'a, R: Read> Enum<'a, R> {
-    fn new(de: &'a mut Deserializer<R>) -> Self {
+impl<'a, 'de> Enum<'a, 'de> {
+    fn new(de: &'a mut Deserializer<'de>) -> Self {
         Enum { de }
     }
 }
-impl<'a, 'de, R: Read> EnumAccess<'de> for Enum<'a, R> {
+impl<'a, 'de> EnumAccess<'de> for Enum<'a, 'de> {
     type Error = Error;
     type Variant = Self;
 
@@ -453,7 +470,7 @@ impl<'a, 'de, R: Read> EnumAccess<'de> for Enum<'a, R> {
         Ok((v, self))
     }
 }
-impl<'a, 'de, R: Read> VariantAccess<'de> for Enum<'a, R> {
+impl<'a, 'de> VariantAccess<'de> for Enum<'a, 'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {

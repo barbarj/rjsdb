@@ -23,8 +23,8 @@ use crate::pager::{
 #[cfg(test)]
 use itertools::Itertools;
 
-use serde::{de::DeserializeOwned, Serialize};
-use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
+use serde::{Deserialize, Serialize};
+use serialize::{from_bytes, serialized_size, to_bytes, Error as SerdeError};
 
 /// # Notes on Page Structure
 /// - Leaf node cells are (K, V). Cells at index 0 and 1 are left and right page ids to siblings.
@@ -33,14 +33,6 @@ use serialize::{from_reader, serialized_size, to_bytes, Error as SerdeError};
 ///    PageId | Key | PageId | Key | PageId... etc.
 ///    The sequence always starts and end with PageIds. The Keys split the search space that the
 ///    PageIds represent.
-
-/*
- * TODO:
- * - I may need to rework the split logic a bit. When splitting, it's because we're about to do an
- * insertion that won't fit. However, we can know where that insertion would be and much space it
- * would occupy. So I would like to modify the split logic to attempt to achieve evenness between
- * the resulting pages post-insertion, instead of the current target, which is pre-insertion
- */
 
 #[derive(Debug)]
 pub enum Error {
@@ -76,24 +68,25 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct BTree<
-    Fd: AsRawFd,
+pub struct BTree<Fd, PB, K, V>
+where
+    Fd: AsRawFd + Copy,
     PB: PageBuffer,
-    K: Ord + Serialize + DeserializeOwned + Debug + Clone,
-    V: Serialize + DeserializeOwned,
-> {
+    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+{
     pager_ref: Rc<RefCell<Pager<PB>>>,
     backing_fd: Fd,
     root: Node<PB, K, V>,
     _key: PhantomData<K>,
     _value: PhantomData<V>,
 }
-impl<
-        Fd: AsRawFd + Copy,
-        PB: PageBuffer,
-        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
-        V: Serialize + DeserializeOwned,
-    > BTree<Fd, PB, K, V>
+impl<Fd, PB, K, V> BTree<Fd, PB, K, V>
+where
+    Fd: AsRawFd + Copy,
+    PB: PageBuffer,
+    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
 {
     pub fn init(pager_ref: Rc<RefCell<Pager<PB>>>, backing_fd: Fd) -> Result<Self> {
         let mut pager = pager_ref.borrow_mut();
@@ -240,8 +233,8 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
 
     fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<PB, K, V>>
     where
-        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
-        V: Serialize + DeserializeOwned,
+        for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
+        for<'page_ref> V: Serialize + Deserialize<'page_ref>,
     {
         let page = self.get_page(page_id)?;
         Ok(Node::new(page))
@@ -258,29 +251,30 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
     }
 }
 
-pub enum KeyLimit<K: Ord + Serialize + DeserializeOwned + Debug> {
+pub enum KeyLimit<K: Ord> {
     None,
     Inclusive(K),
     Exclusive(K),
 }
 
-pub struct BTreeIter<
+pub struct BTreeIter<PB, Fd, K, V>
+where
     PB: PageBuffer,
     Fd: AsRawFd + Copy,
-    K: Ord + Serialize + DeserializeOwned + Debug + Clone,
-    V: Serialize + DeserializeOwned,
-> {
+    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+{
     leaf: Node<PB, K, V>,
     logical_pos: u16,
     max_key: KeyLimit<K>,
     pager_info: PagerInfo<PB, Fd>,
 }
-impl<
-        PB: PageBuffer,
-        Fd: AsRawFd + Copy,
-        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
-        V: Serialize + DeserializeOwned,
-    > BTreeIter<PB, Fd, K, V>
+impl<PB, Fd, K, V> BTreeIter<PB, Fd, K, V>
+where
+    PB: PageBuffer,
+    Fd: AsRawFd + Copy,
+    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
 {
     fn new(
         leftmost_leaf: Node<PB, K, V>,
@@ -297,12 +291,12 @@ impl<
     }
 }
 
-impl<
-        PB: PageBuffer,
-        Fd: AsRawFd + Copy,
-        K: Ord + Serialize + DeserializeOwned + Debug + Clone,
-        V: Serialize + DeserializeOwned,
-    > Iterator for BTreeIter<PB, Fd, K, V>
+impl<PB, Fd, K, V> Iterator for BTreeIter<PB, Fd, K, V>
+where
+    PB: PageBuffer,
+    Fd: AsRawFd + Copy,
+    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
 {
     type Item = Result<(K, V)>;
 
@@ -359,20 +353,21 @@ enum SplitDetermination {
 
 // TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
 // get serialization format to support borrowed data
-struct Node<
+struct Node<PB, K, V>
+where
     PB: PageBuffer,
-    K: Ord + Debug + Serialize + DeserializeOwned + Clone,
-    V: Serialize + DeserializeOwned,
-> {
+    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+{
     page_ref: PageRef<PB>,
     _key: PhantomData<K>,
     _value: PhantomData<V>,
 }
-impl<
-        PB: PageBuffer,
-        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
-        V: Serialize + DeserializeOwned,
-    > Node<PB, K, V>
+impl<PB, K, V> Node<PB, K, V>
+where
+    PB: PageBuffer,
+    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
 {
     fn new(page_ref: PageRef<PB>) -> Self {
         Node {
@@ -459,15 +454,15 @@ impl<
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
-        let (key, _): (K, V) = from_reader(page.cell_bytes(pos))?;
+        let (key, _): (K, V) = from_bytes(page.cell_bytes(pos))?;
         Ok(key)
     }
 
-    fn value_from_leaf<T: DeserializeOwned>(&self, logical: u16) -> Result<T> {
+    fn value_from_leaf(&self, logical: u16) -> Result<V> {
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
-        let (_, val): (K, T) = from_reader(page.cell_bytes(pos))?;
+        let (_, val): (K, V) = from_bytes(page.cell_bytes(pos))?;
         Ok(val)
     }
 
@@ -475,7 +470,7 @@ impl<
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
-        let kv = from_reader(page.cell_bytes(pos))?;
+        let kv = from_bytes(page.cell_bytes(pos))?;
         Ok(kv)
     }
 
@@ -484,7 +479,7 @@ impl<
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         assert!(page.cell_count() >= 2);
-        Ok(from_reader(page.cell_bytes(0))?)
+        Ok(from_bytes(page.cell_bytes(0))?)
     }
 
     /// Returns the prior sibling
@@ -492,7 +487,7 @@ impl<
         assert!(self.is_leaf());
         let mut page = self.page_ref.borrow_mut();
         assert!(page.cell_count() >= 2);
-        let prior_left = from_reader(page.cell_bytes(0))?;
+        let prior_left = from_bytes(page.cell_bytes(0))?;
         page.remove_cell(0);
         page.insert_cell(0, &to_bytes(new_left)?)?;
         Ok(prior_left)
@@ -503,7 +498,7 @@ impl<
         assert!(self.is_leaf());
         let mut page = self.page_ref.borrow_mut();
         assert!(page.cell_count() >= 2);
-        let prior_right = from_reader(page.cell_bytes(1))?;
+        let prior_right = from_bytes(page.cell_bytes(1))?;
         page.remove_cell(1);
         page.insert_cell(1, &to_bytes(new_right)?)?;
         Ok(prior_right)
@@ -513,7 +508,7 @@ impl<
         assert!(self.is_leaf());
         let page = self.page_ref.borrow();
         assert!(page.cell_count() >= 2);
-        Ok(from_reader(page.cell_bytes(1))?)
+        Ok(from_bytes(page.cell_bytes(1))?)
     }
 
     fn logical_node_key_pos_to_physical_pos(key_pos: u16) -> u16 {
@@ -532,7 +527,7 @@ impl<
         assert!(self.is_node());
         let pos = Self::logical_node_key_pos_to_physical_pos(key_pos);
         let page = self.page_ref.borrow();
-        let key = from_reader(page.cell_bytes(pos))?;
+        let key = from_bytes(page.cell_bytes(pos))?;
         Ok(key)
     }
 
@@ -540,7 +535,7 @@ impl<
         assert!(self.is_node());
         let pos = Self::logical_id_pos_to_physical_pos(id_pos);
         let page = self.page_ref.borrow();
-        let page_id = from_reader(page.cell_bytes(pos))?;
+        let page_id = from_bytes(page.cell_bytes(pos))?;
         Ok(page_id)
     }
 
@@ -1389,8 +1384,9 @@ impl PageBuffer for TestPageBuffer {
 }
 
 #[cfg(test)]
-impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone>
-    BTree<i32, PB, T, T>
+impl<PB: PageBuffer, T> BTree<i32, PB, T, T>
+where
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + FromStr + Clone,
 {
     /*
      * An example description looks something like this:
@@ -1451,7 +1447,10 @@ impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + FromStr + C
 }
 
 #[cfg(test)]
-impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + Clone> BTree<i32, PB, T, T> {
+impl<PB: PageBuffer, T> BTree<i32, PB, T, T>
+where
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+{
     fn to_description(&self) -> String {
         let mut pager_info = self.pager_info();
         Self::node_to_description(&mut pager_info, self.root.page_id())
@@ -1490,11 +1489,11 @@ impl<PB: PageBuffer, T: Ord + Serialize + DeserializeOwned + Debug + Clone> BTre
     }
 }
 
-impl<
-        PB: PageBuffer,
-        K: Ord + Debug + Serialize + DeserializeOwned + Clone,
-        V: Serialize + DeserializeOwned,
-    > Node<PB, K, V>
+impl<PB, K, V> Node<PB, K, V>
+where
+    PB: PageBuffer,
+    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
+    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
 {
     #[allow(dead_code)]
     fn keys(&self) -> Vec<K> {
@@ -1549,7 +1548,10 @@ impl<
 }
 
 #[cfg(test)]
-impl<T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone> Node<TestPageBuffer, T, T> {
+impl<T> Node<TestPageBuffer, T, T>
+where
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + FromStr + Clone,
+{
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine<T>>>(
         pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
         this_node_line: DescriptionLine<T>,
@@ -1748,7 +1750,7 @@ impl<T: Debug> Display for DescriptionLine<T> {
 fn assert_tree_keys_fully_ordered<PB, T>(root: &Node<PB, T, T>)
 where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     let keys = root.keys();
     let mut sorted_keys = keys.clone();
@@ -1762,7 +1764,7 @@ fn assert_all_node_keys_ordered_and_deduped<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     let mut sorted_keys = node.keys();
     sorted_keys.sort();
@@ -1781,7 +1783,7 @@ fn assert_all_keys_in_range<PB, T>(
     max_inclusive: Option<&T>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     let res = match (min_exclusive, max_inclusive) {
         (Some(min), Some(max)) => node.keys().iter().all(|k| k > min && k <= max),
@@ -1798,7 +1800,7 @@ fn assert_all_subnode_keys_ordered_relative_to_node_keys<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     if node.is_leaf() {
         return;
@@ -1830,12 +1832,12 @@ fn assert_all_nodes_sized_correctly<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     fn correct_cell_count<PB, T>(node: &Node<PB, T, T>) -> bool
     where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
     {
         if node.is_leaf() {
             true
@@ -1850,7 +1852,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
         pager_info: &mut PagerInfo<PB, i32>,
     ) where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
@@ -1879,7 +1881,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
 fn assert_all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     fn leaf_levels<PB, T>(
         node: &Node<PB, T, T>,
@@ -1888,7 +1890,7 @@ where
     ) -> Vec<usize>
     where
         PB: PageBuffer,
-        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
     {
         if node.is_leaf() {
             return vec![level];
@@ -1909,7 +1911,7 @@ where
 fn assert_subtree_valid<PB, T>(node: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
-    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
+    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
 {
     assert_all_nodes_sized_correctly(node, pager_info);
     assert_tree_keys_fully_ordered(node);

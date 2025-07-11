@@ -355,7 +355,7 @@ mod tests {
     use std::fs::{self, OpenOptions};
 
     use page::PageBufferProd;
-    use serialize::{from_reader, to_bytes};
+    use serialize::{from_bytes, to_bytes};
 
     use super::*;
 
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(page.id(), page_id);
         let actual_bytes = page.get_cell_owned(0);
         let mut reader = &actual_bytes[..];
-        from_reader(&mut reader).unwrap()
+        from_bytes(&mut reader).unwrap()
     }
 
     fn open_test_file(name: &str) -> File {

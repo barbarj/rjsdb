@@ -3,7 +3,7 @@ pub mod error;
 pub mod ser;
 pub mod serialized_size;
 
-pub use de::{from_reader, Deserializer};
+pub use de::{from_bytes, Deserializer};
 pub use error::{Error, Result};
 pub use ser::{to_bytes, to_writer, Serializer};
 pub use serialized_size::serialized_size;
@@ -24,28 +24,28 @@ struct FooBar {
 mod tests {
     use std::fmt::Debug;
 
-    use serde::{Deserialize, Serialize};
+    use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-    use crate::{from_reader, serialized_size, to_bytes};
+    use crate::{from_bytes, serialized_size, to_bytes};
 
-    fn assert_value_serdes_correctly<'a, T>(input: T)
+    fn assert_value_serdes_correctly<T>(input: T)
     where
-        T: Serialize + Deserialize<'a> + PartialEq + Debug,
+        T: Serialize + DeserializeOwned + PartialEq + Debug,
     {
         let bytes = to_bytes(&input).unwrap();
-        let output: T = from_reader(&bytes[..]).unwrap();
+        let output: T = from_bytes(&bytes[..]).unwrap();
         assert_eq!(input, output);
     }
 
     fn assert_str_serdes_correctly(input: &str) {
         let bytes = to_bytes(&input).unwrap();
-        let output: String = from_reader(&bytes[..]).unwrap();
+        let output: String = from_bytes(&bytes[..]).unwrap();
         assert_eq!(input, &output);
     }
 
     fn assert_byte_slice_serdes_correctly(input: &[u8]) {
         let bytes = to_bytes(&input).unwrap();
-        let output: Vec<u8> = from_reader(&bytes[..]).unwrap();
+        let output: Vec<u8> = from_bytes(&bytes[..]).unwrap();
         assert_eq!(input, &output);
     }
 

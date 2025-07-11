@@ -1,6 +1,6 @@
 use core::slice;
 use serde::{Deserialize, Serialize};
-use serialize::{from_reader, to_writer, Error as SerdeError};
+use serialize::{from_bytes, to_writer, Error as SerdeError};
 use std::{
     fmt::Display,
     io::{Error as IoError, Write},
@@ -434,7 +434,7 @@ impl<PB: PageBuffer> Page<PB> {
 
             dest_end -= pointer.size;
         }
-        self.data.write_to_raw(0, &tmp_buffer.data())?;
+        self.data.write_to_raw(0, tmp_buffer.data())?;
         self.header.free_space_end = dest_end;
         self.header.flags.set_compactible(false);
         Ok(())
@@ -478,8 +478,8 @@ impl<PB: PageBuffer> Page<PB> {
         assert!(position < self.header.cell_count);
         let offset_start = (position * CELL_POINTER_SIZE) as usize;
         let offset_size = CELL_POINTER_SIZE as usize;
-        let mut pointer_slice = &self.data.data()[offset_start..offset_start + offset_size];
-        from_reader(&mut pointer_slice).unwrap()
+        let pointer_slice = &self.data.data()[offset_start..offset_start + offset_size];
+        from_bytes(pointer_slice).unwrap()
     }
 
     pub fn cell_size(&self, position: u16) -> u16 {
@@ -519,11 +519,11 @@ impl<PB: PageBuffer> Page<PB> {
 
 fn checksum(data: &[u8]) -> Result<u64, SerdeError> {
     assert!(data.len() % 8 == 0);
-    let mut reader = data;
     let mut sum = 0;
-    let chunks = data.len() / 8;
-    for _ in 0..chunks {
-        let v: u64 = from_reader(&mut reader)?;
+    let chunk_count = data.len() / 8;
+    for i in 0..chunk_count {
+        let offset = 8 * i;
+        let v: u64 = from_bytes(&data[offset..])?;
         sum += v;
     }
     Ok(sum)
@@ -608,9 +608,8 @@ mod tests {
     fn get_all_cells(page: &Page<PageBufferProd>) -> Vec<Vec<u32>> {
         let mut read_cells: Vec<Vec<u32>> = Vec::new();
         for idx in 0..page.header.cell_count {
-            let data = page.get_cell_owned(idx);
-            let mut reader = &data[..];
-            read_cells.push(from_reader(&mut reader).unwrap());
+            let bytes = page.cell_bytes(idx);
+            read_cells.push(from_bytes(bytes).unwrap());
         }
         read_cells
     }
@@ -983,7 +982,7 @@ mod tests {
         assert_eq!(page.cell_bytes_iter().count(), cells.len());
         let read_cells: Vec<Vec<u32>> = page
             .cell_bytes_iter()
-            .map(|bytes| from_reader(bytes).unwrap())
+            .map(|bytes| from_bytes(bytes).unwrap())
             .collect();
         assert_eq!(cells, read_cells);
     }

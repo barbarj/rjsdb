@@ -1,4 +1,4 @@
-use std::{fmt::Display, string::FromUtf8Error};
+use std::{fmt::Display, str::Utf8Error};
 
 use serde::{de, ser};
 
@@ -8,7 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Message(String),
     ExpectedBool,
-    ExpectedUtf8String(FromUtf8Error),
+    ExpectedUtf8String(Utf8Error),
     ExpectedChar,
     ExpectedOption,
 }
@@ -36,7 +36,7 @@ impl Display for Error {
             Self::ExpectedBool => f.write_str("Expected a boolean"),
             Self::ExpectedUtf8String(err) => f.write_str(&format!(
                 "Expected a valid utf8 string. The bytes were valid up to index: {}",
-                err.utf8_error().valid_up_to()
+                err.valid_up_to()
             )),
             Self::ExpectedChar => f.write_str("Expected a char"),
             Self::ExpectedOption => f.write_str("Expected an Option"),
