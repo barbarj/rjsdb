@@ -2,8 +2,8 @@ use std::io::Read;
 use std::str;
 
 use crate::error::{Error, Result};
-use serde::de;
-use serde::de::{DeserializeOwned, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
+use serde::de::{EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
+use serde::{de, Deserialize};
 
 pub struct Deserializer<'de> {
     bytes: &'de [u8],
@@ -17,7 +17,7 @@ impl<'de> Deserializer<'de> {
 
 pub fn from_bytes<'de, T>(bytes: &'de [u8]) -> Result<T>
 where
-    T: DeserializeOwned,
+    T: Deserialize<'de>,
 {
     let mut deserializer = Deserializer::from_bytes(bytes);
     T::deserialize(&mut deserializer)
@@ -287,7 +287,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_byte_buf(visitor)
+        visitor.visit_borrowed_bytes(self.parse_byte_slice()?)
     }
 
     fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>

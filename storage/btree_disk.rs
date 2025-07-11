@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    borrow::Cow,
     cell::RefCell,
     cmp::Ordering,
     fmt::{Debug, Display},
@@ -16,14 +17,14 @@ use std::iter::Peekable;
 use std::str::FromStr;
 
 use crate::pager::{
-    PageBuffer, PageBufferOffset, PageError, PageId, PageKind, PageRef, Pager, PagerError,
+    Page, PageBuffer, PageBufferOffset, PageError, PageId, PageKind, PageRef, Pager, PagerError,
     CELL_POINTER_SIZE,
 };
 
 #[cfg(test)]
 use itertools::Itertools;
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serialize::{from_bytes, serialized_size, to_bytes, Error as SerdeError};
 
 /// # Notes on Page Structure
@@ -72,8 +73,8 @@ pub struct BTree<Fd, PB, K, V>
 where
     Fd: AsRawFd + Copy,
     PB: PageBuffer,
-    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     pager_ref: Rc<RefCell<Pager<PB>>>,
     backing_fd: Fd,
@@ -85,8 +86,8 @@ impl<Fd, PB, K, V> BTree<Fd, PB, K, V>
 where
     Fd: AsRawFd + Copy,
     PB: PageBuffer,
-    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     pub fn init(pager_ref: Rc<RefCell<Pager<PB>>>, backing_fd: Fd) -> Result<Self> {
         let mut pager = pager_ref.borrow_mut();
@@ -233,8 +234,8 @@ impl<PB: PageBuffer, Fd: AsRawFd + Copy> PagerInfo<PB, Fd> {
 
     fn page_node<K, V>(&mut self, page_id: PageId) -> Result<Node<PB, K, V>>
     where
-        for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
-        for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+        K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+        V: Serialize + DeserializeOwned,
     {
         let page = self.get_page(page_id)?;
         Ok(Node::new(page))
@@ -261,8 +262,8 @@ pub struct BTreeIter<PB, Fd, K, V>
 where
     PB: PageBuffer,
     Fd: AsRawFd + Copy,
-    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     leaf: Node<PB, K, V>,
     logical_pos: u16,
@@ -273,8 +274,8 @@ impl<PB, Fd, K, V> BTreeIter<PB, Fd, K, V>
 where
     PB: PageBuffer,
     Fd: AsRawFd + Copy,
-    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     fn new(
         leftmost_leaf: Node<PB, K, V>,
@@ -295,8 +296,8 @@ impl<PB, Fd, K, V> Iterator for BTreeIter<PB, Fd, K, V>
 where
     PB: PageBuffer,
     Fd: AsRawFd + Copy,
-    for<'page_ref> K: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     type Item = Result<(K, V)>;
 
@@ -316,25 +317,26 @@ where
             };
             self.logical_pos = 0;
         }
-        let (key, val) = match self.leaf.leaf_kv_at_pos(self.logical_pos) {
-            Ok(kv) => kv,
+        let leaf_page = self.leaf.page_ref.borrow();
+        let (key, val) = match self.leaf.leaf_kv_at_pos(self.logical_pos, &leaf_page) {
+            Ok((k, v)) => (k, v),
             Err(err) => return Some(Err(err)),
         };
         match &self.max_key {
             KeyLimit::Exclusive(max) => {
-                if &key >= max {
+                if key.key.as_ref() >= max {
                     return None;
                 }
             }
             KeyLimit::Inclusive(max) => {
-                if &key > max {
+                if key.key.as_ref() > max {
                     return None;
                 }
             }
             KeyLimit::None => {}
         }
         self.logical_pos += 1;
-        Some(Ok((key, val)))
+        Some(Ok((key.key.into_owned(), val)))
     }
 }
 
@@ -347,17 +349,20 @@ enum InsertResult<K> {
 enum SplitDetermination {
     InsertLeft(u16),
     InsertRight(u16),
-    //InsertAfterSplitting(u16),
     DontInsert(u16),
 }
 
-// TODO: Convert the use of DeserializeOwned to a Deserialization of borrowed data (will need to
-// get serialization format to support borrowed data
+#[derive(Deserialize)]
+struct BorrowedKey<'a, K: Clone> {
+    #[serde(borrow)]
+    key: Cow<'a, K>,
+}
+
 struct Node<PB, K, V>
 where
     PB: PageBuffer,
-    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Serialize + Debug + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     page_ref: PageRef<PB>,
     _key: PhantomData<K>,
@@ -366,8 +371,8 @@ where
 impl<PB, K, V> Node<PB, K, V>
 where
     PB: PageBuffer,
-    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Debug + Serialize + DeserializeOwned + Clone,
+    V: Serialize + DeserializeOwned,
 {
     fn new(page_ref: PageRef<PB>) -> Self {
         Node {
@@ -450,11 +455,14 @@ where
         PB::buffer_size() - page.total_free_space()
     }
 
-    fn key_from_leaf(&self, logical_pos: u16) -> Result<K> {
+    fn key_from_leaf<'page>(
+        &self,
+        logical_pos: u16,
+        page: &'page Page<PB>,
+    ) -> Result<BorrowedKey<'page, K>> {
         assert!(self.is_leaf());
-        let page = self.page_ref.borrow();
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical_pos);
-        let (key, _): (K, V) = from_bytes(page.cell_bytes(pos))?;
+        let (key, _): (BorrowedKey<'page, K>, V) = from_bytes(page.cell_bytes(pos))?;
         Ok(key)
     }
 
@@ -466,9 +474,12 @@ where
         Ok(val)
     }
 
-    fn leaf_kv_at_pos(&self, logical: u16) -> Result<(K, V)> {
+    fn leaf_kv_at_pos<'page>(
+        &self,
+        logical: u16,
+        page: &'page Page<PB>,
+    ) -> Result<(BorrowedKey<'page, K>, V)> {
         assert!(self.is_leaf());
-        let page = self.page_ref.borrow();
         let pos = Self::logical_leaf_key_pos_to_physical_pos(logical);
         let kv = from_bytes(page.cell_bytes(pos))?;
         Ok(kv)
@@ -523,10 +534,13 @@ where
         id_pos * 2
     }
 
-    fn key_from_inner_node(&self, key_pos: u16) -> Result<K> {
+    fn key_from_inner_node<'page>(
+        &self,
+        key_pos: u16,
+        page: &'page Page<PB>,
+    ) -> Result<BorrowedKey<'page, K>> {
         assert!(self.is_node());
         let pos = Self::logical_node_key_pos_to_physical_pos(key_pos);
-        let page = self.page_ref.borrow();
         let key = from_bytes(page.cell_bytes(pos))?;
         Ok(key)
     }
@@ -539,11 +553,15 @@ where
         Ok(page_id)
     }
 
-    fn key_at_pos(&self, logical_pos: u16) -> Result<K> {
+    fn key_at_pos<'page>(
+        &self,
+        logical_pos: u16,
+        page: &'page Page<PB>,
+    ) -> Result<BorrowedKey<'page, K>> {
         if self.is_node() {
-            self.key_from_inner_node(logical_pos)
+            self.key_from_inner_node(logical_pos, page)
         } else {
-            self.key_from_leaf(logical_pos)
+            self.key_from_leaf(logical_pos, page)
         }
     }
 
@@ -553,10 +571,11 @@ where
         }
         let mut low = 0;
         let mut high = self.key_count() - 1;
+        let page = self.page_ref.borrow();
         while low < high {
             let mid = (low + high) / 2; // TODO: Rework to prevent overflow
-            let cell_key = self.key_at_pos(mid).unwrap();
-            match &cell_key.cmp(key) {
+            let cell_key = self.key_at_pos(mid, &page).unwrap();
+            match cell_key.key.as_ref().cmp(key) {
                 Ordering::Less => {
                     low = mid + 1;
                 }
@@ -564,8 +583,8 @@ where
                 Ordering::Greater => high = mid,
             }
         }
-        let cell_key = self.key_at_pos(low).unwrap();
-        match &cell_key.cmp(key) {
+        let cell_key = self.key_at_pos(low, &page).unwrap();
+        match cell_key.key.as_ref().cmp(key) {
             Ordering::Greater => Err(low),
             Ordering::Equal => Ok(low),
             Ordering::Less => Err(low + 1),
@@ -688,7 +707,8 @@ where
             }
 
             let this_key_used_space =
-                serialized_size(&self.key_at_pos(i)?) as u16 + CELL_POINTER_SIZE;
+                serialized_size(self.key_at_pos(i, &self.page_ref.borrow())?.key.as_ref()) as u16
+                    + CELL_POINTER_SIZE;
             let space_used_minus_this_key = self.page_used_space() - this_key_used_space;
             let size_goal = (space_used_minus_this_key + insertion_size) / 2;
             // determine if splitting here would put us at or past that page size goal
@@ -725,9 +745,13 @@ where
         // self.key_from_inner_node uses the logical key position amongst other keys, so convert to
         // that before asking for the key
         let (split_key, move_start_logical_pos, move_offset) = match split_determination {
-            SplitDetermination::InsertLeft(pos) | SplitDetermination::InsertRight(pos) => {
-                (self.key_from_inner_node(pos)?, pos + 1, 0)
-            }
+            SplitDetermination::InsertLeft(pos) | SplitDetermination::InsertRight(pos) => (
+                self.key_from_inner_node(pos, &self.page_ref.borrow())?
+                    .key
+                    .into_owned(),
+                pos + 1,
+                0,
+            ),
             SplitDetermination::DontInsert(pos) => (key_to_be_inserted.clone(), pos, 1),
         };
 
@@ -795,7 +819,10 @@ where
             .leaf_find_logical_position_meeting_size_goal(0, size_goal_fn)?
             .unwrap();
 
-        let split_key = self.key_from_leaf(split_key_pos)?;
+        let split_key = self
+            .key_from_leaf(split_key_pos, &self.page_ref.borrow())?
+            .key
+            .into_owned();
 
         // get new page
         let mut new_node = Self::init_leaf(pager_info)?;
@@ -912,7 +939,11 @@ where
     fn replace_inner_node_key(&mut self, logical_key_pos: u16, new_key: &K) -> Result<Option<K>> {
         assert!(logical_key_pos <= self.key_count());
         let old_key = if logical_key_pos < self.key_count() {
-            Some(self.key_from_inner_node(logical_key_pos)?)
+            Some(
+                self.key_from_inner_node(logical_key_pos, &self.page_ref.borrow())?
+                    .key
+                    .into_owned(),
+            )
         } else {
             None
         };
@@ -993,8 +1024,9 @@ where
         let right_child = self.descendent_node_at_logical_pos(left_child_pos + 1, pager_info)?;
 
         let fits = if left_child.is_node() {
-            let merge_key = self.key_at_pos(left_child_pos)?;
-            let key_size = serialized_size(&merge_key) as u16 + CELL_POINTER_SIZE;
+            let page = self.page_ref.borrow();
+            let merge_key = self.key_at_pos(left_child_pos, &page)?;
+            let key_size = serialized_size(&merge_key.key) as u16 + CELL_POINTER_SIZE;
             left_child.page_free_space() >= right_child.page_used_space() + key_size
         } else {
             left_child.page_free_space() >= right_child.page_used_space()
@@ -1035,8 +1067,9 @@ where
             // in the node case, we need to get the initial count because adding the split key will
             // mess up the calculation until the other cells are copied
             let initial_left_key_count = left_child.key_count();
-            let key = self.key_from_inner_node(left_child_pos)?;
-            left_child.insert_trailing_key(&key)?;
+            let page = self.page_ref.borrow();
+            let key = self.key_from_inner_node(left_child_pos, &page)?;
+            left_child.insert_trailing_key(&key.key)?;
             initial_left_key_count + 1
         } else {
             left_child.key_count()
@@ -1083,11 +1116,12 @@ where
     ) -> Result<Option<u16>> {
         assert!(self.is_leaf());
         let mut used_space = starting_size;
+        let page = self.page_ref.borrow();
         for i in 0..self.key_count() {
-            let (k, v) = self.leaf_kv_at_pos(i)?;
-            let increment = serialized_size(&(&k, &v)) as u16 + CELL_POINTER_SIZE;
+            let (k, v) = self.leaf_kv_at_pos(i, &page)?;
+            let increment = serialized_size(&(&k.key, &v)) as u16 + CELL_POINTER_SIZE;
             used_space += increment;
-            if used_space >= size_goal_fn(&k, &v) {
+            if used_space >= size_goal_fn(&k.key, &v) {
                 return Ok(Some(i));
             }
         }
@@ -1104,13 +1138,14 @@ where
 
         assert!(self.is_node());
         let mut used_space = starting_size;
+        let page = self.page_ref.borrow();
         for i in 0..self.key_count() {
             used_space += dummy_space_used;
-            let key = self.key_at_pos(i)?;
-            if used_space >= size_goal_fn(&key, i) {
+            let key = self.key_at_pos(i, &page)?;
+            if used_space >= size_goal_fn(&key.key, i) {
                 return Ok(Some(i));
             }
-            used_space += serialized_size(&key) as u16 + CELL_POINTER_SIZE;
+            used_space += serialized_size(&key.key) as u16 + CELL_POINTER_SIZE;
         }
         Ok(None)
     }
@@ -1135,11 +1170,15 @@ where
         let new_split_pos = left_child
             .leaf_find_logical_position_meeting_size_goal(0, |_, _| size_goal)?
             .expect("Should always have a value");
-        let new_split_key = left_child.key_at_pos(new_split_pos)?;
+
+        let left_page = left_child.page_ref.borrow();
+        let new_split_key = left_child.key_at_pos(new_split_pos, &left_page)?;
+        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key.key)?;
+        drop(left_page);
+
         let from_range = new_split_pos + 1..=left_child.key_count() - 1;
         Self::move_cells(&mut left_child, &mut right_child, from_range, 0)?;
 
-        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
         Ok(())
     }
 
@@ -1166,7 +1205,12 @@ where
                 |_, _| size_goal,
             )?
             .expect("Should always have a value");
-        let new_split_key = right_child.key_at_pos(new_split_pos)?;
+
+        let right_page = right_child.page_ref.borrow();
+        let new_split_key = right_child.key_at_pos(new_split_pos, &right_page)?;
+        self.replace_inner_node_key(left_child_logical_pos, &new_split_key.key)?;
+        drop(right_page);
+
         let from_range = 0..=new_split_pos;
         let left_child_key_count = left_child.key_count();
         Self::move_cells(
@@ -1176,7 +1220,6 @@ where
             left_child_key_count,
         )?;
 
-        self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
         Ok(())
     }
 
@@ -1187,7 +1230,8 @@ where
     ) -> Result<()> {
         assert!(right_child_logical_pos > 0);
 
-        let old_split_key = self.key_at_pos(right_child_logical_pos - 1)?;
+        let page = self.page_ref.borrow();
+        let old_split_key = self.key_at_pos(right_child_logical_pos - 1, &page)?;
 
         let mut left_child =
             self.descendent_node_at_logical_pos(right_child_logical_pos - 1, pager_info)?;
@@ -1197,7 +1241,7 @@ where
 
         let combined_size = left_child.page_used_space()
             + right_child.page_used_space()
-            + serialized_size(&old_split_key) as u16
+            + serialized_size(&old_split_key.key) as u16
             + CELL_POINTER_SIZE;
 
         let new_split_pos = left_child
@@ -1206,13 +1250,19 @@ where
                 (combined_size - key_space_used) / 2
             })?
             .expect("Should always have a value");
-        let new_split_key = left_child.key_at_pos(new_split_pos)?;
+
         let from_range = new_split_pos + 1..=left_child.key_count();
         Self::move_cells(&mut left_child, &mut right_child, from_range.clone(), 0)?;
 
         let key_insert_pos = from_range.len() - 1;
-        right_child.insert_interior_split_key(key_insert_pos as u16, &old_split_key)?;
-        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key)?;
+        right_child.insert_interior_split_key(key_insert_pos as u16, &old_split_key.key)?;
+        drop(page);
+
+        let left_page = left_child.page_ref.borrow();
+        let new_split_key = left_child.key_at_pos(new_split_pos, &left_page)?;
+        self.replace_inner_node_key(right_child_logical_pos - 1, &new_split_key.key)?;
+        drop(left_page);
+
         left_child.remove_trailing_key(new_split_pos);
         Ok(())
     }
@@ -1224,7 +1274,8 @@ where
     ) -> Result<()> {
         assert!(left_child_logical_pos < self.descendent_count() - 1);
 
-        let old_split_key = self.key_at_pos(left_child_logical_pos)?;
+        let page = self.page_ref.borrow();
+        let old_split_key = self.key_at_pos(left_child_logical_pos, &page)?;
 
         let mut left_child =
             self.descendent_node_at_logical_pos(left_child_logical_pos, pager_info)?;
@@ -1234,11 +1285,11 @@ where
 
         let combined_size = left_child.page_used_space()
             + right_child.page_used_space()
-            + serialized_size(&old_split_key) as u16
+            + serialized_size(&old_split_key.key) as u16
             + CELL_POINTER_SIZE;
 
         let starting_size = left_child.page_used_space()
-            + serialized_size(&old_split_key) as u16
+            + serialized_size(&old_split_key.key) as u16
             + CELL_POINTER_SIZE;
         let new_split_pos = right_child
             .node_find_logical_position_meeting_size_goal(starting_size, |key: &K, _: u16| {
@@ -1246,10 +1297,18 @@ where
                 (combined_size - key_space_used) / 2
             })?
             .expect("Should always have a value");
-        let new_split_key = right_child.key_at_pos(new_split_pos)?;
+
+        let right_page = right_child.page_ref.borrow();
+        let new_split_key = right_child.key_at_pos(new_split_pos, &right_page)?;
+
         let from_range = 0..=new_split_pos;
         let left_child_key_count = left_child.key_count();
-        left_child.insert_interior_split_key(left_child_key_count, &old_split_key)?;
+        left_child.insert_interior_split_key(left_child_key_count, &old_split_key.key)?;
+        drop(page);
+
+        self.replace_inner_node_key(left_child_logical_pos, &new_split_key.key)?;
+        drop(right_page);
+
         Self::move_cells(
             &mut right_child,
             &mut left_child,
@@ -1258,7 +1317,6 @@ where
         )?;
         right_child.remove_leading_key();
 
-        self.replace_inner_node_key(left_child_logical_pos, &new_split_key)?;
         Ok(())
     }
 
@@ -1386,7 +1444,7 @@ impl PageBuffer for TestPageBuffer {
 #[cfg(test)]
 impl<PB: PageBuffer, T> BTree<i32, PB, T, T>
 where
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + FromStr + Clone,
+    T: Ord + Serialize + Debug + FromStr + Clone + DeserializeOwned,
 {
     /*
      * An example description looks something like this:
@@ -1424,7 +1482,7 @@ where
 
         // init root page
         let first_line = lines.next().unwrap();
-        let root: Node<TestPageBuffer, u32, u32> = match first_line.is_leaf {
+        let root: Node<TestPageBuffer, T, T> = match first_line.is_leaf {
             true => Node::init_leaf(&mut pager_info).unwrap(),
             false => Node::init_node(&mut pager_info).unwrap(),
         };
@@ -1449,7 +1507,7 @@ where
 #[cfg(test)]
 impl<PB: PageBuffer, T> BTree<i32, PB, T, T>
 where
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     fn to_description(&self) -> String {
         let mut pager_info = self.pager_info();
@@ -1492,18 +1550,20 @@ where
 impl<PB, K, V> Node<PB, K, V>
 where
     PB: PageBuffer,
-    for<'page_ref> K: Ord + Debug + Serialize + Deserialize<'page_ref> + Clone,
-    for<'page_ref> V: Serialize + Deserialize<'page_ref>,
+    K: Ord + Debug + Serialize + Clone + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
 {
     #[allow(dead_code)]
     fn keys(&self) -> Vec<K> {
         if self.is_leaf() {
+            let page = self.page_ref.borrow();
             (0..self.key_count())
-                .map(|i| self.key_from_leaf(i).unwrap())
+                .map(|i| self.key_from_leaf(i, &page).unwrap().key.into_owned())
                 .collect()
         } else {
+            let page = self.page_ref.borrow();
             (0..self.key_count())
-                .map(|i| self.key_from_inner_node(i).unwrap())
+                .map(|i| self.key_from_inner_node(i, &page).unwrap().key.into_owned())
                 .collect()
         }
     }
@@ -1550,7 +1610,7 @@ where
 #[cfg(test)]
 impl<T> Node<TestPageBuffer, T, T>
 where
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + FromStr + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone,
 {
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine<T>>>(
         pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
@@ -1750,7 +1810,7 @@ impl<T: Debug> Display for DescriptionLine<T> {
 fn assert_tree_keys_fully_ordered<PB, T>(root: &Node<PB, T, T>)
 where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     let keys = root.keys();
     let mut sorted_keys = keys.clone();
@@ -1764,7 +1824,7 @@ fn assert_all_node_keys_ordered_and_deduped<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     let mut sorted_keys = node.keys();
     sorted_keys.sort();
@@ -1783,7 +1843,7 @@ fn assert_all_keys_in_range<PB, T>(
     max_inclusive: Option<&T>,
 ) where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     let res = match (min_exclusive, max_inclusive) {
         (Some(min), Some(max)) => node.keys().iter().all(|k| k > min && k <= max),
@@ -1800,7 +1860,7 @@ fn assert_all_subnode_keys_ordered_relative_to_node_keys<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     if node.is_leaf() {
         return;
@@ -1832,12 +1892,12 @@ fn assert_all_nodes_sized_correctly<PB, T>(
     pager_info: &mut PagerInfo<PB, i32>,
 ) where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     fn correct_cell_count<PB, T>(node: &Node<PB, T, T>) -> bool
     where
         PB: PageBuffer,
-        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         if node.is_leaf() {
             true
@@ -1852,7 +1912,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
         pager_info: &mut PagerInfo<PB, i32>,
     ) where
         PB: PageBuffer,
-        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         let third_size = TestPageBuffer::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
@@ -1881,7 +1941,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
 fn assert_all_leaves_same_level<PB, T>(root: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     fn leaf_levels<PB, T>(
         node: &Node<PB, T, T>,
@@ -1890,7 +1950,7 @@ where
     ) -> Vec<usize>
     where
         PB: PageBuffer,
-        for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+        T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
         if node.is_leaf() {
             return vec![level];
@@ -1911,7 +1971,7 @@ where
 fn assert_subtree_valid<PB, T>(node: &Node<PB, T, T>, pager_info: &mut PagerInfo<PB, i32>)
 where
     PB: PageBuffer,
-    for<'page_ref> T: Ord + Serialize + Deserialize<'page_ref> + Debug + Clone,
+    T: Ord + Serialize + DeserializeOwned + Debug + Clone,
 {
     assert_all_nodes_sized_correctly(node, pager_info);
     assert_tree_keys_fully_ordered(node);
