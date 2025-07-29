@@ -278,7 +278,7 @@ impl<PB: PageBuffer> Page<PB> {
     }
 
     pub fn can_fit_data(&self, size: u16) -> bool {
-        size + CELL_POINTER_SIZE <= self.total_free_space()
+        size <= self.total_free_space()
     }
 
     pub fn kind(&self) -> PageKind {

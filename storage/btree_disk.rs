@@ -808,6 +808,7 @@ where
         value: V,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<(K, Node<PB, K, V>)> {
+        println!("splitting leaf");
         let insertion_size = serialized_size(&(&key, &value)) as u16 + CELL_POINTER_SIZE;
         let size_goal_fn = |this_key: &K, _: &V| match key.cmp(this_key) {
             Ordering::Less => (self.leaf_space_used_ignoring_siblings() - insertion_size) / 2,
@@ -834,6 +835,7 @@ where
 
         // copy cells to new page and remove cells from old page
         let key_count = self.key_count();
+        println!("move range: {:?}", split_key_pos + 1..=key_count - 1);
         Self::move_cells(self, &mut new_node, split_key_pos + 1..=key_count - 1, 0)?;
 
         if key > split_key {
@@ -990,6 +992,7 @@ where
         value: V,
         pager_info: &mut PagerInfo<PB, Fd>,
     ) -> Result<InsertResult<K>> {
+        println!("inserting {key:?}");
         if self.is_leaf() {
             self.insert_as_leaf(key, value, pager_info)
         } else {
@@ -1411,14 +1414,15 @@ where
 
 #[cfg(test)]
 /// This size allows for nodes with 5 keys and leaves with 7
-/// - The min size for leaves is 2, and nodes is
+/// - The min size for leaves is 2, and nodes is 2
+/// - This is the smallest buffer size we can write straitforward manual tests for
 const TEST_BUFFER_SIZE: u16 = 112;
 #[cfg(test)]
-pub struct TestPageBuffer {
+pub struct SmallBuffer {
     data: [u8; TEST_BUFFER_SIZE as usize],
 }
 #[cfg(test)]
-impl PageBuffer for TestPageBuffer {
+impl PageBuffer for SmallBuffer {
     fn new() -> Self
     where
         Self: Sized,
@@ -1430,6 +1434,37 @@ impl PageBuffer for TestPageBuffer {
 
     fn buffer_size() -> u16 {
         TEST_BUFFER_SIZE
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+#[cfg(test)]
+// This is the smallest size you can construct a btree with when using u32 keys and u32 values
+const SMALLEST_BUFFER_SIZE: u16 = 36;
+#[cfg(test)]
+pub struct SmallestBuffer {
+    data: [u8; SMALLEST_BUFFER_SIZE as usize],
+}
+#[cfg(test)]
+impl PageBuffer for SmallestBuffer {
+    fn new() -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            data: [0; SMALLEST_BUFFER_SIZE as usize],
+        }
+    }
+
+    fn buffer_size() -> u16 {
+        SMALLEST_BUFFER_SIZE
     }
 
     fn data(&self) -> &[u8] {
@@ -1465,9 +1500,9 @@ where
         */
     pub fn from_description(
         description: &str,
-        pager_ref: Rc<RefCell<Pager<TestPageBuffer>>>,
+        pager_ref: Rc<RefCell<Pager<SmallBuffer>>>,
         backing_fd: i32,
-    ) -> BTree<i32, TestPageBuffer, T, T> {
+    ) -> BTree<i32, SmallBuffer, T, T> {
         let mut lines = description
             .trim()
             .split('\n')
@@ -1482,7 +1517,7 @@ where
 
         // init root page
         let first_line = lines.next().unwrap();
-        let root: Node<TestPageBuffer, T, T> = match first_line.is_leaf {
+        let root: Node<SmallBuffer, T, T> = match first_line.is_leaf {
             true => Node::init_leaf(&mut pager_info).unwrap(),
             false => Node::init_node(&mut pager_info).unwrap(),
         };
@@ -1608,12 +1643,12 @@ where
 }
 
 #[cfg(test)]
-impl<T> Node<TestPageBuffer, T, T>
+impl<T> Node<SmallBuffer, T, T>
 where
     T: Ord + Serialize + DeserializeOwned + Debug + FromStr + Clone,
 {
     fn from_description_lines<Fd: AsRawFd + Copy, I: Iterator<Item = DescriptionLine<T>>>(
-        pager_info: &mut PagerInfo<TestPageBuffer, Fd>,
+        pager_info: &mut PagerInfo<SmallBuffer, Fd>,
         this_node_line: DescriptionLine<T>,
         lines: &mut Peekable<I>,
         this_page_id: PageId,
@@ -1914,7 +1949,7 @@ fn assert_all_nodes_sized_correctly<PB, T>(
         PB: PageBuffer,
         T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
-        let third_size = TestPageBuffer::buffer_size() / 3;
+        let third_size = PB::buffer_size() / 3;
         let meets_minimum_size = node.page_used_space() >= third_size;
         //        println!("minimum_size: {third_size}");
         //       println!("actual size: {}", node.page_used_space());
@@ -2005,7 +2040,7 @@ mod tests {
 
     use crate::pager::{PageBuffer, PageId, Pager, CELL_POINTER_SIZE};
 
-    use super::{BTree, KeyLimit, TestPageBuffer};
+    use super::{BTree, KeyLimit, SmallBuffer, SmallestBuffer};
 
     fn trim_lines(s: &str) -> String {
         s.trim().lines().map(|l| l.trim()).join("\n")
@@ -2024,15 +2059,15 @@ mod tests {
     fn init_tree_from_description_in_file(
         filename: &str,
         description: &str,
-    ) -> BTree<i32, TestPageBuffer, u32, u32> {
+    ) -> BTree<i32, SmallBuffer, u32, u32> {
         let file = open_file(filename);
         let backing_fd = file.as_raw_fd();
         let pager_ref = Rc::new(RefCell::new(Pager::new(vec![file])));
 
-        BTree::<i32, TestPageBuffer, u32, u32>::from_description(description, pager_ref, backing_fd)
+        BTree::<i32, SmallBuffer, u32, u32>::from_description(description, pager_ref, backing_fd)
     }
 
-    fn init_tree_in_file<T>(filename: &str) -> BTree<i32, TestPageBuffer, T, T>
+    fn init_tree_in_file<PB: PageBuffer, T>(filename: &str) -> BTree<i32, PB, T, T>
     where
         T: Ord + Serialize + DeserializeOwned + Debug + Clone,
     {
@@ -2138,7 +2173,7 @@ mod tests {
     fn binary_search_keys_empty() {
         let filename = "binary_search_keys_empty.test";
 
-        let tree = init_tree_in_file(filename);
+        let tree: BTree<i32, SmallBuffer, _, _> = init_tree_in_file(filename);
 
         assert!(matches!(tree.root.binary_search_keys(&42), Err(0)));
 
@@ -2225,7 +2260,7 @@ mod tests {
         let expected_tree = "0: L[1]";
         let expected_tree = trim_lines(expected_tree);
 
-        let mut tree = init_tree_in_file(filename);
+        let mut tree: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
         tree.insert(1, 1).unwrap();
 
         assert_eq!(&tree.to_description(), &expected_tree);
@@ -2243,7 +2278,7 @@ mod tests {
         ";
         let expected_tree = trim_lines(expected_tree);
 
-        let mut tree = init_tree_in_file(filename);
+        let mut tree: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
 
         for i in 1..=5 {
             tree.insert(i, i).unwrap();
@@ -2264,7 +2299,7 @@ mod tests {
         ";
         let expected_tree = trim_lines(expected_tree);
 
-        let mut tree = init_tree_in_file(filename);
+        let mut tree: BTree<i32, SmallBuffer, i64, i64> = init_tree_in_file(filename);
 
         tree.insert(1i64, 1i64).unwrap();
         //for i in 1i64..=4 {
@@ -2288,7 +2323,7 @@ mod tests {
         ";
         let expected_tree = trim_lines(expected_tree);
 
-        let mut tree = init_tree_in_file(filename);
+        let mut tree: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
 
         for i in 1..=8 {
             tree.insert(i, i).unwrap();
@@ -3011,7 +3046,7 @@ mod tests {
     #[test]
     fn basic_iter_test() {
         let filename = "basic_iter_test.test";
-        let mut t = init_tree_in_file(filename);
+        let mut t: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
 
         let mut expected = Vec::new();
         for i in 0..=50 {
@@ -3033,7 +3068,7 @@ mod tests {
     #[test]
     fn iter_test_inclusive_limits() {
         let filename = "iter_test_inclusive_limits.test";
-        let mut t = init_tree_in_file(filename);
+        let mut t: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
 
         let mut expected = Vec::new();
         for i in 0..=50 {
@@ -3056,7 +3091,7 @@ mod tests {
     #[test]
     fn iter_test_exclusive_limits() {
         let filename = "iter_test_exclusive_limits.test";
-        let mut t = init_tree_in_file(filename);
+        let mut t: BTree<i32, SmallBuffer, u32, u32> = init_tree_in_file(filename);
 
         let mut expected = Vec::new();
         for i in 0..=50 {
@@ -3239,19 +3274,23 @@ mod tests {
 
     prop_state_machine! {
         #![proptest_config(ProptestConfig {
-             // When debugging, enable verbose mode to make the state machine test print the
-             // transitions for each case.
-             verbose: 1,
-             max_shrink_iters: 8192,
-             cases: 1024,
-             .. ProptestConfig::default()
-         })]
+            // When debugging, enable verbose mode to make the state machine test print the
+            // transitions for each case.
+            verbose: 1,
+            max_shrink_iters: 8192,
+            cases: 1024,
+            .. ProptestConfig::default()
+        })]
 
-         #[test] #[ignore] // expensive test
-         fn full_tree_test_u32(sequential 1..1024 => BTree<i32, TestPageBuffer, u32, u32>);
+        #[test] #[ignore] // expensive test
+        fn full_tree_test_u32(sequential 1..1024 => BTree<i32, SmallBuffer, u32, u32>);
 
-         #[test] #[ignore]
-         fn full_tree_test_i64(sequential 1..512=> BTree<i32, TestPageBuffer, i64, i64>);
+        // TODO: Change this to do 1024 steps
+        #[test] #[ignore]
+        fn full_tree_test_i64(sequential 1..512 => BTree<i32, SmallBuffer, i64, i64>);
+
+        #[test] #[ignore]
+        fn smallest_buffer_tree_u32(sequential 1..3 => BTree<i32, SmallestBuffer, u32, u32>);
     }
 
     #[test]
@@ -3288,9 +3327,9 @@ mod tests {
         ";
         let input = trim_lines(input);
 
-        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+        let mut t: BTree<i32, SmallBuffer, u32, u32> =
             init_tree_from_description_in_file(filename, &input);
-        t.insert(7, 0).unwrap();
+        t.insert(8, 0).unwrap();
 
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
@@ -3311,7 +3350,7 @@ mod tests {
         ";
         let input = trim_lines(input);
 
-        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+        let mut t: BTree<i32, SmallBuffer, u32, u32> =
             init_tree_from_description_in_file(filename, &input);
         t.insert(12, 0).unwrap();
 
@@ -3334,10 +3373,36 @@ mod tests {
         ";
         let input = trim_lines(input);
 
-        let mut t: BTree<i32, TestPageBuffer, u32, u32> =
+        let mut t: BTree<i32, SmallBuffer, u32, u32> =
             init_tree_from_description_in_file(filename, &input);
         t.insert(18, 18).unwrap();
 
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn smallest_buffer_u32_insert() {
+        let filename = "smallest_buffer_u32_insert.test";
+        let mut t: BTree<i32, SmallestBuffer, u32, u32> = init_tree_in_file(filename);
+
+        t.insert(0, 0).unwrap();
+        assert_subtree_valid(&t.root, &mut t.pager_info());
+
+        drop(t);
+        fs::remove_file(filename).unwrap();
+    }
+
+    #[test]
+    fn failing_test_case_5() {
+        let filename = "failing_test_case_5.test";
+        let mut t: BTree<i32, SmallestBuffer, u32, u32> = init_tree_in_file(filename);
+
+        t.insert(1, 1).unwrap();
+        t.insert(0, 0).unwrap();
+        println!("finished inserting");
         assert_subtree_valid(&t.root, &mut t.pager_info());
 
         drop(t);
